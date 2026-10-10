@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.convivy.alerts</string>
+
+  <!-- Seed site/alerts.html (epic issue_01M0EHRNW5HVJCAXZHYQCBZ3YW) — the static
+       fallback /alerts reads on a live-render throw. alerts_build.gather() reads
+       exactly three sources' own persisted snapshots (see its own code, not this
+       comment, if the two ever disagree): code_health_build (com.convivy.code-
+       health, 07:45), dashboard_build's Spending snapshot — NOT written by
+       com.convivy.orient-dashboard (that job only reads the snapshot to render
+       site/spending.html; the snapshot itself comes from the external
+       agent-platform's agent-cost-report-refresh job, on the :05/:20/:35/:50 quarter-hours
+       all day) — and kb_build (com.convivy.kb-observability, 07:48). Security
+       and Warrant are NOT read — alerts_build.py's own module docstring says
+       why. Fires at 07:55, after all three real dependencies (Spending's :50
+       refresh always precedes it). The running orient server reads the file
+       per request, so no restart needed here either. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/python3.11</string>
+    <string>__HOME__/Convivy/convivy-orient/alerts_build.py</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>HOME</key>
+    <string>__HOME__</string>
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>__HOME__/Convivy/convivy-orient</string>
+
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>7</integer>
+    <key>Minute</key>
+    <integer>55</integer>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/Convivy/agent-runs/alerts.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Convivy/agent-runs/alerts.err.log</string>
+</dict>
+</plist>

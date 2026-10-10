@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.convivy.orient</string>
+
+  <!-- Deploy-area cutover (ADR-0059, platform/decisions/0059, bin/install-orient):
+       this plist previously execed __HOME__/Convivy/convivy-orient/serve.sh —
+       the development checkout — and any restart, including an unattended
+       KeepAlive crash-restart, loaded whatever was checked out there. It now
+       execs the deploy area bin/install-orient copies serve.sh and a pinned
+       venv into.
+
+       ORIENT_CONFIG_ROOT / ORIENT_STATE_ROOT below are the one thing this plist
+       does NOT point at the deploy area: they hold the five credential files
+       and the site/access.log state respectively (ADR-0059 rule 3), and both
+       are pinned at the primary development checkout, where they already live
+       and where they stay — an install must never copy or overwrite them.
+       Whoever can edit this versioned, reviewed plist already has the
+       filesystem access needed to edit those files directly, so this does not
+       widen who can reach them; it moves who names the value from "whoever
+       last hand-edited the live plist" to "whatever this file, reviewed and
+       merged, says". -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>__HOME__/.local/deploy/convivy-orient/serve.sh</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key>
+    <string>__HOME__</string>
+    <key>ORIENT_CONFIG_ROOT</key>
+    <string>__HOME__/Convivy/convivy-orient</string>
+    <key>ORIENT_STATE_ROOT</key>
+    <string>__HOME__/Convivy/convivy-orient</string>
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>__HOME__/.local/deploy/convivy-orient</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/Convivy/convivy-orient/serve.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Convivy/convivy-orient/serve.log</string>
+</dict>
+</plist>

@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.convivy.code-health</string>
+
+  <!-- Harvest per-repo code-health (gh + git + grep) → site/health.html. The
+       running orient server reads the file per request, so no restart. Fires at
+       07:45, after the scorecards (07:30/07:35) and dashboard (07:40). Heavier
+       than the others (gh across 7 repos) — kept off serve.sh to not slow restarts.
+
+       Deploy-area cutover (ADR-0059, bin/install-orient): this used to exec
+       the SYSTEM /opt/homebrew/bin/python3.11 against a checkout script — a
+       live rule-4 divergence from serve.sh's own venv. It now runs the deploy
+       area's own pinned venv against the deploy area's own copy of this
+       script, same interpreter serve.sh uses. ORIENT_CONFIG_ROOT/STATE_ROOT
+       pinned to the primary checkout, same as every other job (rule 3). -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>__HOME__/.local/deploy/convivy-orient/.venv/bin/python</string>
+    <string>__HOME__/.local/deploy/convivy-orient/code_health_build.py</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>HOME</key>
+    <string>__HOME__</string>
+    <key>ORIENT_CONFIG_ROOT</key>
+    <string>__HOME__/Convivy/convivy-orient</string>
+    <key>ORIENT_STATE_ROOT</key>
+    <string>__HOME__/Convivy/convivy-orient</string>
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>__HOME__/.local/deploy/convivy-orient</string>
+
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>7</integer>
+    <key>Minute</key>
+    <integer>45</integer>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/Convivy/agent-runs/code-health.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Convivy/agent-runs/code-health.err.log</string>
+</dict>
+</plist>

@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.convivy.orient-github-capture</string>
+
+  <!-- Incremental GitHub review capture (S1, ARCH-349): every 15 minutes, walk
+       each org repo since its cursor and POST new review verdicts / review
+       comments / PR + issue comments to /api/signals. The cursor
+       (~/.orient-control/github-capture.cursor.json) advances only for repos
+       with zero errors, and every POST carries a dedup_key, so a failed or
+       overlapping run re-covers safely. Auth: the capture token file
+       (~/.orient-control/capture-token, 0600); GitHub via the gh CLI on PATH.
+       Exits 1 when any repo errored, so failures show in the err log.
+
+       Deploy-area cutover (ADR-0059, bin/install-orient): this used to exec
+       the shared ~/.local/venv-orient against a checkout script — a deployed
+       interpreter reading checkout code is the same defect wearing a better
+       path. It now runs the deploy area's own pinned venv against the deploy
+       area's own copy of this script. ORIENT_CONFIG_ROOT/STATE_ROOT pinned to
+       the primary checkout, same as every other job (rule 3) — this job's
+       cursor and capture-token files live under ~/.orient-control, untouched
+       by either root. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>__HOME__/.local/deploy/convivy-orient/.venv/bin/python</string>
+    <string>__HOME__/.local/deploy/convivy-orient/github_capture.py</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- gh lives in /opt/homebrew/bin — launchd's default PATH lacks it -->
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>HOME</key>
+    <string>__HOME__</string>
+    <key>ORIENT_CONFIG_ROOT</key>
+    <string>__HOME__/Convivy/convivy-orient</string>
+    <key>ORIENT_STATE_ROOT</key>
+    <string>__HOME__/Convivy/convivy-orient</string>
+    <!-- Explicit pin matching the deployed default (vault_plane.py: unset also
+         means the Library) — writes land in the Library, not Orient's retired
+         copy. issue_01M08YADC32YYE5S0K2N033AES: this repo copy had drifted
+         from what launchd actually runs. -->
+    <key>VAULTS_ON_LIBRARY</key>
+    <string>1</string>
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>__HOME__/.local/deploy/convivy-orient</string>
+
+  <key>StartInterval</key>
+  <integer>900</integer>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/Convivy/agent-runs/orient-github-capture.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Convivy/agent-runs/orient-github-capture.err.log</string>
+</dict>
+</plist>

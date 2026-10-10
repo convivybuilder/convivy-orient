@@ -1,0 +1,330 @@
+#!/bin/sh
+# install-orient — deploy-pin Orient's seven launchd jobs (platform/decisions/0059).
+#
+# WHY. All seven of com.convivy.orient's launchd jobs set WorkingDirectory to
+# the development checkout, and three of them (the capture jobs) additionally
+# passed a checkout script to a deployed interpreter — a deployed interpreter
+# reading checkout code is the same defect wearing a better path. Whatever was
+# checked out there was what ran, including an unmerged branch, on every
+# restart — including an unattended KeepAlive crash-restart of the main
+# server. This mirrors bin/install-library (2026-08-30), the first service
+# this ADR moved, adapted for Orient's wider surface: seven jobs sharing one
+# checkout instead of one, and a config/state split (paths.py, PR #233) this
+# script must route around rather than create.
+#
+# WHAT THIS DOES, per ADR-0059 rules 1, 2, 3, 4, 6, 7, 8:
+#   1. Reads a git REF (default main), never the live working tree, via
+#      `git archive` — a `cp`/`rsync` of the checkout would ignore .gitignore
+#      and sweep Orient's five credential files into the deploy area (rule 7).
+#      All five are gitignored (issue_01M2RVJK4DDNJSGK5Y2AETKB43), so
+#      `git archive` never sees them.
+#   2. Extracts a COPY of the whole tracked tree at that commit into
+#      ~/.local/deploy/convivy-orient/ (rule 2: copies, not symlinks).
+#   3. Builds a fresh venv INSIDE that same deploy area from the exported
+#      requirements.txt (rule 4) — replacing the shared ~/.local/venv-orient
+#      every job used before this, and closing a divergence that predates
+#      this migration: the three periodic builder jobs (dashboard, code-health,
+#      kb-observability) execed the SYSTEM python3.11 rather than any venv at
+#      all, while serve.sh's own comment asserted "no fallback to system
+#      python" as an invariant only ITS OWN daemon actually held.
+#   4. Runs the deployed serve.sh's own `--check` against the staged build,
+#      BEFORE the swap, with ORIENT_CONFIG_ROOT/ORIENT_STATE_ROOT set to the
+#      same primary checkout the installed plists pin (see below) — so this
+#      exercises the exact interpreter, import set, and config/state roots
+#      the real service will run under, not just "does something exist at
+#      $STAGE".
+#   5. Copies (never symlinks) all seven plist templates out of the repo into
+#      ~/Library/LaunchAgents/, refusing to clobber a live plist that has
+#      drifted from the template unless --force is given (rule 8).
+#
+# Never touches ~/Convivy/convivy-orient itself except to READ it as the git
+# source (rule 7) — the five credential files (tiers.json, jwt.json,
+# api-tokens.json, roles.json, concierge.json), the built site/ bundle, and
+# access.log all stay exactly where they are in that checkout. This is
+# deliberate, not an
+# oversight: platform/decisions/0059 requires config/state to live in their
+# own area, read by absolute path, and never be written by an install — the
+# simplest area satisfying that for Orient today is the primary checkout
+# itself, since paths.py already defaults CONFIG_ROOT/STATE_ROOT there and an
+# install that left them there needs no new directory and no data migration.
+# Every plist this script installs pins ORIENT_CONFIG_ROOT and
+# ORIENT_STATE_ROOT to that same absolute path explicitly (never left to
+# default), so a service running from the deploy area still resolves both
+# roots to the checkout rather than to itself. This script's own `--check`
+# step below points at $REPO for the same reason: for a canonical install
+# (no --repo override) $REPO IS that checkout, so the check exercises the
+# same roots the installed plists declare.
+#
+# WHO SETS ORIENT_CONFIG_ROOT AND ORIENT_STATE_ROOT, AND WHY THAT IS THE RIGHT
+# HOLDER (carried forward from the #233 security review): before this script
+# existed, nothing set either variable, so whoever COULD set it for a launchd
+# job already had the filesystem access to edit the five credential files
+# directly — setting the variable was not a new privilege. This script is the
+# first thing other than a person to set it, and what it writes is a path
+# fixed in a versioned plist template, reviewed through this same PR, under
+# the installing account's own home: the templates write that home as
+# __HOME__ and the copy below fills in $HOME, which must be a plain absolute
+# path or the install stops. Editing the rest of the path requires the same
+# repo-write access as editing tiers.json directly, so the trust boundary
+# carried forward unchanged.
+#
+# Does NOT touch com.convivy.orient-deploy-watch.plist's target: its own
+# comment in the repo says why (ADR-0059 leaves the deploy-watch mechanism's
+# future to the Bosun crew, and this PR's body says the same). It is still
+# one of the seven copied out below, unchanged, because rule 8 (the plist
+# itself must not live inside a checkout) applies to it exactly like the
+# other six even though rules 1 and 4 do not yet.
+#
+# Idempotent and re-run-safe: each run stages a full new deploy area and
+# swaps it in atomically (old directory renamed aside, new one moved into
+# place, old one removed) — never a partial mix of two commits' files, and a
+# staged build that fails its own --check is discarded before the swap ever
+# runs, leaving whatever was already deployed untouched.
+#
+# Does NOT load, unload, or kickstart any of the seven jobs, and does not
+# start, stop, or restart the live server. Cutting any of the seven jobs over
+# to what this script stages is a separate, deliberate act, coordinated
+# through the steward per the epic — this script's job ends at "staged and
+# ready".
+set -eu
+
+usage() {
+  cat >&2 <<'EOF'
+usage: install-orient [--ref=<git-ref>] [--repo=<path>]
+                       [--allow-non-main] [--force] [--status]
+                       [--python=<path>]
+
+  --ref=<git-ref>     Ref to install from (default: main).
+  --repo=<path>       Checkout to read the ref from (default: this script's
+                       own repo — resolved from argv[0], not the caller's cwd).
+                       Also the value this run exports as ORIENT_CONFIG_ROOT /
+                       ORIENT_STATE_ROOT while running the staged serve.sh's
+                       --check, matching what a canonical install's plists pin.
+  --allow-non-main    Required to install anything other than main (rule 6:
+                       the deploy area is installed from main).
+  --force             Overwrite a live plist that differs from its template.
+  --status            Print what commit is currently deployed and exit.
+  --python=<path>     Interpreter to build the staged venv with, instead of
+                       the hardcoded macOS/Homebrew python3.11 search below.
+                       Selects only which interpreter BUILDS the venv — the
+                       staged build still has to pass serve.sh's own --check
+                       (rule 4) before it can go live, unchanged by this.
+EOF
+  exit 2
+}
+
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+REF="main"
+ALLOW_NON_MAIN=0
+PLIST_FORCE=0
+STATUS_ONLY=0
+PYTHON_OVERRIDE=""
+
+for arg in "$@"; do
+  case "$arg" in
+    --ref=*) REF="${arg#--ref=}" ;;
+    --repo=*) REPO="${arg#--repo=}" ;;
+    --allow-non-main) ALLOW_NON_MAIN=1 ;;
+    --force) PLIST_FORCE=1 ;;
+    --status) STATUS_ONLY=1 ;;
+    --python=*) PYTHON_OVERRIDE="${arg#--python=}" ;;
+    -h|--help) usage ;;
+    *) echo "install-orient: unknown option: $arg" >&2; usage ;;
+  esac
+done
+
+# The templates write the installing account's home as __HOME__, so no one
+# person's home is baked into the repository. $HOME goes into a sed
+# replacement, so it must be a plain absolute path, checked before anything
+# is built or written.
+case "$HOME" in
+  /*) ;;
+  *) echo "install-orient: HOME is not an absolute path: $HOME" >&2; exit 1 ;;
+esac
+case "$HOME" in
+  *[!A-Za-z0-9._/-]*) echo "install-orient: HOME has characters a plist path cannot carry here: $HOME" >&2; exit 1 ;;
+esac
+
+DEPLOY_DIR="$HOME/.local/deploy/convivy-orient"
+LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
+# All seven jobs (ADR-0059's Orient measurement, epic issue_01M19RSV6PNDR562PHXTDD80E5).
+# com.convivy.orient-deploy-watch.plist is included — rule 8 binds its plist's
+# location like the other six — but its CONTENT is untouched by this repo:
+# its ProgramArguments still point at the development checkout, deliberately
+# (see this script's header and this PR's body).
+PLIST_NAMES="com.convivy.orient.plist com.convivy.orient-dashboard.plist com.convivy.code-health.plist com.convivy.kb-observability.plist com.convivy.orient-github-capture.plist com.convivy.orient-deploy-watch.plist"
+
+say() { printf '\033[1;34m▸\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m!\033[0m %s\n' "$*" >&2; }
+
+# --- --status: answer "what commit is this service serving", per ADR-0059's
+# closing requirement, and exit. No install side effects. -------------------
+if [ "$STATUS_ONLY" -eq 1 ]; then
+  if [ -f "$DEPLOY_DIR/DEPLOYED_COMMIT" ]; then
+    cat "$DEPLOY_DIR/DEPLOYED_COMMIT"
+    exit 0
+  fi
+  echo "install-orient: nothing deployed yet at $DEPLOY_DIR" >&2
+  exit 1
+fi
+
+git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || {
+  echo "install-orient: $REPO is not a git checkout" >&2
+  exit 1
+}
+
+SHA="$(git -C "$REPO" rev-parse "$REF" 2>/dev/null)" || {
+  echo "install-orient: '$REF' does not resolve to a commit in $REPO" >&2
+  exit 1
+}
+
+if [ "$REF" != "main" ] && [ "$ALLOW_NON_MAIN" -ne 1 ]; then
+  echo "install-orient: REFUSING to install ref '$REF' (resolves to $SHA)." >&2
+  echo "  ADR-0059 rule 6: the deploy area installs from main. Pass --allow-non-main" >&2
+  echo "  to install a different ref anyway (e.g. to verify a branch before merge)." >&2
+  exit 1
+fi
+
+# --- find a real interpreter, never one a poisoned PATH could hand back ----
+# Orient pins python3.11 (requirements.txt, the existing ~/.local/venv-orient
+# this replaces) — a different pin from the Library's python3.14, each
+# service's own choice.
+#
+# --python=<path> skips this search entirely and takes the given interpreter
+# on faith to BUILD the venv with — it does not touch the trust guard below.
+# The staged build still has to pass the deployed serve.sh's own preflight
+# (rule 4) before it can reach a live swap, same as every other install.
+if [ -n "$PYTHON_OVERRIDE" ]; then
+  [ -x "$PYTHON_OVERRIDE" ] || {
+    echo "install-orient: --python=$PYTHON_OVERRIDE is not an executable file" >&2
+    exit 1
+  }
+  PYTHON_BIN="$PYTHON_OVERRIDE"
+else
+  PYTHON_BIN=""
+  for cand in \
+      /opt/homebrew/bin/python3.11 \
+      "$(brew --prefix python@3.11 2>/dev/null)/bin/python3.11" \
+      /usr/local/bin/python3.11 \
+      /usr/bin/python3.11
+  do
+    if [ -x "$cand" ]; then PYTHON_BIN="$cand"; break; fi
+  done
+  if [ -z "$PYTHON_BIN" ]; then
+    PYTHON_BIN="$(command -v python3.11 2>/dev/null || true)"
+  fi
+  [ -n "$PYTHON_BIN" ] || {
+    echo "install-orient: python3.11 not found (checked /opt/homebrew/bin," >&2
+    echo "  Homebrew's python@3.11 keg, /usr/local/bin, /usr/bin, and PATH)" >&2
+    exit 1
+  }
+fi
+
+say "Installing Orient from $REF ($SHA) in $REPO, using $PYTHON_BIN"
+
+# --- stage the release in a sibling dir, never in place ---------------------
+# git archive reads the commit object, not the working tree, so an untracked
+# or gitignored file on disk (the five credential files, a stray site/ build,
+# access.log) is invisible to it — this is what makes it safe where
+# `cp -r`/`rsync` would not be (rule 7).
+mkdir -p "$(dirname "$DEPLOY_DIR")"
+STAGE="$DEPLOY_DIR.new"
+rm -rf "$STAGE"
+mkdir -p "$STAGE"
+
+git -C "$REPO" archive "$SHA" | tar -x -C "$STAGE"
+chmod +x "$STAGE/serve.sh"
+
+# --- keep pip's own cache, and any source build's toolchain cache, out of
+# $HOME (same reasoning as install-library: ensurepip and a source build for
+# a Rust-backed dependency both read $HOME from the environment by default,
+# and nothing outside the deploy area and LaunchAgents should be written
+# under $HOME). ---------------------------------------------------------------
+BUILD_CACHE="$STAGE/.build-cache"
+mkdir -p "$BUILD_CACHE"
+export CARGO_HOME="$BUILD_CACHE/cargo"
+export RUSTUP_HOME="$BUILD_CACHE/rustup"
+export PIP_CACHE_DIR="$BUILD_CACHE/pip"
+export XDG_CACHE_HOME="$BUILD_CACHE/xdg"
+
+say "Building pinned interpreter ($PYTHON_BIN -m venv)"
+"$PYTHON_BIN" -m venv "$STAGE/.venv"
+"$STAGE/.venv/bin/pip" install --quiet --disable-pip-version-check \
+    -r "$STAGE/requirements.txt"
+rm -rf "$BUILD_CACHE"
+unset CARGO_HOME RUSTUP_HOME PIP_CACHE_DIR XDG_CACHE_HOME
+
+{
+  echo "ref: $REF"
+  echo "commit: $SHA"
+  echo "installed_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "installed_from: $REPO"
+} > "$STAGE/DEPLOYED_COMMIT"
+
+# --- validate the staged build BEFORE it can become live --------------------
+# serve.sh's own preflight (interpreter presence, import of every module a
+# launchd job execs against this venv, and existence/readability of the
+# config/state roots) is reused here rather than re-implemented, so an install
+# and a start are held to the same guard. ORIENT_CONFIG_ROOT/ORIENT_STATE_ROOT
+# are exported as $REPO — for a canonical install (no --repo override) that IS
+# the primary checkout the seven plists above pin, so this check exercises
+# the exact roots the real service will run under, not merely "the staged
+# tree can see itself".
+if ! ORIENT_CONFIG_ROOT="$REPO" ORIENT_STATE_ROOT="$REPO" "$STAGE/serve.sh" --check; then
+  warn "the staged build failed serve.sh's own preflight — discarding it," \
+       "the previous deploy (if any) is untouched"
+  rm -rf "$STAGE"
+  exit 1
+fi
+
+# --- swap: the deploy area is replaced as one unit, never merged with the
+# previous release, so a partial file mix across two commits can't happen,
+# and nothing above this line can have touched the live $DEPLOY_DIR. --------
+OLD=""
+if [ -d "$DEPLOY_DIR" ]; then
+  OLD="$DEPLOY_DIR.old.$$"
+  mv "$DEPLOY_DIR" "$OLD"
+fi
+mv "$STAGE" "$DEPLOY_DIR"
+[ -n "$OLD" ] && rm -rf "$OLD"
+
+say "Deployed: $DEPLOY_DIR (commit $SHA)"
+
+# --- plists: copied from the same ref, never the working tree, and never
+# clobbering a live plist that has drifted from the template (ARCH-342 idiom,
+# same as install-library and agent-platform's install.sh phase 4). All seven
+# are handled the same way, including orient-deploy-watch whose CONTENT this
+# repo leaves unchanged. ------------------------------------------------------
+mkdir -p "$LAUNCH_AGENTS"
+for PLIST_NAME in $PLIST_NAMES; do
+  PLIST_STAGE="$LAUNCH_AGENTS/$PLIST_NAME.new"
+  # Two steps rather than a pipe: under `set -eu` without pipefail, a failed
+  # `git show` would leave an empty plist staged.
+  git -C "$REPO" show "$SHA:launchd/$PLIST_NAME" > "$PLIST_STAGE.tmpl"
+  sed "s|__HOME__|$HOME|g" "$PLIST_STAGE.tmpl" > "$PLIST_STAGE"
+  rm -f "$PLIST_STAGE.tmpl"
+
+  PLIST_LIVE="$LAUNCH_AGENTS/$PLIST_NAME"
+  if [ -f "$PLIST_LIVE" ] && ! diff -q "$PLIST_LIVE" "$PLIST_STAGE" >/dev/null 2>&1 && [ "$PLIST_FORCE" -ne 1 ]; then
+    warn "live plist differs from the template — NOT overwritten (--force to replace): $PLIST_NAME"
+    diff -u "$PLIST_LIVE" "$PLIST_STAGE" | sed 's/^/    /' || true
+    rm -f "$PLIST_STAGE"
+  else
+    mv "$PLIST_STAGE" "$PLIST_LIVE"
+    say "Plist installed: $PLIST_LIVE"
+  fi
+done
+
+cat <<EOF
+
+Install complete. Nothing was loaded, unloaded, kickstarted, or restarted.
+Restarting the site drops in-flight requests for every reader of
+team.convivy.com — that is the operator's call, not this script's.
+
+To pick up this release once approved (repeat per label for the other six):
+  launchctl bootout "gui/\$(id -u)/com.convivy.orient" 2>/dev/null || true
+  launchctl bootstrap "gui/\$(id -u)" "$LAUNCH_AGENTS/com.convivy.orient.plist"
+
+To check what commit is currently deployed:
+  $0 --status
+EOF

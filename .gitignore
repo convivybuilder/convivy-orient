@@ -1,0 +1,85 @@
+# Runtime logs — contain visitor emails + request lines; not source.
+access.log
+serve.log
+
+# LLM-spend ingest bearer secrets (ARCH-152). The /ingest/llm-spend endpoint
+# this file authenticated is retired (platform/decisions/0044); a stale copy
+# may still sit on the deployed mini pending operator cleanup, so this entry
+# stays as a guard against ever committing it.
+ingest-tokens.json
+
+# Build artifacts — both tier bundles are regenerated from the KB index by
+# build.py on every serve.sh (re)start, so they're reproducible, large, and
+# not worth versioning.
+site/
+
+# Python + macOS cruft
+__pycache__/
+*.pyc
+.DS_Store
+
+# assets/generate_icons.py writes this on every run, for eyeballing the mark
+# before committing regenerated PNGs — byte-identical to icon-512.png, so
+# there's nothing to version once the review it was for is done.
+/icon-preview.png
+
+# Coverage outputs — produced by `pytest --cov` (CI uploads coverage.json as the
+# `coverage` artifact; locally they're throwaway).
+.coverage
+coverage.json
+htmlcov/
+
+# Control-plane datastore (WS0.5, ARCH-348) — the operational DB lives outside
+# the repo at ~/.orient-control/; these guard a stray local/CLI copy + WAL files.
+control.db
+control.db-wal
+control.db-shm
+.alembic-autogen.db
+
+# Agent write-API bearer secrets (WS0.7) — per-agent tokens, like ingest-tokens.
+# See api-tokens.example.json for the format.
+#
+# The glob covers the BACKUPS too, not just the file. Editing a credential file
+# by hand means copying it aside first, and `api-tokens.json.bak-premint` was
+# sitting untracked and unignored in this checkout on 2026-08-13 — one `git add
+# -A` from being committed, with live bearer tokens in it. The example file is
+# re-admitted below, since it is the one member of this glob that belongs here.
+api-tokens.json*
+!api-tokens.example.json
+
+# Reading Room concierge Anthropic key (ARCH-357 fast-follow). {api_key, model}.
+# Console-credit billed; read per-request, NEVER exported to the env (ARCH-146).
+concierge.json
+
+# Access control, read per request from ORIENT_CONFIG_ROOT: the Cloudflare
+# Access binding (jwt.json), the full-tier list (tiers.json) and per-person
+# roles (roles.json). They were tracked until issue_01M2RVJK4DDNJSGK5Y2AETKB43,
+# which untracked them because a public export carries the tree and tiers.json
+# names real people. Each has a committed .example template beside it, and
+# tests/test_config_untracked.py fails if the real file is tracked again. The
+# trailing glob covers hand-made backups, as with api-tokens.json above.
+jwt.json*
+tiers.json*
+roles.json*
+
+# Agent platform: .claude/ is individuated locally by `knowledge-ctx use <profile>`
+# (agents, skills, settings) — regenerated on every dispatch, not committed. This
+# repo has no root CLAUDE.md; if one is ever added it is outside this pattern and
+# stays tracked.
+.claude/
+
+# Scratch input for a PR description. `agentctl pr-open` does NOT read this
+# path: it reads `git rev-parse --git-path pr-body.md`, which in a worktree is
+# .git/worktrees/<name>/pr-body.md — git metadata, never in the working tree and
+# never committed. Write a PR body THERE, not here.
+#
+# This file was tracked until 2026-09-16, holding one old PR's description
+# (216dea1) that nothing read. It cost something twice: a file named pr-body.md
+# holding the wrong PR's body is a convincing explanation for a publishing trap
+# that does not exist, and it produced one. And a coder writing its body at this
+# intuitive path edits a tracked file, so the change lands in the diff — PR #302
+# carried a 114-line pr-body.md change beside an unrelated removal, doing
+# nothing.
+#
+# Ignored so the path stays available as scratch without either cost returning.
+pr-body.md

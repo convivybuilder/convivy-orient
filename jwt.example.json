@@ -1,0 +1,6 @@
+{
+  "_comment": "Template for jwt.json, which is gitignored: copy it into ORIENT_CONFIG_ROOT as jwt.json and fill in the two values. team_domain is the Cloudflare Access team domain (its JWKS is at https://<team_domain>/cdn-cgi/access/certs). aud is the Access application's Audience (AUD) tag. enforce=true trusts only a verified signed JWT (RS256 signature, iss, exp, aud) and derives identity from it, so a request without a valid JWT gets 403. enforce=false trusts the plaintext Cf-Access-Authenticated-User-Email header and verifies any JWT observe-only. A missing or malformed jwt.json fails closed. Re-read per request, so enforce flips without a restart.",
+  "team_domain": "your-team.cloudflareaccess.com",
+  "aud": "REPLACE-WITH-THE-ACCESS-APPLICATION-AUD-TAG",
+  "enforce": true
+}

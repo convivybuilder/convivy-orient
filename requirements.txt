@@ -1,0 +1,52 @@
+# Runtime dependencies for the convivy-orient control plane.
+# Governs the dedicated venv ~/.local/venv-orient ONLY, built on python3.11
+# (/opt/homebrew/bin/python3.11). This is the ARCH-102 isolation pattern: the
+# app's dependency tree lives in its own venv and never touches agent-platform's
+# requirements*.txt or orient's requirements-dev.txt.
+#
+# Exact pins for reproducibility on a security-surface web app: a venv re-create
+# from this file gets the byte-identical versions reviewed here (WS0.1 sign-off).
+# To bump, change the pin in a PR and re-run the review/security cycle.
+#
+# Until WS0.4 the app is still the stdlib server; these are installed ahead of
+# the FastAPI shell swap so the venv is the serving interpreter from WS0.2 on.
+
+fastapi==0.139.0
+uvicorn[standard]==0.51.0
+SQLAlchemy==2.0.51
+alembic==1.18.5
+python-multipart==0.0.32
+
+# CommonMark renderer for the /engineering/changelog summaries (a PR description
+# is GitHub Markdown, rendered server-side with raw HTML escaped — ARCH-359).
+# Already present transitively via rich; pinned here now that a page imports it
+# directly, so a venv re-create can't lose it to a rich dependency change.
+markdown-it-py==4.2.0
+
+# Signal-memory semantic layer (S0-b, ARCH-349). Both spike-validated on the
+# orient interpreter 2026-07-16: sqlite-vec's vec0 KNN + aux columns work, and
+# fastembed (ONNX, CPU, BAAI/bge-small-en-v1.5, 384-dim) embeds locally — no API
+# key, no per-call billing. fastembed is imported lazily (embeddings.get_embedder)
+# so tests run against a fake embedder and never load the model.
+sqlite-vec==0.1.9
+fastembed==0.8.0
+
+# Web Push (ARCH-362 Phase 4b). NOTE this is deliberately NOT `pywebpush`, which
+# the earlier note here anticipated: pywebpush pulls a whole async HTTP stack
+# (aiohttp, aiosignal, attrs, frozenlist, multidict, propcache, yarl,
+# aiohappyeyeballs) for what is one HTTP POST, taking the addition from 5 packages
+# to 14 on a security-surface app whose whole pinning policy exists to keep that
+# surface small.
+#
+# So we take only the crypto that genuinely cannot be hand-rolled — py-vapid signs
+# the VAPID JWT, http_ece does RFC-8188 payload encryption — and send the POST with
+# stdlib urllib. That follows this codebase's own precedent: `github_capture.py`
+# is stdlib-only rather than pulling in a client SDK.
+#
+# cryptography/cffi/pycparser are transitive and unavoidable (real elliptic-curve
+# crypto). Pinned exactly, like everything else here.
+py-vapid==1.9.4
+http_ece==1.2.1
+cryptography==49.0.0
+cffi==2.1.0
+pycparser==3.0

@@ -1,0 +1,6 @@
+{
+  "_comment": "Template for tiers.json, which is gitignored: copy it into ORIENT_CONFIG_ROOT as tiers.json. Emails in 'full' get the full-team bundle. Every other authenticated email gets the contractor bundle. Re-read per request, so an edit needs no restart.",
+  "full": [
+    "owner@example.com"
+  ]
+}

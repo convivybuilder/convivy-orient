@@ -1,0 +1,7 @@
+{
+  "_comment": "bearer-secret -> {name, products[, kind]}. An agent presents 'Authorization: Bearer <secret>' to the decision API; the token authenticates the caller AND names it (created_by/decided_by audit) and scopes it. products: ['*'] = all. Agents can create/consume/comment/read, NEVER decide. Optional \"kind\": \"system\" marks a PLATFORM job's token (the capture pollers) and grants the system role, which adds signal_customer — give it only to our own launchd jobs, never to a coding agent's token; any other kind value resolves as a plain agent. Gitignored — real secrets; never commit or paste into a PR body.",
+  "REPLACE-WITH-A-LONG-RANDOM-SECRET": {"name": "overnight-orchestrator", "products": ["*"]},
+  "ANOTHER-RANDOM-SECRET": {"name": "vivy-bug-investigator", "products": ["vivy"]},
+  "A-THIRD-RANDOM-SECRET": {"name": "github-capture", "products": ["*"], "kind": "system"},
+  "A-CI-RUNNER-SECRET": {"name": "ci-vivy", "products": ["vivy"]}
+}

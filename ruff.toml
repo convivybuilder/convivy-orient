@@ -1,0 +1,37 @@
+# Declare the rule set explicitly, rather than inheriting whatever ruff's default
+# happens to be in the version CI installed today.
+#
+# WHY THIS FILE EXISTS. ruff 0.16.0 (2026-07-23) expanded its DEFAULT rule set. Every
+# repo that had been relying on that default went red on code nobody had touched:
+# convivy-services logged 81 errors on a commit whose checks had passed an hour
+# earlier, convivy-app-kit 203. This repo was clean under 0.15.22 and reports **238
+# errors** under 0.16.0 — it has simply not run CI since the release, so its green
+# `main` is stale rather than safe.
+#
+# These four codes are exactly what ruff's default set has been, so declaring them
+# is behavior-preserving: this repo goes from 238 errors back to clean under 0.16.0
+# with no code change. Verified both ways before committing.
+#
+# WHY THIS RATHER THAN PINNING THE VERSION. A pin (`ruff==0.15.22`) freezes the tool
+# and has to be bumped by hand forever; it also does not say what is being enforced.
+# Declaring the rules leaves the binary free to pick up bug fixes and speedups. The
+# evidence is in the fleet: the repos that survived 0.16.0 unscathed — agent-platform,
+# constance, vivy, sous-chef, selector — are precisely the ones that already declared
+# a `select`, and they are all UNPINNED. The two that broke are the two that did not.
+#
+# THE LIMIT OF THIS GUARD, stated precisely because a future reader will reason about
+# it. These are PREFIX selectors, so a new rule ruff adds UNDER one of them — another
+# pyflakes `F` check, say — is picked up automatically and could redden CI with no
+# code change. (No specific hypothetical code is named here because it would only go
+# stale; the obvious candidates are already allocated.) What declaring a `select`
+# prevents is a new rule CATEGORY — the I/BLE/UP/DTZ codes that caused this outage —
+# silently joining what CI demands. Pyflakes is stable in
+# practice, so the residual risk is small; it is not zero. A version pin is what
+# additionally covers within-prefix additions and behavior changes to existing rules,
+# at the cost of that manual bump. Both together is defensible.
+#
+# Adopting more of 0.16.0's rules is a separate, deliberate change. Do it in its own
+# PR, and read the behavioral ones rather than running `--fix`: PLW1510 and TRY004
+# change control flow, and B023 usually marks a real late-binding bug.
+[lint]
+select = ["E4", "E7", "E9", "F"]

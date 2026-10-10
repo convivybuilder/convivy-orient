@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.convivy.kb-observability</string>
+
+  <!-- Refresh the kb-eval golden-set scores (kb-eval runs in its own knowledge
+       venv) + read the live query and individuation logs → site/kb.html (ARCH-121).
+       The running orient server reads the file per request, so no restart. Fires
+       at 07:48, after code-health (07:45) and before metric-alerts (07:50).
+
+       Deploy-area cutover (ADR-0059, bin/install-orient): this used to exec
+       the SYSTEM /opt/homebrew/bin/python3.11 against a checkout script — a
+       live rule-4 divergence from serve.sh's own venv. It now runs the deploy
+       area's own pinned venv against the deploy area's own copy of this
+       script, same interpreter serve.sh uses. ORIENT_CONFIG_ROOT/STATE_ROOT
+       pinned to the primary checkout, same as every other job (rule 3).
+       kb_build.py itself still shells out to ~/.local/bin/kb-eval — that
+       symlinks into agent-platform's own tree, a separate crew's deploy-pin to
+       make, not this repo's; see this PR's body. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>__HOME__/.local/deploy/convivy-orient/.venv/bin/python</string>
+    <string>__HOME__/.local/deploy/convivy-orient/kb_build.py</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>HOME</key>
+    <string>__HOME__</string>
+    <key>ORIENT_CONFIG_ROOT</key>
+    <string>__HOME__/Convivy/convivy-orient</string>
+    <key>ORIENT_STATE_ROOT</key>
+    <string>__HOME__/Convivy/convivy-orient</string>
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>__HOME__/.local/deploy/convivy-orient</string>
+
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>7</integer>
+    <key>Minute</key>
+    <integer>48</integer>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/Convivy/agent-runs/kb-observability.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Convivy/agent-runs/kb-observability.err.log</string>
+</dict>
+</plist>

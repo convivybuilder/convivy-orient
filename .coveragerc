@@ -1,0 +1,10 @@
+# Coverage scoping for the CI coverage artifact the substrate code-health
+# dashboard consumes (/health Cov% column + trend sparkline). Measure the app
+# modules; the tests themselves and caches are not the subject. CI runs
+# `pytest --cov --cov-report=json` and uploads coverage.json as the `coverage`
+# artifact; code_health_build.coverage_pct reads totals.percent_covered.
+[run]
+source = .
+omit =
+    tests/*
+    */__pycache__/*

@@ -1,0 +1,69 @@
+name: ci
+
+# convivy-orient is the identity gate for team.convivy.com — access_identity
+# hand-rolls RS256/JWT verification, server.py does the tier routing. These tests
+# are the regression net for that security boundary + the dashboard data layer.
+# The app runs on FastAPI/uvicorn (requirements.txt, ARCH-348 WS0.4); CI installs
+# both the runtime deps and the test-only deps (pytest, ruff — requirements-dev.txt).
+
+#
+# `ready_for_review` is listed explicitly because it is NOT one of the default
+# `pull_request` types (opened/synchronize/reopened). The expensive step below is
+# skipped while a PR is a draft, so without this type the suite would never fire
+# when the PR is marked ready — the exact transition meant to trigger it
+# (substrate ARCH-364).
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+# Cancel superseded PR runs only. A `main` push must always produce a completed
+# run: two merges landing close together would otherwise cancel the first, and
+# main would carry no finished CI result for that commit.
+concurrency:
+  group: ci-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # THE DRAFT GATE IS ON THE STEPS, NOT THE JOB. Two reasons specific to this
+  # repo:
+  #
+  # `ruff` stays ungated so a draft PR still gets a real signal for the review
+  # cycle to work against, without needing a second job to provide it.
+  #
+  # And these tests are the regression net for the identity gate on
+  # team.convivy.com (see the header) — hand-rolled RS256/JWT verification and
+  # tier routing. Gating the whole job would take that suite off every draft
+  # push AND report the job "skipped", which GitHub counts as a pass if this
+  # ever becomes a required status check. Gating the step keeps the job
+  # reporting a real conclusion, and the suite still runs on mark-ready, on
+  # every push to main, and so before any merge.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"  # matches server.py's #!/usr/bin/env python3.11
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: ruff
+        run: ruff check .
+      - name: pytest (with coverage)
+        # Draft-gated (ARCH-364). The `github.event_name` clause is defensive,
+        # not load-bearing. Actions coerces both null and false to 0, so on a
+        # `push` event — where `github.event.pull_request` is null — the draft
+        # check alone already evaluates true and runs the suite on main. Keep
+        # the clause so the gate still reads correctly under a trigger whose
+        # payload carries a `pull_request` object shaped differently.
+        if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+        run: python -m pytest --cov --cov-report=term-missing --cov-report=json
+      - name: upload coverage artifact
+        # `always()` publishes the number even when pytest FAILS, but it must not
+        # fire when pytest was skipped on a draft — there would be no coverage.json.
+        if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage
+          path: coverage.json
+          retention-days: 14

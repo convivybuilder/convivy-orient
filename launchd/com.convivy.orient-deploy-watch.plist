@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.convivy.orient-deploy-watch</string>
+
+  <!-- Automated deploy watcher (issue_01M0EERRFC8NJ8QS5Q6EEE87JY): every 5
+       minutes, fast-forward the checkout to origin/main if it's behind, and
+       kickstart com.convivy.orient if the running process isn't serving the
+       checkout's HEAD yet (covers both a stale checkout and a stale process
+       that already has fresh code on disk but was never restarted). A
+       fast-forward or restart that fails posts a deploy_failure signal
+       (visible at /signals) and exits 1, so a stuck run shows in this job's
+       own error log even if the signal POST can't reach a wedged server.
+       git/launchctl are resolved via PATH below — launchd's default PATH is
+       too thin for either. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>__HOME__/.local/venv-orient/bin/python</string>
+    <string>__HOME__/Convivy/convivy-orient/deploy_watch.py</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>HOME</key>
+    <string>__HOME__</string>
+    <!-- Explicit pin matching the deployed default (vault_plane.py: unset also
+         means the Library) — writes land in the Library, not Orient's retired
+         copy. issue_01M08YADC32YYE5S0K2N033AES: this repo copy had drifted
+         from what launchd actually runs. -->
+    <key>VAULTS_ON_LIBRARY</key>
+    <string>1</string>
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>__HOME__/Convivy/convivy-orient</string>
+
+  <key>StartInterval</key>
+  <integer>300</integer>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/Convivy/agent-runs/orient-deploy-watch.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Convivy/agent-runs/orient-deploy-watch.err.log</string>
+</dict>
+</plist>

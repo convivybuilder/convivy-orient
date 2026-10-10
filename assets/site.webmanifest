@@ -1,0 +1,26 @@
+{
+  "name": "Convivy Builder \u00b7 Orient",
+  "short_name": "Orient",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#FBF8F4",
+  "theme_color": "#E8542F",
+  "icons": [
+    {
+      "src": "/assets/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/assets/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    },
+    {
+      "src": "/assets/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
