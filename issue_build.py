@@ -58,9 +58,9 @@ from logutil import clean_log_field
 from markdown_render import md_to_html
 from url_safety import safe_http_url
 from control_db import (
-    ISSUE_ACTIVE, ISSUE_CLAIMED, ISSUE_DEFAULT_TYPE, ISSUE_OPEN, ISSUE_PR_OPEN,
+    ISSUE_ACTIVE, ISSUE_CLAIMED, ISSUE_OPEN, ISSUE_PR_OPEN,
     ISSUE_DEFAULT_NEEDS, ISSUE_NEEDS_OPERATOR,
-    ISSUE_TERMINAL, ISSUE_TYPE_EPIC, ISSUE_TYPES, prerequisite_met,
+    ISSUE_TERMINAL, ISSUE_TYPE_EPIC, prerequisite_met,
 )
 from models import utcnow
 from paths import STATE_ROOT
@@ -690,15 +690,14 @@ def _card(item: library_client.IssueRecord, now, comment_count: int = 0,
     a manual close; there is no "Claim" button, because a claim belongs to a
     working session rather than to a person reading the queue."""
     badges = [f'<span class="badge prod">{escape(item.product)}</span>']
-    # The type badge is suppressed for plain bugs: they're the default and the
-    # common case, so badging every one of them is noise. A non-bug type is the
-    # information worth surfacing.
-    itype = item.type or ISSUE_DEFAULT_TYPE
-    if itype != ISSUE_DEFAULT_TYPE:
-        badges.append(f'<span class="badge type type-{escape(itype, quote=True)}">{escape(itype)}</span>')
-    # Suppressed for `agent`, on the same reasoning as the type badge: it is the
-    # default and the overwhelming case, so badging every row is noise. What a
-    # reader needs to see is the row NOTHING WILL PICK UP — an operator issue is
+    # A work item carries no type, so only an item that still has one (an epic,
+    # or a closed item keeping the type it closed with) gets a type badge.
+    if item.type:
+        badges.append(f'<span class="badge type type-{escape(item.type, quote=True)}">'
+                      f'{escape(item.type)}</span>')
+    # Suppressed for `agent`: it is the default and the overwhelming case, so
+    # badging every row is noise. What a reader needs to see is the row
+    # NOTHING WILL PICK UP — an operator issue is
     # otherwise indistinguishable from drainable work, and finding it would take a
     # separate ?needs=operator query the queue should not require (reviewer, #118).
     needs = item.needs or ISSUE_DEFAULT_NEEDS
@@ -720,7 +719,7 @@ def _card(item: library_client.IssueRecord, now, comment_count: int = 0,
     # avoid. An epic with the field UNSET is badged too, rather than skipped —
     # unset is not approved, and a silent absence is exactly the case that used
     # to read as approved.
-    if itype == ISSUE_TYPE_EPIC:
+    if item.type == ISSUE_TYPE_EPIC:
         maturity = (item.maturity or "").strip()
         badges.append(
             f'<span class="badge maturity maturity-{escape(maturity, quote=True)}">{escape(maturity)}</span>'
@@ -805,9 +804,6 @@ def _log_issue_form(known_products: list[str]) -> str:
     prods = "".join(f'<option value="{escape(p, quote=True)}">' for p in known_products)
     sev_opts = ('<option value="" disabled selected>— severity —</option>' +
                 "".join(f'<option value="{s}">{s}</option>' for s in _SEVERITIES))
-    type_opts = "".join(
-        f'<option value="{t}"{" selected" if t == ISSUE_DEFAULT_TYPE else ""}>{t}</option>'
-        for t in ISSUE_TYPES)
     return f'''
   <div class="capture" data-can-log="__CAN_LOG_ISSUE__">
     <button class="capture-toggle" id="logToggle" type="button" aria-expanded="false">＋ Log an issue</button>
@@ -816,9 +812,6 @@ def _log_issue_form(known_products: list[str]) -> str:
         <label>Product
           <input name="product" list="prodList" required maxlength="64" placeholder="constance">
           <datalist id="prodList">{prods}</datalist>
-        </label>
-        <label>Type
-          <select name="type">{type_opts}</select>
         </label>
         <label>Severity
           <select name="severity" required>{sev_opts}</select>
@@ -1222,8 +1215,9 @@ def _detail_page(item: library_client.IssueRecord, now) -> str:
     what a list cannot hold: the whole thread rather than its last twelve, and a
     banner for an issue the queue has stopped showing at all.
     """
-    badges = [f'<span class="badge prod">{escape(item.product)}</span>',
-              f'<span class="badge type">{escape(item.type or ISSUE_DEFAULT_TYPE)}</span>']
+    badges = [f'<span class="badge prod">{escape(item.product)}</span>']
+    if item.type:
+        badges.append(f'<span class="badge type">{escape(item.type)}</span>')
     if item.severity and item.severity != "unset":
         badges.append(f'<span class="badge sev sev-{escape(item.severity, quote=True)}">'
                       f'{escape(item.severity)}</span>')
@@ -2208,7 +2202,6 @@ _JS = r"""
       product:form.elements.product.value.trim(),
       title:form.elements.title.value.trim(),
       body:form.elements.body.value,
-      type:form.elements.type.value,
       severity:form.elements.severity.value};
     fetch('/api/issues',{method:'POST',credentials:'same-origin',
       headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)

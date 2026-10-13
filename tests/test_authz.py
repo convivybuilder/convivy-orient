@@ -9,11 +9,15 @@ an admin role.
 from __future__ import annotations
 
 import json
+import subprocess
+from pathlib import Path
 
 import pytest
 
 import authz
 from authz import Identity, agent_identity, authorize
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 ALL_ACTIONS = ["decision.read", "decision.create", "decision.consume",
                "decision.comment", "decision.decide"]
@@ -216,6 +220,10 @@ KNOWN_SCOPED_WRITE_ACTIONS = frozenset({
     # Choosing a queued item's model, scoped the same way: the item is read
     # first and its product passed.
     "item.model",
+    # Setting a project's ledger cap set (issue_01M4BH8KSSMC8XBKB2C2CX9QTF).
+    # Scoped like item.model: the project in the path IS the scope, a cap
+    # belongs to one project, and an unscoped call must refuse everyone.
+    "ledger.caps_write",
 })
 
 
@@ -254,32 +262,190 @@ def roles_file(tmp_path, monkeypatch):
 
 
 def test_human_identity_unknown_email_is_bare_contractor(roles_file):
-    roles_file.write_text(json.dumps({"operator@example.com": {"role": "admin", "products": ["*"]}}))
-    ident = authz.human_identity("stranger@example.com")
+    roles_file.write_text(json.dumps({"operator@example.com": {"role": "admin"}}))
+    ident = authz.human_identity("stranger@example.com", frozenset())
     assert ident.role == "contractor" and ident.products == frozenset()
     assert authorize(ident, "decision.read", "vivy") is False  # no scope → nothing
     assert authorize(ident, "decision.decide", "vivy") is False
 
 
 def test_human_identity_is_case_insensitive(roles_file):
-    roles_file.write_text(json.dumps({"operator@example.com": {"role": "admin", "products": ["*"]}}))
-    ident = authz.human_identity("Operator@Example.COM")
+    roles_file.write_text(json.dumps({"operator@example.com": {"role": "admin"}}))
+    ident = authz.human_identity("Operator@Example.COM", frozenset({"*"}))
     assert ident.role == "admin" and authorize(ident, "decision.decide", "vivy") is True
 
 
 def test_human_identity_unrecognized_role_falls_to_contractor(roles_file):
-    roles_file.write_text(json.dumps({"x@x.example": {"role": "superuser", "products": ["*"]}}))
-    ident = authz.human_identity("x@x.example")
+    roles_file.write_text(json.dumps({"x@x.example": {"role": "superuser"}}))
+    ident = authz.human_identity("x@x.example", frozenset({"*"}))
     assert ident.role == "contractor"  # unknown role grants nothing beyond read
 
 
 def test_malformed_roles_file_denies_all(roles_file):
     roles_file.write_text("{ not json")
-    ident = authz.human_identity("operator@example.com")
+    ident = authz.human_identity("operator@example.com", frozenset())
     assert ident.role == "contractor" and ident.products == frozenset()
 
 
 def test_missing_roles_file_denies_all(tmp_path, monkeypatch):
     monkeypatch.setattr(authz, "ROLES", tmp_path / "does-not-exist.json")
-    ident = authz.human_identity("operator@example.com")
+    ident = authz.human_identity("operator@example.com", frozenset())
     assert ident.role == "contractor"
+
+
+# --- `products` always comes from the caller, never from roles.json ---------
+#
+# E19·1 (issue_01M35K54QHJYYPXWS28YWEHJP3): Orient holds no local table, file
+# or constant mapping a person to their projects, so `human_identity` must
+# carry whatever `products` its caller passes, unchanged, whatever role.json
+# says or doesn't say about that email — roles.json still decides `role` and
+# `queues`, never `products`.
+
+
+def test_human_identity_carries_the_passed_products_even_for_a_bare_contractor(roles_file):
+    roles_file.write_text(json.dumps({}))  # no entry at all → bare contractor
+    ident = authz.human_identity("nobody@example.com", frozenset({"vivy"}))
+    assert ident.role == "contractor" and ident.products == frozenset({"vivy"})
+
+
+def test_human_identity_carries_the_passed_products_for_a_known_role(roles_file):
+    roles_file.write_text(json.dumps({"scoped@example.com": {"role": "admin"}}))
+    ident = authz.human_identity("scoped@example.com", frozenset({"vivy", "constance"}))
+    assert ident.role == "admin" and ident.products == frozenset({"vivy", "constance"})
+
+
+def test_roles_json_has_no_products_key_read_by_human_identity(roles_file):
+    # A roles.json entry that still carries a "products" list (a stale fixture,
+    # an un-migrated grant file) must have no effect — proven by setting one
+    # that would grant "vivy" and showing the resolved identity's scope is
+    # exactly what the CALLER passed, "constance" only.
+    roles_file.write_text(json.dumps(
+        {"x@example.com": {"role": "admin", "products": ["vivy"]}}))
+    ident = authz.human_identity("x@example.com", frozenset({"constance"}))
+    assert ident.products == frozenset({"constance"})
+
+
+def test_no_code_reads_a_roles_json_entrys_products_key():
+    """E19·1's grep clause (issue_01M35K54QHJYYPXWS28YWEHJP3): "Orient holds no
+    local table, file or constant mapping people to projects." roles.json
+    still carries `role` and `queues`; `products` must come from the Library
+    on every request (`library_client.person_scope`), never from a roles.json
+    entry.
+
+    Walks `git ls-files` rather than the working tree, so an untracked local
+    override (a developer's own roles.json, a stray scratch file) can't hide
+    a real regression or manufacture a false one. Test code is skipped: a
+    fake standing in for the Library has to map people to projects.
+
+    THREE SHAPES, checked by parsing rather than by matching one spelling,
+    because a literal pattern such as `entry.get("products"` misses the same
+    read written with another receiver name (review round 1 on PR #371):
+
+    - a module that reads roles data (`ROLES`, `_roles_lowercased`, or a
+      "roles.json" string) and also names a `"products"` key anywhere in it.
+      The check covers the whole module rather than one function, because
+      review round 2 showed the read and the key split across two functions
+      slipping past a per-function check. `api_common.api_tokens()` stays
+      legal: it reads an AGENT token's grant from api-tokens.json, a
+      bearer-token scope rather than a person-to-project mapping, and
+      api_common never touches roles data. A module that names a "products"
+      key on roles data it got from ANOTHER module is outside what parsing
+      one file can see; `test_roles_json_has_no_products_key_read_by_human_identity`
+      covers the one path that hands roles data out;
+    - a module-level dict constant keyed by email addresses whose values are
+      collections, the shape of a hard-coded people-to-projects table;
+    - a tracked JSON file keyed by email addresses whose entries carry a
+      "products" key, the shape roles.json had.
+
+    Confirmed to fail on the base commit, where `authz.human_identity` read
+    `_roles_lowercased()` and then `entry.get("products", [])` in one body."""
+    tracked = subprocess.run(
+        ["git", "ls-files"], cwd=REPO_ROOT, capture_output=True,
+        text=True, check=True).stdout.splitlines()
+    offenders = _people_to_project_mappings(
+        REPO_ROOT, [rel for rel in tracked if not rel.startswith("tests/")])
+    assert offenders == [], (
+        f"{offenders} map people to projects — project scope must come from "
+        f"library_client.person_scope on every request (E19·1).")
+
+
+def _people_to_project_mappings(root: Path, rels: list[str]) -> list[str]:
+    import ast
+
+    roles_markers = {"ROLES", "_roles_lowercased"}
+
+    def reads_roles(node: ast.AST) -> bool:
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Name) and sub.id in roles_markers:
+                return True
+            if isinstance(sub, ast.Attribute) and sub.attr in roles_markers:
+                return True
+            if (isinstance(sub, ast.Constant) and isinstance(sub.value, str)
+                    and sub.value.endswith("roles.json")):
+                return True
+        return False
+
+    def names_products(node: ast.AST) -> bool:
+        return any(isinstance(sub, ast.Constant) and sub.value == "products"
+                   for sub in ast.walk(node))
+
+    def email_keyed(keys) -> bool:
+        return any(isinstance(k, str) and "@" in k for k in keys)
+
+    found = []
+    for rel in rels:
+        path = root / rel
+        if rel.endswith(".json"):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if (isinstance(data, dict) and email_keyed(data)
+                    and any(isinstance(v, dict) and "products" in v
+                            for v in data.values())):
+                found.append(rel)
+            continue
+        if not rel.endswith(".py"):
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError, ValueError):
+            continue
+        if reads_roles(tree) and names_products(tree):
+            found.append(rel)
+        for node in tree.body:
+            value = node.value if isinstance(node, (ast.Assign, ast.AnnAssign)) else None
+            if (isinstance(value, ast.Dict)
+                    and email_keyed(k.value for k in value.keys
+                                    if isinstance(k, ast.Constant))
+                    and any(isinstance(v, (ast.List, ast.Set, ast.Tuple))
+                            for v in value.values)):
+                found.append(f"{rel}:line {node.lineno}")
+    return found
+
+
+def test_the_mapping_detector_catches_each_shape(tmp_path):
+    """The detector above passes vacuously if it can't see a mapping, so each
+    shape is planted here, including the receiver-name variant review round 1
+    named, the two-function split review round 2 named, and the agent-token
+    reader it must leave alone."""
+    (tmp_path / "renamed.py").write_text(
+        "def scope(email):\n"
+        "    record = _roles_lowercased().get(email, {})\n"
+        "    return record.get('products', [])\n")
+    (tmp_path / "split.py").write_text(
+        "def entry(email):\n"
+        "    return _roles_lowercased().get(email, {})\n"
+        "def scope(email):\n"
+        "    return entry(email).get('products', [])\n")
+    (tmp_path / "table.py").write_text(
+        "PEOPLE_PROJECTS = {'a@example.com': ['vivy']}\n")
+    (tmp_path / "grants.json").write_text(
+        json.dumps({"a@example.com": {"role": "admin", "products": ["*"]}}))
+    (tmp_path / "tokens.py").write_text(
+        "def api_tokens():\n"
+        "    return {k: v.get('products', []) for k, v in load('api-tokens.json').items()}\n")
+    assert sorted(_people_to_project_mappings(
+        tmp_path, ["renamed.py", "split.py", "table.py", "grants.json",
+                   "tokens.py"])) == [
+        "grants.json", "renamed.py", "split.py", "table.py:line 1"]

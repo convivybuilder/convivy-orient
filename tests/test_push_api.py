@@ -36,10 +36,12 @@ def client(tmp_path, monkeypatch):
     # push_send.notify_alert reads signal visibility through library_client
     # rather than control_db directly.
     library_fake.patch(monkeypatch)
+    library_fake.seed_person_scope("operator@example.com", {"*"})
+    library_fake.seed_person_scope("mem@example.com", {"vivy"})
     roles = tmp_path / "roles.json"
     roles.write_text(json.dumps({
-        "operator@example.com": {"role": "admin", "products": ["*"]},
-        "mem@example.com": {"role": "member", "products": ["vivy"]},
+        "operator@example.com": {"role": "admin"},
+        "mem@example.com": {"role": "member"},
     }))
     monkeypatch.setattr(authz, "ROLES", roles)
     toks = tmp_path / "api-tokens.json"

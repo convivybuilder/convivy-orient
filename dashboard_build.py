@@ -880,6 +880,12 @@ def ledger_section_html(entries: list, ledgers: list, epic_of: dict) -> str:
         if lg is not None:
             cap = f' of {_usd(lg.hard_cap_usd)} hard cap' if lg.hard_cap_usd is not None else ""
             meta.append(f'{_usd(lg.total_usd)} today ({escape(lg.day)}){cap}')
+        caps_form = ds.ledger_caps_form_html(product, {
+            "warn_usd": lg.warn_usd if lg else None,
+            "soft_cap_usd": lg.soft_cap_usd if lg else None,
+            "hard_cap_usd": lg.hard_cap_usd if lg else None,
+            "per_run_cap_usd": lg.per_run_cap_usd if lg else None,
+        })
         tables = []
         for dim, label in _LEDGER_DIMENSIONS:
             rows = g["groups"].get(dim, [])
@@ -901,7 +907,13 @@ def ledger_section_html(entries: list, ledgers: list, epic_of: dict) -> str:
             f'<div class="ledger-project" data-product="{escape(product, quote=True)}">'
             f'<h3>{escape(product)} <span class="ledger-total">{_usd(g["total"])}</span></h3>'
             f'<p class="muted">{" · ".join(meta)}</p>'
+            f'{caps_form}'
             f'<div class="ledger-dims">{"".join(tables)}</div></div>')
+    # ONE SCRIPT, NOT ONE PER PROJECT (ds.ledger_caps_form_html's own
+    # docstring): every `.ledger-caps` section on the page shares it, so a
+    # project's own Save button fires once per click whether the page holds
+    # one project or twenty.
+    parts.append(f'<script>{ds.LEDGER_CAPS_WRITE_JS}</script>')
     return f'<section class="ledger">{"".join(parts)}</section>'
 
 

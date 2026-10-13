@@ -4,10 +4,15 @@ authN is already solved (Cloudflare Access verified JWT → a trusted email, in
 access_identity). This module is authZ only: given a resolved identity, may it
 take an action on a product-scoped resource? Deny-by-default.
 
-The model generalizes tiers.json's binary full/contractor into per-email roles +
-product scopes (roles.json, gitignored, re-read per request so a grant takes
-effect with no restart — the same no-restart ethos as tiers.json). roles.json's
-CONTENTS are access-control data: never log them or paste them into a PR body.
+The model generalizes tiers.json's binary full/contractor into per-email roles
+(roles.json, gitignored, re-read per request so a grant takes effect with no
+restart — the same no-restart ethos as tiers.json) plus a product scope that
+roles.json no longer carries: `human_identity` takes it as a parameter,
+resolved by the caller through the Library (`library_client.person_scope`,
+E19·1 issue_01M35K54QHJYYPXWS28YWEHJP3) rather than read from a local file —
+Orient holds no table, file or constant mapping a person to their projects.
+roles.json's CONTENTS are still access-control data: never log them or paste
+them into a PR body.
 
 The load-bearing invariant, encoded as code rather than convention: an AGENT may
 create, consume, and comment on decisions, but only a HUMAN identity may set a
@@ -80,12 +85,18 @@ ROLE_CAPS: dict[str, frozenset[str]] = {
                              # alert thresholds: admin-only "for now" — asked plainly
                              # whether to open this to members, the operator said "administrators
                              # for now" (2026-09-16)
-                             "alerts_policy_write"}),
+                             "alerts_policy_write",
+                             # a project's ledger cap set — warn, soft cap, hard cap and
+                             # per-run cap (issue_01M4BH8KSSMC8XBKB2C2CX9QTF). Admin-only,
+                             # matching item_model and alerts_policy_write: a cap is what
+                             # ends a run or refuses one at checkout, and nothing names a
+                             # request to widen that past the operator.
+                             "ledger_caps_write"}),
     "member":     frozenset({"read", "create", "consume", "comment", "decide",
                              "signal_read", "signal_write", "signal_customer",
                              "room_request", "blog_write", "kb_write"}),
-    # A member who also approves the epics of the products named in their
-    # roles.json `products` (the operator, 2026-09-30, agreeing to "member permissions
+    # A member who also approves the epics of the products in their
+    # Library-resolved scope (the operator, 2026-09-30, agreeing to "member permissions
     # plus epic_approve, scoped to the person's own products";
     # issue_01M350CGZB6DR577FASP53K7WM). The scoping is epic.approve's own, so
     # nothing else here changes for it.
@@ -159,7 +170,7 @@ ACTION_CAP: dict[str, str] = {
     # for now, we will need a product owner role too"; the role landed for
     # issue_01M350CGZB6DR577FASP53K7WM). It first shipped to admin and member,
     # following the approved specification's contrast against a contractor. A
-    # product_owner approves only within its roles.json `products`, because
+    # product_owner approves only within its Library-resolved scope, because
     # in_scope checks the epic's own product.
     "epic.approve": "epic_approve",
     # Editing a PROPOSED epic's specification and definition of done from its
@@ -257,6 +268,16 @@ ACTION_CAP: dict[str, str] = {
     # hold". Admin-only, like policy_write: asked plainly whether this should
     # be open to members, the operator said "administrators for now" (2026-09-16).
     "alerts.write": "alerts_policy_write",
+    # Setting a project's ledger cap set (issue_01M4BH8KSSMC8XBKB2C2CX9QTF; the
+    # Library's ledger epic, approved-client-only on its own side as
+    # `ledger.grant`). Its own capability rather than a reuse of item_model or
+    # alerts_policy_write: this write reaches a different Library route and
+    # governs a different thing — what refuses a checkout and ends a run, not
+    # what a dashboard alerts on or what model a queued item runs on.
+    # Product-scoped, like item.model and epic.approve: a cap set belongs to
+    # one project (the ledger's `scope_id`), so a human scoped to one product
+    # must not set another's caps.
+    "ledger.caps_write": "ledger_caps_write",
 }
 
 # Same derivation for the /signals capture form's __CAN_CAPTURE__ toggle: a role
@@ -310,6 +331,12 @@ EPIC_APPROVER_ROLES = frozenset(r for r, caps in ROLE_CAPS.items() if "epic_appr
 # The same derivation for the item page's model control __CAN_SET_ITEM_MODEL__.
 # Cosmetic — model_override_api's gate and the Library's `item.model` are the wall.
 ITEM_MODEL_SETTER_ROLES = frozenset(r for r, caps in ROLE_CAPS.items() if "item_model" in caps)
+
+# The same derivation for the Spending page's per-project ledger-caps form
+# __CAN_SET_LEDGER_CAPS__. Cosmetic — ledger_caps_api's gate and the Library's
+# own `ledger.grant` behind it are the wall. Admin-only, so the form renders
+# for admin and stays hidden for every other role.
+LEDGER_CAPS_WRITER_ROLES = frozenset(r for r, caps in ROLE_CAPS.items() if "ledger_caps_write" in caps)
 
 
 def _effective_role(identity: Identity) -> str:
@@ -432,17 +459,26 @@ def holds_feature_gate(actor: str, granted: frozenset[str] | None = None) -> boo
     return actor.strip().lower() in granted
 
 
-def human_identity(email: str) -> Identity:
-    """Resolve a verified CF Access email to its identity. No roles.json entry →
-    a bare contractor with no product scope (deny-by-default on the write plane;
-    the read-tier bundle is still governed separately by tiers.json)."""
+def human_identity(email: str, products: frozenset[str]) -> Identity:
+    """Resolve a verified CF Access email to its identity. `products` is the
+    viewer's project scope, resolved by the caller through the Library
+    (`library_client.person_scope`, once per request beside the identity
+    gate — server.py's `_identity`, or `api_common.resolve_identity` for the
+    write APIs) — never read from roles.json (E19·1,
+    issue_01M35K54QHJYYPXWS28YWEHJP3, comment 4450). roles.json still carries
+    `role` and `queues`, which say what a person may do, not which projects
+    they cover.
+
+    No roles.json entry → a bare contractor (deny-by-default on the write
+    plane; the read-tier bundle is still governed separately by tiers.json),
+    carrying `products` as given — even a contractor's scope is the Library's
+    to say, never widened or narrowed here."""
     entry = _roles_lowercased().get(email.strip().lower())
     if not isinstance(entry, dict):
-        return Identity(actor=email, kind="human", role="contractor")
+        return Identity(actor=email, kind="human", role="contractor", products=products)
     role = entry.get("role", "contractor")
     if role not in ROLE_CAPS:
         role = "contractor"  # an unrecognized role grants nothing beyond read
-    products = frozenset(str(p) for p in entry.get("products", []) if isinstance(p, str))
     queues = frozenset(str(q) for q in entry.get("queues", []) if isinstance(q, str))
     return Identity(actor=email, kind="human", role=role, products=products, queues=queues)
 

@@ -639,10 +639,43 @@ def test_an_empty_ledger_says_nothing_is_recorded_rather_than_zero():
 def test_a_projects_ledger_shows_todays_total_against_its_hard_cap():
     lg = library_client.Ledger(scope_kind="project", scope_id="vivy", day="2026-09-27",
                                total_usd=3.5, warn_usd=None, soft_cap_usd=None,
-                               hard_cap_usd=10.0, state="ok")
+                               hard_cap_usd=10.0, per_run_cap_usd=None, state="ok")
     html = db.ledger_section_html(_FIXTURE, [lg], _EPIC_OF)
     assert "$3.50 today (2026-09-27) of $10.00 hard cap" in html
     assert "1 voided, not counted" in html
+
+
+# --- the per-project ledger-caps form (issue_01M4BH8KSSMC8XBKB2C2CX9QTF) -----
+
+
+def test_the_caps_form_prefills_all_four_values_from_the_ledger():
+    lg = library_client.Ledger(scope_kind="project", scope_id="vivy", day="2026-09-27",
+                               total_usd=3.5, warn_usd=1.0, soft_cap_usd=2.0,
+                               hard_cap_usd=10.0, per_run_cap_usd=0.5, state="ok")
+    html = db.ledger_section_html(_FIXTURE, [lg], _EPIC_OF)
+    block = html.split('data-project="vivy"')[1].split("</div>")[0]
+    assert 'data-field="warn_usd" value="1.0"' in block
+    assert 'data-field="soft_cap_usd" value="2.0"' in block
+    assert 'data-field="hard_cap_usd" value="10.0"' in block
+    assert 'data-field="per_run_cap_usd" value="0.5"' in block
+
+
+def test_the_caps_form_prefills_blank_fields_when_the_project_has_no_ledger():
+    """`selector` carries entries in `_FIXTURE` but no `Ledger` is passed for
+    it — the shape a project with no caps set shows."""
+    html = db.ledger_section_html(_FIXTURE, [], _EPIC_OF)
+    block = html.split('data-project="selector"')[1].split("</div>")[0]
+    for field in ("warn_usd", "soft_cap_usd", "hard_cap_usd", "per_run_cap_usd"):
+        assert f'data-field="{field}" value=""' in block
+
+
+def test_the_caps_write_script_is_emitted_once_for_every_project_on_the_page():
+    """Two projects, one script — a copy per project would attach the save
+    handler again on every row already rendered (ds.ledger_caps_form_html's
+    own docstring)."""
+    html = db.ledger_section_html(_FIXTURE, [], _EPIC_OF)
+    assert len({"vivy", "selector"} & set(re.findall(r'data-project="(\w+)"', html))) == 2
+    assert html.count('document.querySelectorAll(".ledger-caps")') == 1
 
 
 def test_ledger_values_are_escaped():

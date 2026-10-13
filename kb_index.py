@@ -26,16 +26,19 @@ Library does not change which layer does which job:
     must never route through the body-fetching path — doing so was paying for
     373 network fetches to throw away everything but the id on every room
     create and every room add.
-  - `entitled_docs(email)` / `entitled_doc_ids(email)` / `room_entitlement(email)`
-    apply the IDENTITY rule, unchanged from before this move:
+  - `entitled_docs(email, products)` / `entitled_doc_ids(email, products)` /
+    `room_entitlement(email, products)` apply the IDENTITY rule:
         full tier       → every team-audience doc
-        contractor tier → contractor-audience docs whose project is in the
-                          member's roles.json product scope
-    reusing tier_for (tiers.json) and human_identity (roles.json) unchanged,
-    so there is no materialized grant to drift against those files. This half
-    is NOT the Library's concern — `library_client._entitled` answers "may
-    this AUDIENCE see this document", never "what is this EMAIL granted" —
-    and must not be rebuilt against, or replaced by, the client's gate.
+        contractor tier → contractor-audience docs whose project is in
+                          `products`
+    reusing tier_for (tiers.json); `products` is the caller's own
+    Library-resolved scope (`library_client.person_scope`, E19·1
+    issue_01M35K54QHJYYPXWS28YWEHJP3) — this module never resolves it and
+    never reads roles.json, so there is no materialized grant to drift
+    against those files. This half is NOT the Library's reference-document
+    concern — `library_client._entitled` answers "may this AUDIENCE see this
+    document", never "what is this EMAIL granted" — and must not be rebuilt
+    against, or replaced by, the client's gate.
 
 Body cleaning (frontmatter + hidden-section strip) reuses build._clean_body so
 a doc renders identically here and everywhere else on the site.
@@ -60,7 +63,6 @@ from __future__ import annotations
 
 import library_client
 from access_identity import tier_for
-from authz import human_identity
 from build import _clean_body
 
 
@@ -154,45 +156,45 @@ def team_docs() -> list[dict]:
     return docs
 
 
-def _by_identity(email: str, docs: list[dict]) -> list[dict]:
+def _by_identity(email: str, docs: list[dict], products: frozenset[str]) -> list[dict]:
     """The IDENTITY half of the grant, applied to whichever doc list a caller
     already has (`team_docs()`'s bodies or `team_doc_meta()`'s metadata —
     both dicts carry `project` and `contractor`, so the rule is the same
     either way). Full tier sees every doc; a contractor sees only
-    contractor-audience docs whose project is in their roles.json product
-    scope ("*" = all)."""
+    contractor-audience docs whose project is in `products`, the member's own
+    Library-resolved scope ("*" = all — the Library's own answer for an
+    administrator, never something this module decides)."""
     if tier_for(email) == "full":
         return docs
-    products = human_identity(email).products
     all_products = "*" in products
     return [d for d in docs if d["contractor"] and (all_products or d["project"] in products)]
 
 
-def entitled_docs(email: str) -> list[dict]:
+def entitled_docs(email: str, products: frozenset[str]) -> list[dict]:
     """The docs a member MAY see, with bodies, by the identity rule. Full
     tier sees every team-audience doc; a contractor sees only
-    contractor-audience docs whose project is in their roles.json product
-    scope ("*" = all).
+    contractor-audience docs whose project is in `products`, the member's own
+    Library-resolved scope ("*" = all).
 
     Raises exactly when `team_docs()` does — the identity rule adds no I/O of
     its own, so there is nothing here to catch that isn't already the
     Library's own failure."""
-    return _by_identity(email, team_docs())
+    return _by_identity(email, team_docs(), products)
 
 
-def entitled_doc_ids(email: str) -> list[dict]:
+def entitled_doc_ids(email: str, products: frozenset[str]) -> list[dict]:
     """The docs a member MAY see, metadata only — same identity rule as
     `entitled_docs()`, applied to `team_doc_meta()` instead of `team_docs()`,
     for a consumer that only needs ids (`room_entitlement` below).
 
     Raises exactly when `team_doc_meta()` does."""
-    return _by_identity(email, team_doc_meta())
+    return _by_identity(email, team_doc_meta(), products)
 
 
-def room_entitlement(email: str) -> frozenset[str]:
+def room_entitlement(email: str, products: frozenset[str]) -> frozenset[str]:
     """The set of doc ids a member may see — the wall a room render and the
     provisioning/curation API validate every entry against. Metadata-only:
     no body is ever fetched to compute this (PR #264 round 2 review).
 
     Raises exactly when `entitled_doc_ids()` does."""
-    return frozenset(d["id"] for d in entitled_doc_ids(email))
+    return frozenset(d["id"] for d in entitled_doc_ids(email, products))

@@ -16,6 +16,8 @@ NAV_CLUSTER_JS — back/forward/refresh cluster wired to the render_stamp footer
 nav_component(current, tier, links) -> HTML string
 stat_card(label, value, delta, delta_dir) -> HTML string
 alert_threshold_form_html(key, title, fields) -> HTML string (dashboard alert-policy write form)
+ledger_caps_form_html(project, caps) -> HTML string (a project's ledger-caps write form)
+LEDGER_CAPS_WRITE_JS — shared JS for every ledger_caps_form_html instance on one page
 range_control(id, selected, options) -> HTML string
 page_shell(title, nav_html, body, extra_css, whoami_placeholder, rendered_at) -> complete HTML document
 drawer_html(id, title, content) -> HTML string
@@ -1301,6 +1303,29 @@ COMPONENTS_CSS: str = r"""
 .athr-note { margin-top:9px; font-size:12.5px; }
 .athr-note.ok { color:var(--ok); }
 .athr-note.err { color:var(--err); }
+
+/* ---- Ledger-caps write form (issue_01M4BH8KSSMC8XBKB2C2CX9QTF) --------- */
+/* One per project on the Spending page — see ledger_caps_form_html below. */
+.ledger-caps { margin:10px 0 0; }
+.ledger-caps[data-can-set-ledger-caps="false"] { display:none; }
+.ledger-caps h4 { font-size:11px; color:var(--ink-2); text-transform:uppercase;
+                  letter-spacing:.04em; margin:0 0 4px; }
+.ledger-caps-row { display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end; }
+.ledger-caps-row label { font-size:12px; color:var(--ink-2); }
+.ledger-caps-row input {
+  display:block; margin-top:4px; font-family:var(--mono); font-size:13px;
+  color:var(--ink); background:var(--bg); border:1px solid var(--line);
+  border-radius:7px; padding:7px 9px; width:110px;
+}
+.ledger-caps-row button {
+  font-family:var(--sans); font-size:13px; font-weight:600; color:var(--bg);
+  background:var(--ink); border:none; border-radius:7px; padding:8px 16px;
+  cursor:pointer;
+}
+.ledger-caps-hint { font-size:11.5px; margin:4px 0 0; }
+.lcaps-note { font-size:12px; margin-top:4px; }
+.lcaps-note.ok { color:var(--ok); }
+.lcaps-note.err { color:var(--err); }
 """
 
 # ---------------------------------------------------------------------------
@@ -2307,6 +2332,87 @@ def alert_threshold_form_html(key: str, title: str,
         f'<div class="athr-note" hidden></div>'
         f'</section>'
         f'<script>{_ALERT_THRESHOLD_WRITE_JS}</script>'
+    )
+
+
+LEDGER_CAPS_WRITE_JS = r"""
+(function() {
+  document.querySelectorAll(".ledger-caps").forEach(function(section) {
+    if (section.dataset.canSetLedgerCaps !== "true") return;
+    var project = section.dataset.project;
+    var btn = section.querySelector(".lcaps-save");
+    var note = section.querySelector(".lcaps-note");
+    function setNote(cls, text) {
+      note.className = "lcaps-note " + cls;
+      note.textContent = text;
+      note.hidden = false;
+    }
+    btn.addEventListener("click", function() {
+      var values = {};
+      section.querySelectorAll(".lcaps-input").forEach(function(inp) {
+        values[inp.dataset.field] = inp.value.trim() === "" ? null : parseFloat(inp.value);
+      });
+      btn.disabled = true;
+      fetch("/api/ledgers/" + encodeURIComponent(project) + "/caps", {
+        method: "POST", credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(values),
+      }).then(function(r) {
+        return r.json().catch(function() { return {}; }).then(function(j) {
+          if (!r.ok) throw new Error((j && j.error) || ("HTTP " + r.status));
+          return j;
+        });
+      }).then(function() {
+        setNote("ok", "Saved. Reloading…");
+        window.location.reload();
+      }).catch(function(err) {
+        setNote("err", "Couldn't save: " + err.message);
+      }).finally(function() { btn.disabled = false; });
+    });
+  });
+})();
+"""
+
+
+def ledger_caps_form_html(project: str, caps: dict) -> str:
+    """A project's ledger-caps write form (issue_01M4BH8KSSMC8XBKB2C2CX9QTF),
+    posting straight to `POST /api/ledgers/{project}/caps`. One section per
+    project on the Spending page; `LEDGER_CAPS_WRITE_JS` is shared across
+    every instance and must be emitted exactly once per page, the way
+    `alert_threshold_form_html` is not — that one is called once per
+    dashboard, this one once per project, so the script lives apart from the
+    markup rather than riding along with it (a copy per project would attach
+    its listeners again on every row already rendered, firing a save once
+    per project on the page by the time the last one loads).
+
+    `caps` is `{warn_usd, soft_cap_usd, hard_cap_usd, per_run_cap_usd}`, each
+    `float | None`; `None` renders as an empty field, and the form says
+    blank means no cap. `data-can-set-ledger-caps` is the `__CAN_SET_LEDGER_CAPS__`
+    substitution server.py applies from the viewer's role: cosmetic, since
+    `ledger_caps_api.py`'s own gate (human, CSRF, `ledger.caps_write`) is the
+    wall regardless of what this attribute says.
+    """
+    fields = [
+        ("warn_usd", "Warn"), ("soft_cap_usd", "Soft cap"),
+        ("hard_cap_usd", "Hard cap"), ("per_run_cap_usd", "Per-run cap"),
+    ]
+    field_inputs = "".join(
+        f'<label>{escape(label)}<br><input type="number" step="0.01" min="0" '
+        f'class="lcaps-input" data-field="{escape(name, quote=True)}" '
+        f'value="{escape("" if caps.get(name) is None else str(caps[name]), quote=True)}" '
+        f'placeholder="no cap"></label>'
+        for name, label in fields
+    )
+    return (
+        f'<div class="ledger-caps" data-can-set-ledger-caps="__CAN_SET_LEDGER_CAPS__" '
+        f'data-project="{escape(project, quote=True)}">'
+        f'<h4>Caps</h4>'
+        f'<div class="ledger-caps-row">{field_inputs}'
+        f'<button type="button" class="lcaps-save">Save</button></div>'
+        f'<p class="muted ledger-caps-hint">Blank means no cap. Saving sends all four — '
+        f'a field left blank clears that cap.</p>'
+        f'<div class="lcaps-note" hidden></div>'
+        f'</div>'
     )
 
 

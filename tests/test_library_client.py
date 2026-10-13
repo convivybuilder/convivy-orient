@@ -3122,11 +3122,11 @@ def test_a_filing_goes_under_the_agent_credential(both_creds, monkeypatch):
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     row = library_client.create_item(product="orient", title="T", body="B",
-                                     type="bug", severity="low")
+                                     severity="low")
     assert seen["auth"] == "Bearer AGENT-CRED"
     assert seen["url"].endswith("/items")
     assert seen["body"] == {"product": "orient", "title": "T", "body": "B",
-                            "type": "bug", "severity": "low"}
+                            "severity": "low"}
     assert row["id"] == "issue_new"
 
 
@@ -3265,6 +3265,9 @@ def test_a_ledger_entry_carries_its_void(monkeypatch, token_env):
 
 
 def test_list_ledgers_reads_todays_total_and_caps(monkeypatch, token_env):
+    """`caps` here carries no `per_run_cap_usd` key at all — the shape a
+    Library predating library#225 serves — and `list_ledgers` must still read
+    the other three rather than raising `KeyError`."""
     monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=None: _FakeResponse(
         {"ledgers": [{"id": "led_1", "scope_kind": "project", "scope_id": "vivy",
                       "day": "2026-09-27", "total_usd": 3.5,
@@ -3273,6 +3276,100 @@ def test_list_ledgers_reads_todays_total_and_caps(monkeypatch, token_env):
          "day": "2026-09-27", "count": 1, "total": 1, "offset": 0, "truncated": False}))
     (lg,) = library_client.list_ledgers()
     assert (lg.scope_id, lg.total_usd, lg.hard_cap_usd, lg.soft_cap_usd) == ("vivy", 3.5, 10.0, None)
+    assert lg.per_run_cap_usd is None
+
+
+def test_list_ledgers_reads_per_run_cap_usd_when_the_library_serves_it(monkeypatch, token_env):
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=None: _FakeResponse(
+        {"ledgers": [{"id": "led_1", "scope_kind": "project", "scope_id": "vivy",
+                      "day": "2026-09-27", "total_usd": 3.5,
+                      "caps": {"warn_usd": None, "soft_cap_usd": None, "hard_cap_usd": None,
+                              "per_run_cap_usd": 2.5},
+                      "state": "uncapped", "granted_by": "operator",
+                      "updated_at": "2026-09-27T00:00:00Z"}],
+         "day": "2026-09-27", "count": 1, "total": 1, "offset": 0, "truncated": False}))
+    (lg,) = library_client.list_ledgers()
+    assert lg.per_run_cap_usd == 2.5
+
+
+# --- setting a project's cap set (issue_01M4BH8KSSMC8XBKB2C2CX9QTF) ----------
+#
+# `PUT /ledgers`, under the approved-client credential. Follows
+# `test_approve_epic_*`'s shape above: the credential and the body together,
+# a refusal carrying the Library's own wording, and a 5xx left to propagate.
+
+
+def test_set_ledger_caps_puts_all_four_under_the_client_credential(both_creds, monkeypatch):
+    seen = {}
+
+    def fake_urlopen(req, timeout=None):
+        seen["url"] = req.full_url
+        seen["method"] = req.get_method()
+        seen["auth"] = req.headers["Authorization"]
+        seen["body"] = json.loads(req.data)
+        return _FakeResponse({"id": "led_1", "scope_kind": "project", "scope_id": "vivy",
+                              "caps": {"warn_usd": 1.0, "soft_cap_usd": 2.0,
+                                      "hard_cap_usd": 3.0, "per_run_cap_usd": 0.5},
+                              "acting_human": "operator@example.com",
+                              "attested_by": "convivy-orient"})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    result = library_client.set_ledger_caps(
+        "vivy", warn_usd=1.0, soft_cap_usd=2.0, hard_cap_usd=3.0, per_run_cap_usd=0.5,
+        acting_human="operator@example.com")
+
+    assert seen["method"] == "PUT"
+    assert seen["auth"] == "Bearer CLIENT-CRED"
+    assert seen["url"].endswith("/ledgers")
+    assert seen["body"] == {
+        "scope_kind": "project", "scope_id": "vivy",
+        "warn_usd": 1.0, "soft_cap_usd": 2.0, "hard_cap_usd": 3.0, "per_run_cap_usd": 0.5,
+        "acting_human": "operator@example.com"}
+    assert result["caps"]["hard_cap_usd"] == 3.0
+
+
+def test_set_ledger_caps_sends_an_omitted_cap_as_null(both_creds, monkeypatch):
+    """A cap the caller leaves unset is sent as `null`, which the Library
+    reads as "clear it" rather than "leave it as it was" — the whole reason
+    the form must resend every field, not only the one a human changed."""
+    bodies = []
+
+    def fake_urlopen(req, timeout=None):
+        bodies.append(json.loads(req.data))
+        return _FakeResponse({"caps": {}})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    library_client.set_ledger_caps(
+        "vivy", warn_usd=None, soft_cap_usd=None, hard_cap_usd=None, per_run_cap_usd=None,
+        acting_human="operator@example.com")
+    assert bodies[0]["warn_usd"] is None
+    assert bodies[0]["per_run_cap_usd"] is None
+
+
+def test_set_ledger_caps_refusal_carries_the_librarys_own_wording(both_creds, monkeypatch):
+    def fake_urlopen(req, timeout=None):
+        raise _raw_http_error(400, json.dumps(
+            {"error": "caps must be non-decreasing: warn_usd_micro <= soft_cap_usd_micro "
+                      "<= hard_cap_usd_micro"}).encode())
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(library_client.LedgerCapsRefused) as caught:
+        library_client.set_ledger_caps(
+            "vivy", warn_usd=10.0, soft_cap_usd=1.0, hard_cap_usd=5.0, per_run_cap_usd=None,
+            acting_human="operator@example.com")
+    assert caught.value.status == 400
+    assert "non-decreasing" in caught.value.message
+
+
+def test_set_ledger_caps_5xx_is_not_dressed_up_as_a_refusal(both_creds, monkeypatch):
+    def fake_urlopen(req, timeout=None):
+        raise _raw_http_error(500, b"upstream exploded")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(urllib.error.HTTPError):
+        library_client.set_ledger_caps(
+            "vivy", warn_usd=None, soft_cap_usd=None, hard_cap_usd=None, per_run_cap_usd=None,
+            acting_human="operator@example.com")
 
 
 # --- corrections queues (library/specs/one-home-per-work-item) ------------------
@@ -3308,3 +3405,68 @@ def test_corrections_queue_ids_raises_on_a_library_error(monkeypatch, token_env)
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     with pytest.raises(urllib.error.HTTPError):
         library_client.corrections_queue_ids({"cq_vivy"})
+
+
+# --- per-person project scope (E19·1, issue_01M35K54QHJYYPXWS28YWEHJP3) ------
+
+
+def test_person_scope_carries_the_client_credential_and_the_email_in_the_body(
+        both_creds, monkeypatch):
+    """The email travels in the JSON body, never a path or query string, so it
+    stays out of access logs — and this is the one call the Library reserves
+    for a verified human, so it must carry the APPROVED-CLIENT credential,
+    never Orient's agent one."""
+    seen = {}
+
+    def fake_urlopen(req, timeout=None):
+        seen["url"] = req.full_url
+        seen["auth"] = req.headers["Authorization"]
+        seen["body"] = json.loads(req.data)
+        return _FakeResponse({"count": 2, "projects": ["vivy", "constance"]})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    scope = library_client.person_scope("admin@example.com")
+
+    assert seen["auth"] == "Bearer CLIENT-CRED"
+    assert seen["url"].endswith("/people/by-email/projects")
+    assert "admin@example.com" not in seen["url"]  # never a path or query string
+    assert seen["body"] == {"email": "admin@example.com"}
+    assert scope == frozenset({"vivy", "constance"})
+
+
+def test_person_scope_administrator_is_the_full_registry_the_library_returns(
+        both_creds, monkeypatch):
+    """An administrator's scope is simply whatever the Library answers for
+    them — this client draws no distinction and must never branch on an
+    admin role or flag. Modelled here as a large registry rather than a
+    special "*" value, matching the real route's shape (library#260)."""
+    registry = frozenset({f"project-{n}" for n in range(23)})
+
+    def fake_urlopen(req, timeout=None):
+        return _FakeResponse({"count": len(registry), "projects": sorted(registry)})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    assert library_client.person_scope("admin@example.com") == registry
+
+
+def test_person_scope_unknown_email_is_the_empty_set(both_creds, monkeypatch):
+    """An email the Library cannot resolve to a person answers like a person
+    with no grants — the empty set, never "every project"."""
+    def fake_urlopen(req, timeout=None):
+        return _FakeResponse({"count": 0, "projects": []})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    assert library_client.person_scope("stranger@example.com") == frozenset()
+
+
+def test_person_scope_raises_on_a_library_failure(both_creds, monkeypatch):
+    """Like every read in this module: a Library outage must refuse the
+    caller's request, never read as "this person has no projects" (the
+    module docstring's reasoning, applied to scope the same way as to an
+    issue or signal read)."""
+    def fake_urlopen(req, timeout=None):
+        raise urllib.error.HTTPError(req.full_url, 503, "unavailable", {}, None)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(urllib.error.HTTPError):
+        library_client.person_scope("admin@example.com")

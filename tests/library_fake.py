@@ -53,6 +53,10 @@ _RELATED_ITEMS: dict[str, list[str]] = {}
 # Empty by default, which is what the Library serves before its corrections
 # queues exist: every lookup answers 404.
 _CORRECTIONS_QUEUES: set[str] = set()
+# Empty by default, matching the real route's answer for an email naming no
+# Library person (E19·1, issue_01M35K54QHJYYPXWS28YWEHJP3): the empty set,
+# never "every project". `seed_person_scope` populates it per email.
+_PERSON_SCOPE: dict[str, frozenset[str]] = {}
 
 # The claim TTL the removed control_db.CLAIM_TTL carried — a claim older than
 # this reads as expired, matching the real Library's own computation of the
@@ -611,6 +615,23 @@ def fake_list_review_records(repo_identity: str, pr: int):
     return [library_client.ReviewRecord(**r) for r in rows]
 
 
+def seed_person_scope(email: str, products) -> None:
+    """Register the project slugs `email` resolves to through
+    `library_client.person_scope` — the fake's stand-in for the Library's
+    `POST /people/by-email/projects` (E19·1, issue_01M35K54QHJYYPXWS28YWEHJP3).
+    Pass `{"*"}` for an administrator, matching what the real route answers
+    for one: the full registry, never a flag this fake or `authz` branches
+    on."""
+    _PERSON_SCOPE[email.strip().lower()] = frozenset(products)
+
+
+def fake_person_scope(email: str) -> frozenset[str]:
+    """An email naming no seeded person resolves to the empty set — the real
+    route's own answer for a person it does not know, never "every
+    project"."""
+    return _PERSON_SCOPE.get(email.strip().lower(), frozenset())
+
+
 def patch(monkeypatch) -> None:
     _ISSUES.clear()
     _ISSUE_COMMENTS.clear()
@@ -621,6 +642,7 @@ def patch(monkeypatch) -> None:
     _REVIEW_RECORDS.clear()
     _RELATED_ITEMS.clear()
     _CORRECTIONS_QUEUES.clear()
+    _PERSON_SCOPE.clear()
     FAKE_CAPABILITIES.clear()
     FAKE_CAPABILITIES.add("signal.read")
     monkeypatch.setattr(library_client, "list_issue_items", fake_list_issue_items)
@@ -643,3 +665,4 @@ def patch(monkeypatch) -> None:
     monkeypatch.setattr(library_client, "list_courses", fake_list_courses)
     monkeypatch.setattr(library_client, "get_course", fake_get_course)
     monkeypatch.setattr(library_client, "list_review_records", fake_list_review_records)
+    monkeypatch.setattr(library_client, "person_scope", fake_person_scope)

@@ -1524,6 +1524,20 @@ def test_a_child_links_to_its_parent(db):
     assert 'href="/engineering/issues/issue_epic1"' in html
 
 
+def test_an_untyped_work_item_gets_no_type_badge_and_a_typed_one_keeps_its_own(db):
+    """A work item carries no type, so it is never badged as the old default,
+    `bug`. An item that still has a type, here a closed one, shows that type."""
+    library_fake.seed_issue(**_mk(id="issue_untyped", title="Untyped", type=None))
+    library_fake.seed_issue(**_mk(id="issue_oldtask", title="Closed task", type="task",
+                                  state="fixed", resolution="fixed",
+                                  resolved_by="operator@example.com"))
+    untyped = issue_build.detail_html("issue_untyped")
+    assert 'class="badge type' not in untyped and ">bug<" not in untyped
+    assert '<span class="badge type">task</span>' in issue_build.detail_html("issue_oldtask")
+    card = issue_build.live_html_corrections()
+    assert "Untyped" in card and 'class="badge type' not in card
+
+
 def test_a_correction_in_its_queue_links_to_corrections_not_to_the_queue_id(db):
     """A corrections queue is not an item, so `/engineering/issues/<queue id>`
     would 404 (library/specs/one-home-per-work-item)."""

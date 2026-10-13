@@ -1592,18 +1592,19 @@ def resolve_item(issue_id: str, *, owner: str, resolution: str,
     return _item_write(issue_id, "resolve", body, "the resolve")
 
 
-def create_item(*, product: str, title: str, body: str = "", type: str | None = None,
+def create_item(*, product: str, title: str, body: str = "",
                 severity: str | None = None) -> dict:
     """File one work item — `POST /items`, on the agent credential, which
     resolves `item.create` (issue_01M3J6D09C38T4AT0SGZ20XHDW). Returns the
     stored row. A 4xx raises `ItemWriteRefused` with the Library's wording.
 
+    It sends no `type`: a work item carries none, and the Library refuses
+    bug, nit, improvement and task on create.
+
     The Library records the credential's own name as `created_by`, and takes
     no acting-human field on this route, so a caller wanting the person on
     the record puts them in `body`."""
     payload: dict = {"product": product, "title": title, "body": body}
-    if type:
-        payload["type"] = type
     if severity:
         payload["severity"] = severity
     try:
@@ -2412,7 +2413,12 @@ def list_ledger_entries(*, product: str | None = None) -> list[LedgerEntry]:
 @dataclass
 class Ledger:
     """One live ledger with today's total, as `GET /ledgers` serves it. `day`
-    is the Library's local day that `total_usd` covers."""
+    is the Library's local day that `total_usd` covers.
+
+    `per_run_cap_usd` bounds one admitted run's own spend rather than the
+    project's running total (library #225, 2026-10-07); it takes no part in
+    `state` or the warn/soft/hard ordering. Read with `.get` because a
+    Library predating #225 serves `caps` without that key."""
 
     scope_kind: str
     scope_id: str
@@ -2421,6 +2427,7 @@ class Ledger:
     warn_usd: float | None
     soft_cap_usd: float | None
     hard_cap_usd: float | None
+    per_run_cap_usd: float | None
     state: str
 
 
@@ -2429,8 +2436,57 @@ def list_ledgers() -> list[Ledger]:
     return [Ledger(scope_kind=r["scope_kind"], scope_id=r["scope_id"], day=r["day"],
                    total_usd=r["total_usd"], warn_usd=r["caps"]["warn_usd"],
                    soft_cap_usd=r["caps"]["soft_cap_usd"],
-                   hard_cap_usd=r["caps"]["hard_cap_usd"], state=r["state"])
+                   hard_cap_usd=r["caps"]["hard_cap_usd"],
+                   per_run_cap_usd=r["caps"].get("per_run_cap_usd"), state=r["state"])
             for r in _page_all("/ledgers", "ledgers")]
+
+
+class LedgerCapsRefused(Exception):
+    """The Library refused a cap-set write, with its own wording: an
+    out-of-order threshold, a value over its ceiling, writes disabled. Same
+    shape as `EpicApprovalRefused`/`ItemModelRefused` — the page shows the
+    cause where the control is, and a status code cannot carry it."""
+
+    def __init__(self, status: int, message: str):
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
+def set_ledger_caps(scope_id: str, *, warn_usd: float | None, soft_cap_usd: float | None,
+                    hard_cap_usd: float | None, per_run_cap_usd: float | None,
+                    acting_human: str) -> dict:
+    """Set a project's cap set — `PUT /ledgers`, under the APPROVED-CLIENT
+    credential (library-protocol §6.4). `ledger.grant` is structurally absent
+    from every agent and system credential, so this is the only write Orient
+    may call for it.
+
+    **Every call replaces the whole cap set.** A field left `None` here is
+    sent as `null`, which clears that threshold rather than leaving the
+    Library's stored value in place — the route's own "a re-grant overwrites
+    in place" rule. A caller that wants to change one cap must still pass the
+    other three as they stand, the same way `ledger_caps_api.py` reads all
+    four from the form before posting.
+
+    `acting_human` must be the email Orient verified through Cloudflare
+    Access, never a value from the request body — `approve_epic`'s rule for
+    the same field.
+
+    Returns the Library's own response: `id`, `scope_kind`, `scope_id`,
+    `caps` and `acting_human`. Raises `LedgerCapsRefused` carrying the
+    Library's wording on a 4xx (an out-of-order threshold, a value over its
+    ceiling), and lets anything else propagate as the transport error it is."""
+    try:
+        return _request("/ledgers", json_body={
+            "scope_kind": "project", "scope_id": scope_id,
+            "warn_usd": warn_usd, "soft_cap_usd": soft_cap_usd,
+            "hard_cap_usd": hard_cap_usd, "per_run_cap_usd": per_run_cap_usd,
+            "acting_human": acting_human,
+        }, human_reserved=True, method="PUT")
+    except urllib.error.HTTPError as e:
+        if 400 <= e.code < 500:
+            raise LedgerCapsRefused(e.code, _refusal_message(e, "the cap change")) from e
+        raise
 
 
 # --- review records (GET /review-records, protocol version 1) ----------------
@@ -2476,3 +2532,33 @@ def list_review_records(repo_identity: str, pr: int) -> list[ReviewRecord]:
                 created_at=_iso(r["created_at"]), updated_at=_iso(r["updated_at"]))
             for r in _page_all("/review-records", "review_records",
                                {"repo_identity": repo_identity, "pr": str(pr)})]
+
+
+# --- per-person project scope (E19·1, issue_01M35K54QHJYYPXWS28YWEHJP3) ------
+#
+# The one route Orient reads to learn which projects a viewer may see —
+# `POST /people/by-email/projects` (library#260), under the APPROVED-CLIENT
+# credential like every other call the Library reserves for a verified human.
+# The email goes in the JSON body, never a path or query string, so it stays
+# out of access logs.
+
+
+def person_scope(email: str) -> frozenset[str]:
+    """The project slugs `email` may see, resolved live against the Library —
+    never stored here. An administrator's scope is the full project set the
+    Library returns for them; this function draws no distinction and must
+    never branch on an admin role or flag, so every caller (`server.py`
+    beside the identity gate, `api_common.resolve_identity` for the write
+    APIs) receives whatever the Library answers, unchanged.
+
+    An email naming no Library person resolves to the empty set, the same
+    way the route answers it — not an error, and not "every project".
+
+    Raises on any Library failure, like every read in this module (module
+    docstring): the caller must refuse the request rather than fall back to
+    an unscoped, cached, or roles.json-derived view. Resolve it fresh per
+    request; nothing here may cache across requests, or a grant/revocation
+    would take effect only on the process's next restart."""
+    raw = _request("/people/by-email/projects", json_body={"email": email},
+                    human_reserved=True)
+    return frozenset(raw["projects"])

@@ -22,6 +22,7 @@ import access_identity
 import api_common
 import authz
 import control_db
+import library_client
 import library_fake
 import server as srv
 
@@ -50,6 +51,14 @@ def client(tmp_path, monkeypatch):
         "narrow@example.com": {"role": "signal_reader_no_customer", "products": ["vivy"]},
     }))
     monkeypatch.setattr(authz, "ROLES", roles)
+    # The project scope now comes from the Library (E19·1,
+    # issue_01M35K54QHJYYPXWS28YWEHJP3), never from roles.json's `products` —
+    # stubbed by re-reading the same roles.json file on every call, overriding
+    # `library_fake.patch`'s own fake (which has no seed for these emails).
+    monkeypatch.setattr(
+        library_client, "person_scope",
+        lambda email: frozenset(
+            json.loads(authz.ROLES.read_text()).get(email, {}).get("products", [])))
     toks = tmp_path / "api-tokens.json"
     toks.write_text(json.dumps({AGENT_TOKEN: {"name": "agent", "products": ["vivy"]}}))
     monkeypatch.setattr(api_common, "API_TOKENS", toks)

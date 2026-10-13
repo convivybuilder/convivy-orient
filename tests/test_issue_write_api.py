@@ -47,6 +47,14 @@ def client(tmp_path, monkeypatch):
         "ro@example.com": {"role": "observer", "products": ["*"]},
     }))
     monkeypatch.setattr(authz, "ROLES", roles)
+    # The project scope now comes from the Library (E19·1,
+    # issue_01M35K54QHJYYPXWS28YWEHJP3), never from roles.json's `products` —
+    # stubbed by re-reading the same roles.json file on every call, the way
+    # the pre-E19·1 `human_identity` re-read it fresh.
+    monkeypatch.setattr(
+        library_client, "person_scope",
+        lambda email: frozenset(
+            json.loads(authz.ROLES.read_text()).get(email, {}).get("products", [])))
     tiers = tmp_path / "tiers.json"
     tiers.write_text(json.dumps({"full": [
         "operator@example.com", "mem@example.com", "scoped@example.com", "ro@example.com"]}))
@@ -72,10 +80,10 @@ def lib(monkeypatch):
                                outcome_note=outcome_note, refs=refs)
         return {"id": issue_id, "state": resolution}
 
-    def fake_create(*, product, title, body="", type=None, severity=None):
-        seen["create"] = dict(product=product, title=title, body=body, type=type,
-                              severity=severity)
-        return {"id": "issue_NEW", "product": product}
+    def fake_create(**kwargs):
+        # Every keyword as passed, so a test can assert that `type` never is.
+        seen["create"] = kwargs
+        return {"id": "issue_NEW", "product": kwargs["product"]}
 
     monkeypatch.setattr(library_client, "resolve_item", fake_resolve)
     monkeypatch.setattr(library_client, "create_item", fake_create)
@@ -197,21 +205,24 @@ def test_a_library_fault_is_not_dressed_up_as_a_refusal(client, monkeypatch):
 
 
 def test_a_member_files_an_issue_and_is_named_in_its_body(client, lib):
+    """The filing below still carries `"type": "bug"`, as an older page would
+    send it. A work item carries no type and the Library refuses the retired
+    ones, so the type never reaches `create_item`."""
     r = _file(client, _human("mem@example.com"))
     assert r.status_code == 200, r.text
     assert r.json() == {"id": "issue_NEW", "idempotent": False}
     assert lib["create"] == {
         "product": "convivy-orient", "title": "A thing is broken",
         "body": "Details.\n\n— filed by mem@example.com through team.convivy.com",
-        "type": "bug", "severity": "medium"}
+        "severity": "medium"}
 
 
 def test_a_filing_with_no_body_still_names_the_person(client, lib):
     r = _file(client, _human("mem@example.com"),
-              {"product": "convivy-orient", "title": "T", "type": "", "severity": ""})
+              {"product": "convivy-orient", "title": "T", "severity": ""})
     assert r.status_code == 200, r.text
     assert lib["create"]["body"] == "— filed by mem@example.com through team.convivy.com"
-    assert lib["create"]["type"] is None and lib["create"]["severity"] is None
+    assert lib["create"]["severity"] is None
 
 
 def test_the_named_person_is_the_verified_email_not_a_body_value(client, lib):
@@ -271,18 +282,15 @@ def test_a_filing_refusal_keeps_its_status_and_wording(client, monkeypatch):
 # --- the panel offers only what the Library accepts ---------------------------
 
 
-def test_the_log_panel_offers_exactly_the_librarys_types_and_severities():
-    """The Library's `store.ITEM_TYPES` is {bug, nit, improvement, task, epic}
-    and `ITEM_SEVERITIES` {high, medium, low}, at library c2c0129. The panel
-    offered `feature` too, which the Library refuses with 400 (review of PR
-    #342, round 1)."""
+def test_the_log_panel_offers_no_type_and_exactly_the_librarys_severities():
+    """A work item carries no type, and the Library refuses bug, nit,
+    improvement and task on create (Library CQ·199), so the panel has no Type
+    field and its script sends none. `ITEM_SEVERITIES` is {high, medium, low}."""
     import re as _re
     import issue_build
     html = issue_build._log_issue_form(["convivy-orient"])
-    type_block = html[html.index('<select name="type">'):]
-    type_block = type_block[:type_block.index("</select>")]
+    assert 'name="type"' not in html
+    assert "form.elements.type" not in issue_build._JS
     sev_block = html[html.index('<select name="severity"'):]
     sev_block = sev_block[:sev_block.index("</select>")]
-    assert set(_re.findall(r'<option value="([^"]+)"', type_block)) == {
-        "bug", "nit", "improvement", "task", "epic"}
     assert set(_re.findall(r'<option value="([^"]+)"', sev_block)) == {"high", "medium", "low"}

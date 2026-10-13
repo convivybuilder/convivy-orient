@@ -161,7 +161,11 @@ async def create_room(request: Request):
     email = email.strip().lower()
     title = _clip(payload.get("title", ""), MAX_TITLE)
     landing_note = _clip(payload.get("landing_note", ""), MAX_TEXT)
-    entries, e_err = _clean_entries(payload.get("entries", []), room_entitlement(email))
+    # The TARGET member's own scope, not the provisioning admin's — a room is
+    # provisioned for `email`, so its grant must be `email`'s, a fresh Library
+    # lookup rather than `ident.products`.
+    entries, e_err = _clean_entries(payload.get("entries", []),
+                                     room_entitlement(email, library_client.person_scope(email)))
     if e_err:
         return _json(400, {"error": e_err})
     with session() as s:
@@ -218,7 +222,11 @@ async def add_entries(room_id: str, request: Request):
         room = s.get(ReadingRoom, room_id)
         if room is None:
             return _json(404, {"error": "not found"})
-        entries, e_err = _clean_entries(payload.get("entries", []), room_entitlement(room.email))
+        # The TARGET member's own scope, the same reason create_room resolves
+        # it fresh rather than reusing the curating admin's ident.products.
+        entries, e_err = _clean_entries(
+            payload.get("entries", []),
+            room_entitlement(room.email, library_client.person_scope(room.email)))
         if e_err:
             return _json(400, {"error": e_err})
         existing = {e.doc_id: e for e in room.entries}
@@ -348,9 +356,9 @@ async def room_request(request: Request):
         return _json(503, {"error": "concierge unavailable"})
 
     email = ident.actor
-    grant = room_entitlement(email)
+    grant = room_entitlement(email, ident.products)
     # Input-side minimization: the model sees ONLY this member's entitled catalog.
-    catalog = concierge.build_catalog(entitled_docs(email))
+    catalog = concierge.build_catalog(entitled_docs(email, ident.products))
     with session() as s:
         room = s.scalar(select(ReadingRoom).where(
             ReadingRoom.email == email, ReadingRoom.status == "active"))

@@ -263,6 +263,7 @@ def notify_alert(sig: dict) -> int:
     become the one place where an alert reaches someone the Alerts page would
     not have shown it to.
     """
+    import library_client
     from authz import authorize, human_identity
     from control_db import PRIVACY_CUSTOMER
     sig_id = sig.get("id") or ""
@@ -278,7 +279,15 @@ def notify_alert(sig: dict) -> int:
             idents = list(s.scalars(select(PushSubscription.identity).distinct()))
         for ident_email in idents:
             try:
-                ident = human_identity(ident_email)
+                # NO HTTP REQUEST TO CARRY A PER-REQUEST SCOPE (E19·1,
+                # issue_01M35K54QHJYYPXWS28YWEHJP3) — this runs off a
+                # threadpool, not inside a request a scope could already be
+                # resolved beside. Resolved here instead, one Library call
+                # per subscriber per alert; named in that item's PR body as
+                # the one call site this could not thread a request-scoped
+                # value through, worth a second look if the subscriber count
+                # ever grows large enough for the per-alert fan-out to matter.
+                ident = human_identity(ident_email, library_client.person_scope(ident_email))
                 if ident is None or not authorize(ident, "signal.read", product):
                     continue
                 # The customer wall, checked HERE and not inherited from the page.

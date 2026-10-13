@@ -128,6 +128,13 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(access_identity, "JWT_CONFIG", jwtc)
 
     library_fake.patch(monkeypatch)
+    # The project scope now comes from the Library (E19·1,
+    # issue_01M35K54QHJYYPXWS28YWEHJP3), never from roles.json's `products` —
+    # seeded here to match, for every email this file acts as or provisions
+    # a room for.
+    library_fake.seed_person_scope("operator@example.com", {"*"})
+    library_fake.seed_person_scope("mem@example.com", {"vivy"})
+    library_fake.seed_person_scope("con@example.com", {"vivy"})
     _seed_docs()
 
     # Freeze the Briefs window's notion of "now" so the whole suite is
@@ -148,7 +155,7 @@ def _human(email, origin="http://testserver", **extra):
 
 
 def test_full_tier_sees_every_team_doc(client):
-    grant = kb_index.room_entitlement("operator@example.com")
+    grant = kb_index.room_entitlement("operator@example.com", frozenset({"*"}))
     # The team-audience briefs are all in the grant, ancient and undated ones
     # included — entitlement is about audience, not age; the audience: [operator]
     # one is NOT — which is the whole reason briefs were invisible before
@@ -163,7 +170,7 @@ def test_full_tier_sees_every_team_doc(client):
 
 def test_contractor_scoped_to_contractor_audience_and_product(client):
     # A vivy contractor: A only. B is team-only; C is out of the vivy scope.
-    grant = kb_index.room_entitlement("con@example.com")
+    grant = kb_index.room_entitlement("con@example.com", frozenset({"vivy"}))
     assert grant == {"vivy/a"}
 
 
@@ -181,7 +188,7 @@ def test_room_entitlement_never_fetches_a_body(client, monkeypatch):
         raise AssertionError(f"room_entitlement fetched a body for {doc_id}")
 
     monkeypatch.setattr(library_client, "get_reference_document", must_not_be_called)
-    grant = kb_index.room_entitlement("operator@example.com")
+    grant = kb_index.room_entitlement("operator@example.com", frozenset({"*"}))
     assert grant == {"vivy/a", "vivy/b", "constance/c",
                      "platform/briefs/ai-engineering-briefing-2026-07-04",
                      "company/briefs/ai-transformation-briefing-2026-07-11",
@@ -280,9 +287,9 @@ def test_team_docs_raises_on_a_library_failure(client, monkeypatch):
     with pytest.raises(RuntimeError):
         kb_index.team_docs()
     with pytest.raises(RuntimeError):
-        kb_index.entitled_docs("operator@example.com")
+        kb_index.entitled_docs("operator@example.com", frozenset({"*"}))
     with pytest.raises(RuntimeError):
-        kb_index.room_entitlement("operator@example.com")
+        kb_index.room_entitlement("operator@example.com", frozenset({"*"}))
 
 
 def test_room_render_500s_on_a_library_failure_not_an_empty_room(client, monkeypatch):

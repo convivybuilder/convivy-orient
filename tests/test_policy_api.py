@@ -77,6 +77,17 @@ def client(tmp_path, monkeypatch):
         "scoped@example.com": {"role": "policy_writer", "products": ["vivy"]},
     }))
     monkeypatch.setattr(authz, "ROLES", roles)
+    # The project scope now comes from the Library (E19·1,
+    # issue_01M35K54QHJYYPXWS28YWEHJP3), never from roles.json's `products` —
+    # stubbed by re-reading the SAME roles.json file on every call (several
+    # tests below rewrite it mid-test to change an email's grant) rather than
+    # a dict snapshot, so a test's later `authz.ROLES.write_text(...)` is
+    # still reflected here, the way the pre-E19·1 `human_identity` re-read it
+    # fresh on every call.
+    monkeypatch.setattr(
+        library_client, "person_scope",
+        lambda email: frozenset(
+            json.loads(authz.ROLES.read_text()).get(email, {}).get("products", [])))
 
     tiers = tmp_path / "tiers.json"
     tiers.write_text(json.dumps({"full": ["operator@example.com", "scoped@example.com"]}))

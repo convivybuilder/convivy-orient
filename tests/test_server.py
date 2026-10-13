@@ -291,6 +291,13 @@ def live_server(tmp_path, monkeypatch):
     monkeypatch.setattr(srv.signals_build, "live_html", lambda: "SIGNALS-LIVE")
     monkeypatch.setattr(srv.archives_build, "prs_live_html", lambda: "PRS-LIVE")
     monkeypatch.setattr(srv.archives_build, "changelogs_live_html", lambda: "CHANGELOGS-LIVE")
+    # The viewer's project scope (E19·1, issue_01M35K54QHJYYPXWS28YWEHJP3),
+    # resolved beside the identity gate on every request. Stubbed broad here
+    # — "*", the administrator's own answer — since this fixture's tests
+    # exercise routing/tier/role behaviour, not per-project filtering (that
+    # plumbing is the sibling items' work); a test that cares about a
+    # narrower scope overrides this.
+    monkeypatch.setattr(srv.library_client, "person_scope", lambda email: frozenset({"*"}))
     tiers = tmp_path / "tiers.json"
     tiers.write_text(json.dumps({"full": ["operator@example.com"]}))
     jwtc = tmp_path / "jwt.json"
@@ -1128,6 +1135,44 @@ def test_home_falls_back_to_static_on_live_error(live_server, monkeypatch):
     assert code == 200 and "HOME-FULL-STATIC" in body
 
 
+# --- per-viewer scope, resolved beside the identity gate ---------------------
+# (E19·1, issue_01M35K54QHJYYPXWS28YWEHJP3)
+
+
+def test_a_library_outage_refuses_the_request_rather_than_serving_the_global_view(
+        live_server, monkeypatch):
+    """Fail closed: the viewer never falls back to the global view, a cached
+    scope, or any default — a Library failure is a 503, on a route that
+    would otherwise render live and carries no Library dependency of its own
+    (home, a plain control-DB/local builder)."""
+    def boom(email):
+        raise RuntimeError("library unreachable")
+    monkeypatch.setattr(srv.library_client, "person_scope", boom)
+    code, body = _get(live_server, "/", email="operator@example.com")
+    assert code == 503 and "project access" in body
+
+
+def test_an_administrators_resolved_scope_is_whatever_the_library_returns_for_them(
+        live_server, monkeypatch):
+    """The administrator's global view is produced by the scope path rather
+    than by skipping it: `_identity`'s caller always calls
+    `library_client.person_scope`, even for an admin — proven by making the
+    stub distinguishable per email and showing a plain page still renders
+    (the resolution happened; nothing special-cased past it) and the viewer
+    substitution reflects the admin role from roles.json, not a hardcoded
+    bypass of the scope call itself."""
+    calls = []
+
+    def recording_scope(email):
+        calls.append(email)
+        return frozenset({"vivy", "constance", "convivy-orient"})  # "every project"
+
+    monkeypatch.setattr(srv.library_client, "person_scope", recording_scope)
+    code, _ = _get(live_server, "/", email="operator@example.com")
+    assert code == 200
+    assert calls == ["operator@example.com"]  # resolved, not skipped, for the admin
+
+
 def test_no_identity_refused(live_server):
     code, _ = _get(live_server, "/dashboard", email=None)
     assert code == 403
@@ -1151,6 +1196,7 @@ def test_enforce_mode_ignores_header_requires_valid_jwt(tmp_path, monkeypatch):
     monkeypatch.setattr(ident, "TIERS", tiers)
     monkeypatch.setattr(ident, "JWT_CONFIG", jwtc)
     monkeypatch.setattr(srv, "ACCESS_LOG", tmp_path / "access.log")
+    monkeypatch.setattr(srv.library_client, "person_scope", lambda email: frozenset({"*"}))
     with TestClient(srv.app, follow_redirects=False) as client:
         # header email alone (no JWT) is refused — the monitor-mode trust is gone
         r = client.get("/orientation", headers={srv.EMAIL_HEADER: "operator@example.com"})
@@ -1642,6 +1688,31 @@ def test_an_item_page_fills_can_set_item_model_by_role(
     code, text = _get(live_server, "/engineering/issues/issue_x", "m@example.com")
     assert code == 200, code
     assert f'data-can-set="{shown}"' in text
+
+
+@pytest.mark.parametrize("role, shown", [("admin", "true"), ("member", "false"),
+                                         ("contractor", "false")])
+def test_spending_fills_can_set_ledger_caps_by_role(
+        live_server, tmp_path, monkeypatch, role, shown):
+    """The Spending page's per-project ledger-caps form is shown to a role
+    holding `ledger_caps_write`, which is admin alone
+    (issue_01M4BH8KSSMC8XBKB2C2CX9QTF). `role=contractor` here is a full-tier
+    human given that role by hand, to isolate the role check from the tier
+    gate that already keeps a contractor-TIER viewer off this page entirely
+    (test_spending_and_cost_performance_served_to_full_tier's inverse); it
+    reads the same false a member does, and no roles.json entry at all
+    (`test_ledger_caps_api.py`'s own contractor-tier case) resolves to this
+    same role by default. Neither is told the control exists, matching the
+    route's own 404."""
+    (tmp_path / "tiers.json").write_text(json.dumps({"full": ["m@example.com"]}))
+    roles = tmp_path / "roles.json"
+    roles.write_text(json.dumps({"m@example.com": {"role": role, "products": ["*"]}}))
+    monkeypatch.setattr(srv.authz, "ROLES", roles)
+    monkeypatch.setattr(srv.dashboard_build, "spending_live_html",
+                        lambda: 'SPENDING-PAGE data-can-set-ledger-caps="__CAN_SET_LEDGER_CAPS__"')
+    code, text = _get(live_server, "/spending", "m@example.com")
+    assert code == 200, code
+    assert f'data-can-set-ledger-caps="{shown}"' in text
 
 
 # --- _log_field routes through logutil (issue_01M0VBZRCA15QSVYFMEF8MZ8N0) -----

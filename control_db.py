@@ -86,24 +86,16 @@ def prerequisite_met(entry: dict) -> bool:
         return False
     return entry.get("state") in ISSUE_TERMINAL
 
-ISSUE_TYPE_BUG = "bug"
-ISSUE_TYPE_NIT = "nit"
-ISSUE_TYPE_IMPROVEMENT = "improvement"
-ISSUE_TYPE_FEATURE = "feature"
-ISSUE_TYPE_TASK = "task"
+# A work item carries no type; `epic` is the only type left (Library epic
+# issue_01M0EEPS591VQHYEBJY7NGF4C3). A closed item may still carry the bug,
+# nit, improvement, task or feature it closed with, which is history Orient
+# shows and never sends.
 ISSUE_TYPE_EPIC = "epic"
-# The types a new filing may carry: the Library's `store.ITEM_TYPES`, which
-# dropped `feature`. A filing typed `feature` is refused with 400, so the
-# "Log an issue" panel must not offer it (issue_01M3J6D09C38T4AT0SGZ20XHDW).
-# `ISSUE_TYPE_FEATURE` stays because older items still carry it.
-ISSUE_TYPES = (ISSUE_TYPE_BUG, ISSUE_TYPE_NIT, ISSUE_TYPE_IMPROVEMENT,
-               ISSUE_TYPE_TASK, ISSUE_TYPE_EPIC)
 
 ISSUE_NEEDS_AGENT = "agent"
 ISSUE_NEEDS_OPERATOR = "operator"
 ISSUE_NEEDS_EITHER = "either"
 ISSUE_DEFAULT_NEEDS = ISSUE_NEEDS_AGENT
-ISSUE_DEFAULT_TYPE = ISSUE_TYPE_BUG
 
 
 def new_room_id() -> str:

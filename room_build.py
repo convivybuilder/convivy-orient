@@ -4,8 +4,9 @@ live_html(email) renders the room for the verified caller. The load-bearing
 property is that the render is bounded by the GRANT, computed server-side. It is
 **grant ∩ (curation ∪ the standing Briefs rule)**:
 
-  - the GRANT is kb_index.room_entitlement(email) / entitled_docs(email), derived
-    live from tiers.json + roles.json + audience frontmatter;
+  - the GRANT is kb_index.room_entitlement(email, products) / entitled_docs(email,
+    products), derived live from tiers.json + the caller's Library-resolved
+    project scope + audience frontmatter;
   - the CURATION is the member's ReadingRoom entries (which docs, sections, order,
     notes) from the control DB;
   - the BRIEFS RULE (ARCH-372) renders every entitled doc under `*/briefs/` from
@@ -27,8 +28,8 @@ ended with an empty Room and a redirect pointing at it.
 
 Only docs in BOTH get their body embedded in the page payload. A curated entry
 pointing at a doc outside the member's current grant silently drops out — its body
-is never placed in the response — so narrowing a grant (a roles.json/audience edit)
-takes effect on the next load with no room edit, and a buggy or hostile entry can
+is never placed in the response — so narrowing a grant (a change to the member's
+project scope in the Library, or an audience edit) takes effect on the next load with no room edit, and a buggy or hostile entry can
 render at most nothing. Doc bodies render client-side through the vendored
 marked + DOMPurify pipeline (ARCH-244); the landing note and per-entry notes are
 member/agent-authored text, so they go through DOMPurify too.
@@ -202,8 +203,10 @@ def _in_brief_window(doc: dict, cutoff: str) -> bool:
     return date == "" or date >= cutoff
 
 
-def live_html(email: str) -> str:
-    """Render the caller's Reading Room. Raises on a hard failure (server.py turns
+def live_html(email: str, products: frozenset[str]) -> str:
+    """Render the caller's Reading Room. `products` is the caller's own
+    Library-resolved project scope (server.py resolves it once per request,
+    beside the identity gate). Raises on a hard failure (server.py turns
     that into a 500 — never a fallback to another member's room)."""
     tier = tier_for(email)
     room, entries = _load_room(email)
@@ -212,7 +215,7 @@ def live_html(email: str) -> str:
 
     # The grant, as the id→doc map (body + title live here). Only entitled docs
     # are ever loaded, so an entry outside the grant has no body to embed.
-    docs_by_id = {d["id"]: d for d in entitled_docs(email)}
+    docs_by_id = {d["id"]: d for d in entitled_docs(email, products)}
 
     # Intersect curation with grant: an entry whose doc_id is not entitled is
     # dropped here and never reaches the payload — the render can surface at most

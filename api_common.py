@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 
 from access_identity import EMAIL_HEADER, JWT_HEADER, jwt_config, verify_access_jwt
 from authz import Identity, agent_identity, human_identity, system_identity
+import library_client
 from logutil import clean_log_field
 from paths import CONFIG_ROOT
 
@@ -207,6 +208,15 @@ def resolve_identity(request: Request) -> Identity | None:
     a human identity. None when neither authenticates. Fail-closed: any kind
     value other than the exact string "system" resolves as agent.
 
+    **A human identity's project scope comes from the Library, resolved fresh
+    on this call** (`library_client.person_scope`, E19·1
+    issue_01M35K54QHJYYPXWS28YWEHJP3) — never from roles.json, and never
+    cached across requests, so a grant or revocation takes effect on the very
+    next write. A Library failure here propagates (this module's callers are
+    every write route wrapped in `api_guard`, which turns it into a 500
+    refusal rather than completing the write against a stale or absent
+    scope).
+
     Every outcome is also stashed for the access log — see `_note_identity`."""
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer "):
@@ -219,7 +229,7 @@ def resolve_identity(request: Request) -> Identity | None:
         make = system_identity if meta.get("kind") == "system" else agent_identity
         return _note_identity(request, make(meta["name"], meta["products"]), "auth=bearer")
     email = _verified_email(request)
-    ident = human_identity(email) if email else None
+    ident = human_identity(email, library_client.person_scope(email)) if email else None
     return _note_identity(request, ident, "auth=cf-access" if ident else "auth=none")
 
 

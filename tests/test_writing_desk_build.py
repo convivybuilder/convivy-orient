@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 
 import access_identity
 import authz
+import library_client
 import server as srv
 
 
@@ -28,6 +29,14 @@ def client(tmp_path, monkeypatch):
         "con@example.com": {"role": "contractor", "products": ["vivy"]},
     }))
     monkeypatch.setattr(authz, "ROLES", roles)
+    # The project scope now comes from the Library (E19·1,
+    # issue_01M35K54QHJYYPXWS28YWEHJP3), never from roles.json's `products` —
+    # stubbed by re-reading the same roles.json file on every call, the way
+    # the pre-E19·1 `human_identity` re-read it fresh.
+    monkeypatch.setattr(
+        library_client, "person_scope",
+        lambda email: frozenset(
+            json.loads(authz.ROLES.read_text()).get(email, {}).get("products", [])))
 
     # tiers: only operator is full; mem + con are contractor tier (tier is distinct
     # from role — mem is a "member" by role but not full-tier here). The

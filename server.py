@@ -67,6 +67,7 @@ import engineering_build
 import engineering_e2e_build
 import home_build
 import kb_build
+import library_client
 from logutil import clean_log_field
 import memory_api
 import merge_queue_build
@@ -76,6 +77,7 @@ import approve_api
 import model_override_api
 import issue_write_api
 import epic_revise_api
+import ledger_caps_api
 import policy_api
 import policy_build
 import project_build
@@ -321,7 +323,8 @@ def _identity(request: Request):
     return email, tier, label, jwt_status
 
 
-def _substitute_viewer_tokens(html: str, email: str, esc_label: str) -> str:
+def _substitute_viewer_tokens(html: str, email: str, esc_label: str,
+                              scope: frozenset[str]) -> str:
     """Fill the per-viewer tokens a full-tier page carries.
 
     `__WHOAMI__` is the identity label every Engineering page shows in its
@@ -339,7 +342,10 @@ def _substitute_viewer_tokens(html: str, email: str, esc_label: str) -> str:
     `epic.approve` capability behind it, are that one's wall.
     `__CAN_SET_ITEM_MODEL__` gates an item page's model control on roles
     holding item_model — model_override_api and the Library's `item.model`
-    are that one's wall. All of those pages
+    are that one's wall. `__CAN_SET_LEDGER_CAPS__` gates the Spending page's
+    per-project ledger-caps form on roles holding ledger_caps_write —
+    ledger_caps_api and the Library's own `ledger.grant` are that one's wall.
+    All of those pages
     render through `_full_only_routes()`, so this one substitution covers every
     one of them with nothing route-specific to remember.
 
@@ -357,8 +363,12 @@ def _substitute_viewer_tokens(html: str, email: str, esc_label: str) -> str:
     Corrections page emits `__CAN_LOG_ISSUE__`, so lifting it out for
     `?sort=topic` would otherwise have left the literal token in the form's
     `data-can-log` attribute — the form reads it, so it would have broken
-    rather than merely looked wrong."""
-    viewer_role = authz.human_identity(email).role
+    rather than merely looked wrong.
+
+    `scope` is the viewer's Library-resolved project scope, from `_identity`'s
+    caller (once per request, never cached) — threaded through to
+    `authz.human_identity` rather than re-resolved here."""
+    viewer_role = authz.human_identity(email, scope).role
     html = html.replace("__CAN_CAPTURE__",
                         "true" if viewer_role in authz.CAPTURE_ROLES else "false")
     html = html.replace("__CAN_LOG_ISSUE__",
@@ -371,6 +381,8 @@ def _substitute_viewer_tokens(html: str, email: str, esc_label: str) -> str:
                         "true" if viewer_role in authz.EPIC_APPROVER_ROLES else "false")
     html = html.replace("__CAN_SET_ITEM_MODEL__",
                         "true" if viewer_role in authz.ITEM_MODEL_SETTER_ROLES else "false")
+    html = html.replace("__CAN_SET_LEDGER_CAPS__",
+                        "true" if viewer_role in authz.LEDGER_CAPS_WRITER_ROLES else "false")
     return html.replace("__WHOAMI__", esc_label)
 
 
@@ -674,6 +686,12 @@ app.include_router(model_override_api.router)
 # issue_write_api.py.
 app.include_router(issue_write_api.router)
 
+# The Spending page's per-project ledger-caps form (issue_01M4BH8KSSMC8XBKB2C2CX9QTF).
+# Same ordering and the same human-only + CSRF gate as approving, on
+# `ledger.caps_write`; the Library's own `ledger.grant` is the wall behind it
+# — see ledger_caps_api.py.
+app.include_router(ledger_caps_api.router)
+
 
 # Retired paths that 302 to their new homes (link stability), tier-gated like the
 # pages they point at. Module-level so the table is inspectable by tests — it was
@@ -767,6 +785,22 @@ def handle_get(request: Request):
     if email is None:
         return extra  # the refusal Response
     jwt_status = extra
+
+    # The viewer's project scope, resolved beside the identity gate (E19·1,
+    # issue_01M35K54QHJYYPXWS28YWEHJP3): every later builder that needs it
+    # reads `scope` from here rather than re-deriving it, and an
+    # administrator's scope is simply the full set the Library returns for
+    # them — nothing here branches on an admin role or flag. Resolved fresh
+    # on every request, never cached: a Library outage refuses the request
+    # rather than falling back to the global view, roles.json, or any
+    # default scope.
+    try:
+        scope = library_client.person_scope(email)
+    except Exception as exc:
+        _log_render_failure("person-scope", exc)
+        access_log(request, 503, email, tier, jwt_status)
+        return _html(
+            503, b"<h1>503</h1><p>project access could not be resolved.</p>", request)
     esc_label = _html_escape(label)
 
     if path.startswith(_EDITOR_JS_PREFIX):
@@ -835,7 +869,7 @@ def handle_get(request: Request):
         # `__WHOAMI__` replace: this route sits outside `_full_only_routes()`,
         # which is exactly the case that helper was extracted for — a
         # route lifted out of the table shipped the card's tokens unfilled.
-        html = _substitute_viewer_tokens(html, email, esc_label)
+        html = _substitute_viewer_tokens(html, email, esc_label, scope)
         return _html(200, html.encode("utf-8"), request)
 
     # /engineering/corrections (issue_01M22998K9JYPVYDAHQT0EX3G4): the
@@ -873,7 +907,7 @@ def handle_get(request: Request):
                 access_log(request, 500, email, tier, jwt_status)
                 return _html(500, b"<h1>500</h1><p>corrections.html missing - run its build</p>", request)
         access_log(request, 200, email, tier, jwt_status)
-        html = _substitute_viewer_tokens(html, email, esc_label)
+        html = _substitute_viewer_tokens(html, email, esc_label, scope)
         render_headers = {STALE_FALLBACK_HEADER: "stale-fallback"} if stale else None
         return _html(200, html.encode("utf-8"), request, extra_headers=render_headers)
 
@@ -938,7 +972,7 @@ def handle_get(request: Request):
         # write-form affordance (issue_01M1F1ENN8P6RD4W3SJJ04HR45) — shown to
         # roles holding policy_write (admin only; see authz.py). Cosmetic:
         # policy_api's own authz gate is the wall.
-        viewer_role = authz.human_identity(email).role
+        viewer_role = authz.human_identity(email, scope).role
         html = html.replace("__CAN_POLICY_WRITE__",
                             "true" if viewer_role in authz.POLICY_WRITER_ROLES else "false")
         return _html(200, html.replace("__WHOAMI__", esc_label).encode("utf-8"), request)
@@ -979,12 +1013,12 @@ def handle_get(request: Request):
         # `__WHOAMI__` replace: this route sits outside `_full_only_routes()`,
         # which is exactly the case that helper was extracted for — a
         # route lifted out of the table shipped the card's tokens unfilled.
-        html = _substitute_viewer_tokens(html, email, esc_label)
+        html = _substitute_viewer_tokens(html, email, esc_label, scope)
         return _html(200, html.encode("utf-8"), request)
 
     if path in ("/room", "/room/"):
         try:
-            html = room_build.live_html(email)
+            html = room_build.live_html(email, scope)
         except Exception as exc:
             _log_render_failure("room", exc)
             access_log(request, 500, email, tier, jwt_status)
@@ -993,7 +1027,7 @@ def handle_get(request: Request):
         # __CAN_BLOG_WRITE__ works the same way as __CAN_CAPTURE__ / __CAN_LOG_ISSUE__
         # for the Room's blog-drafts panel (roles holding blog_write) — cosmetic;
         # blog_api's own authz gate on every route is the wall.
-        viewer_role = authz.human_identity(email).role
+        viewer_role = authz.human_identity(email, scope).role
         html = html.replace("__CAN_BLOG_WRITE__",
                             "true" if viewer_role in authz.BLOG_WRITER_ROLES else "false")
         return _html(200, html.replace("__WHOAMI__", esc_label).encode("utf-8"), request)
@@ -1011,7 +1045,7 @@ def handle_get(request: Request):
             access_log(request, 500, email, tier, jwt_status)
             return _html(500, b"<h1>500</h1><p>writing desk unavailable</p>", request)
         access_log(request, 200, email, tier, jwt_status)
-        viewer_role = authz.human_identity(email).role
+        viewer_role = authz.human_identity(email, scope).role
         html = html.replace("__CAN_BLOG_WRITE__",
                             "true" if viewer_role in authz.BLOG_WRITER_ROLES else "false")
         return _html(200, html.replace("__WHOAMI__", esc_label).encode("utf-8"), request)
@@ -1063,7 +1097,7 @@ def handle_get(request: Request):
         if tier != "full":
             access_log(request, 404, email, tier, jwt_status)
             return _html(404, b"<h1>404</h1>", request)
-        viewer_role = authz.human_identity(email).role
+        viewer_role = authz.human_identity(email, scope).role
         try:
             html = blog_posts_build.live_html(
                 email, can_see_drafts=viewer_role in authz.BLOG_WRITER_ROLES)
@@ -1072,7 +1106,7 @@ def handle_get(request: Request):
             access_log(request, 500, email, tier, jwt_status)
             return _html(500, b"<h1>500</h1><p>blog posts unavailable</p>", request)
         access_log(request, 200, email, tier, jwt_status)
-        return _html(200, _substitute_viewer_tokens(html, email, esc_label).encode("utf-8"),
+        return _html(200, _substitute_viewer_tokens(html, email, esc_label, scope).encode("utf-8"),
                      request)
 
     full_only = _full_only_routes()
@@ -1093,7 +1127,7 @@ def handle_get(request: Request):
                 access_log(request, 500, email, tier, jwt_status)
                 return _html(500, f"<h1>500</h1><p>{page} missing — run its build</p>".encode(), request)
         access_log(request, 200, email, tier, jwt_status)
-        html = _substitute_viewer_tokens(html, email, esc_label)
+        html = _substitute_viewer_tokens(html, email, esc_label, scope)
         render_headers = {STALE_FALLBACK_HEADER: "stale-fallback"} if stale else None
         return _html(200, html.encode("utf-8"), request, extra_headers=render_headers)
 
@@ -1175,7 +1209,7 @@ def handle_get(request: Request):
         # carries the same editor, so one definition serves both and cannot
         # drift. Cosmetic either way — kb_write_api's own authz gate, plus this
         # route's full-tier check above, are the wall.
-        html = _substitute_viewer_tokens(html, email, esc_label)
+        html = _substitute_viewer_tokens(html, email, esc_label, scope)
         return _html(200, html.encode("utf-8"), request)
 
     # One project, at /projects/<name> (epic issue_01M0AK8CM3ADKDTG8PM6GRCP8H,

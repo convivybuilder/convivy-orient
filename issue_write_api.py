@@ -91,16 +91,18 @@ async def resolve_issue(issue_id: str, request: Request):
 @_api
 async def create_issue(request: Request):
     """File an issue as the calling human. Body:
-    `{"product": str, "title": str, "body": str?, "type": str?, "severity": str?}`."""
+    `{"product": str, "title": str, "body": str?, "severity": str?}`. A work
+    item carries no type, so a `type` in the body is ignored and never reaches
+    the Library, which refuses the retired ones."""
     ident, refused = _human_gate(request, "filing an issue")
     if refused is not None:
         return refused
     body, refused = await read_json_body(request, _MAX_BODY)
     if refused is not None:
         return refused
-    fields = {k: body.get(k) for k in ("product", "title", "body", "type", "severity")}
+    fields = {k: body.get(k) for k in ("product", "title", "body", "severity")}
     if any(v is not None and not isinstance(v, str) for v in fields.values()):
-        return _json(400, {"error": "product, title, body, type and severity must be strings"})
+        return _json(400, {"error": "product, title, body and severity must be strings"})
     product, title = (fields["product"] or "").strip(), (fields["title"] or "").strip()
     if not product or not title:
         return _json(400, {"error": "product and title are required"})
@@ -112,7 +114,7 @@ async def create_issue(request: Request):
         row = library_client.create_item(
             product=product, title=title,
             body=f"{prose}\n\n{filed_by}" if prose else filed_by,
-            type=fields["type"] or None, severity=fields["severity"] or None)
+            severity=fields["severity"] or None)
     except library_client.ItemWriteRefused as refusal:
         return _json(refusal.status, {"error": refusal.message})
     return _json(200, {"id": row.get("id"), "idempotent": bool(row.get("idempotent"))})

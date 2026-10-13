@@ -1,9 +1,20 @@
 # convivy-orient
 
-The **private team orientation site** at **https://team.convivy.com** — a
-read-only "get oriented" browse view of the Convivy knowledge base for the team
-and contributing contractors. Generated from the KB index; runs on the mini.
-(Substrate decision: ARCH-056. Part of the KB-consolidation initiative.)
+Orient is Builder's web view of the whole system. It shows the knowledge base's
+documents, the work queue of epics and corrections, the crews and their
+sessions, spending and alerts as pages a person can read and act on. Most pages
+read their data live on each request. Each viewer gets a tier: the full tier
+sees everything, and the contractor tier sees only the documents released to
+contractors.
+
+Builder's website is [convivybuilder.org](https://convivybuilder.org). It carries the documentation and the install pages.
+
+## This deployment
+
+Convivy runs Orient as its private team site at https://team.convivy.com,
+behind Cloudflare Access, on a Mac Studio. The rest of this README describes
+that deployment. (Substrate decision: ARCH-056, part of the KB-consolidation
+initiative.)
 
 ## Pieces
 
