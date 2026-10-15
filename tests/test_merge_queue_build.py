@@ -152,12 +152,33 @@ def test_empty_state(monkeypatch):
 
 
 def test_route_registered_full_tier():
+    """/engineering/merge-queue moved out of `_full_only_routes()` into
+    `server.SCOPED_ROUTES` (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M): that
+    dispatcher calls its renderer with no arguments, and this page now needs
+    the viewer's scope. `tests/test_server.py`'s
+    `_MOVED_OUT_OF_FULL_ONLY_ROUTES` carries the full-tier/nav/contractor-leak
+    coverage this move must not lose."""
     import server
-    routes = server._full_only_routes()
-    assert routes["/engineering/merge-queue"][1] is m.live_html
+    assert "/engineering/merge-queue" in server.SCOPED_ROUTES
+    assert "/engineering/merge-queue" not in server._full_only_routes()
 
 
 def test_nav_places_merge_queue_in_engineering():
     import design_system as ds
     html = ds.nav_component("/engineering/merge-queue", "full")
     assert 'href="/engineering/merge-queue"' in html
+
+
+# --- build_static: the static fallback must never carry real PR data -------
+
+
+def test_build_static_seeds_an_empty_fallback_not_real_data(tmp_path, monkeypatch):
+    """engineering-merge-queue.html is served to ANY viewer's failed render,
+    scoped or not (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M): a snapshot
+    naming a real PR would leak to a scoped viewer. `build_static` never
+    calls `gh` at all, so the cached rows a running server might hold never
+    reach this file."""
+    monkeypatch.setattr(m, "SITE", tmp_path)
+    m.build_static()
+    html = (tmp_path / "engineering-merge-queue.html").read_text(encoding="utf-8")
+    assert "Live view unavailable" in html

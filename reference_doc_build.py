@@ -180,10 +180,12 @@ def _error_page(reason: str) -> str:
 _AUDIENCE = "team"
 
 
-def detail_html(doc_id: str) -> str | None:
+def detail_html(doc_id: str, scope: frozenset[str], whole_fleet: bool) -> str | None:
     """Render one document's page, or None when there is no such document —
     including a document that exists in the Library but is not `"team"`
-    audience, which this page treats identically to a missing one.
+    audience, or whose project the viewer's scope does not reach (E19·4,
+    issue_01M35K5JQ7Z7MHYZGWRSB5F85M), both of which this page treats
+    identically to a missing one.
 
     **The entitlement check is `library_client`'s, not this page's.**
     `get_reference_document` takes a required `audience` and returns None for
@@ -191,6 +193,14 @@ def detail_html(doc_id: str) -> str | None:
     It moved there because the Library serves the whole corpus unfiltered and
     the gate had lived only in this one page — meaning the next page built on
     those functions would have had to know to rebuild it (PR #205 review).
+
+    **The scope check IS this page's, because a document id can be guessed
+    or enumerated** (`GET /reference/documents` lists every id) the same way
+    the module docstring already says for audience, and nothing upstream of
+    this call knows the viewer's scope at all — `get_reference_document`
+    takes no scope argument. `whole_fleet` skips the check entirely rather
+    than compare `doc.project` against every registry project, the same
+    shortcut `crews_build`/`engineering_build` take.
 
     A Library failure does not propagate: it is caught here and rendered as
     `ds.error_state` inside the normal page shell, in keeping with this being
@@ -204,6 +214,8 @@ def detail_html(doc_id: str) -> str | None:
             f"The Library could not be reached ({type(exc).__name__}). "
             f"Try again shortly.")
     if doc is None:
+        return None
+    if not whole_fleet and doc.project not in scope:
         return None
     return _doc_page(doc)
 

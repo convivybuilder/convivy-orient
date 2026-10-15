@@ -97,7 +97,7 @@ def freshness(data: dict) -> ds.Freshness:
     )
 
 
-def _waypoints_section() -> str:
+def _waypoints_section(scope: frozenset[str]) -> str:
     """The page's headline: waypoints passed over the trailing 7/30/90-day
     windows, total and per product, plus each Course's position (passed of
     total), the entry in flight, what remains, and the weekly pace trend
@@ -106,12 +106,19 @@ def _waypoints_section() -> str:
     the "Delivery activity" panel below reads a local file and has nothing
     to do with the Library being up.
 
+    Restricted to `scope` (E19·3, issue_01M35K5EAZD85FBYXEBQVRKVZV): a Course
+    whose `product` is outside the viewer's scope is dropped before any
+    window total, table row, or weekly mark is computed from it — so the
+    windowed totals are the scoped sum, not the fleet sum, for a scoped
+    viewer. An administrator's scope is the Library's full project list, so
+    nothing is dropped for them.
+
     One `fetch_courses()` read backs every figure here — the windowed cards,
     the per-course table, and the weekly trend below all derive from it, so
     this section costs the page the same one-`get_course`-per-Course budget
     it always has (issue_01M2HXZKHKZFVZK9K1MJ5KTKTA)."""
     try:
-        courses = waypoints.fetch_courses()
+        courses = [c for c in waypoints.fetch_courses() if c.product in scope]
         rows = waypoints.course_progress(courses)
         weekly = waypoints.weekly_pace(courses)
         unresolved = waypoints.unresolved_passed_count(courses)
@@ -623,11 +630,38 @@ _HISTORY_REPAIR_NOTE = (
 )
 
 
-def render(data: dict) -> str:
+def render(data: dict, scope: frozenset[str], whole_fleet: bool) -> str:
+    """`whole_fleet` gates the whole "Delivery activity" section below: its
+    buckets (`data["bucket_order"]`) come from the velocity-report producer's
+    own engineering-grouping taxonomy, keyed by names like "Library" and
+    "Bosun" that are Builder's own crews, not a Library project — and others
+    ("Placard", "Archy", "Convivy general") that are features with no project
+    of their own at all (E19·3, issue_01M35K5EAZD85FBYXEBQVRKVZV). Neither
+    reconciles with the viewer's project-slug `scope`, so there is no safe way
+    to filter this section's buckets, its fleet-wide Delivery-index composite
+    score, or its weekly trend history (which carries no per-bucket
+    breakdown) down to a scoped viewer's own projects — see the PR body for
+    why this is left out rather than guessed at. A viewer whose scope covers
+    every registry project still sees it unchanged."""
     fresh = freshness(data)
     notes = "".join(
         f"<li>{escape(n)}</li>" for n in [_SERIES_BREAK_NOTE, _HISTORY_REPAIR_NOTE, *data.get("notes", [])]
     )
+    waypoints_html = _waypoints_section(scope)
+    if not whole_fleet:
+        return ds.page_shell(
+            title="engineering velocity",
+            nav_html=ds.nav_component("/velocity", "full"),
+            body=(
+                '<div class="page-head">'
+                '<h1>Engineering velocity</h1>'
+                '<p class="page-sub">Pace toward each crew\'s bead — waypoints passed, the entry in '
+                'flight, and what remains, per product and in total.</p>'
+                '</div>'
+                + waypoints_html
+            ),
+            extra_css=_PAGE_CSS,
+        )
     data_json = json.dumps(data, separators=(",", ":")).replace("</", "<\\/")
     script = _BODY_SCRIPT.replace("__DATA__", data_json)
     body = (
@@ -636,7 +670,7 @@ def render(data: dict) -> str:
         '<p class="page-sub">Pace toward each crew\'s bead — waypoints passed, the entry in '
         'flight, and what remains, per product and in total.</p>'
         '</div>'
-        + _waypoints_section()
+        + waypoints_html
         + '<div class="page-head">'
         '<h2>Delivery activity</h2>'
         f'<p class="page-sub">Commits, merged PRs, volume, stability &amp; decisions across '
@@ -664,19 +698,32 @@ def render(data: dict) -> str:
     )
 
 
-def live_html() -> str:
+def live_html(scope: frozenset[str], whole_fleet: bool) -> str:
     """Render /velocity at request time (ARCH-182): one read of velocity.json for
     the delivery panel, plus a live Library read for waypoint pace
     (`waypoints.course_progress()`, one `get_course` per live Course). The
     `velocity-report` job stays the producer of velocity.json; main() still
-    writes the static file as a fallback."""
-    return render(load())
+    writes the static file as a fallback.
+
+    `scope`/`whole_fleet`: E19·3, issue_01M35K5EAZD85FBYXEBQVRKVZV — see
+    `render`'s docstring for what each gates."""
+    return render(load(), scope, whole_fleet)
 
 
 def main() -> None:
     OUT.mkdir(exist_ok=True)
-    (OUT / "velocity.html").write_text(render(load()), encoding="utf-8")
-    print("Wrote site/velocity.html")
+    # The static fallback is served (ARCH-182) to ANY viewer whose live render
+    # throws, before scope is known to this file at all — the old unconditional
+    # render(load()) named every Course's product and every Delivery-activity
+    # bucket with no scope check on the way out (E19·3,
+    # issue_01M35K5EAZD85FBYXEBQVRKVZV). Deliberately empty rather than that,
+    # same discipline as issue_build.main().
+    (OUT / "velocity.html").write_text(
+        ds.page_shell(title="engineering velocity", nav_html=ds.nav_component("/velocity", "full"),
+                     body=ds.empty_state("Live view unavailable — reload in a moment."),
+                     extra_css=_PAGE_CSS),
+        encoding="utf-8")
+    print("Wrote site/velocity.html (static fallback, empty)")
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@ the Library or on a machine that happens to have already run serve.sh.
 """
 from __future__ import annotations
 
+import inspect
 import re
 from pathlib import Path
 
@@ -25,8 +26,21 @@ REPO_ROOT = Path(srv.__file__).resolve().parent
 
 # Filenames handled outside `_full_only_routes()` because their dispatch needs
 # request-scoped arguments (server.py:673, 682, 729-747) — see that file's own
-# comments on why each is pulled out of the map.
-_EXTRA_FALLBACK_FILENAMES = {"home.full.html", "home.contractor.html", "corrections.html"}
+# comments on why each is pulled out of the map. `issues.html` and
+# `course.html` joined this set at E19·2 (issue_01M35K5AB4PRTJ71DMQW7Q4D3B),
+# when /engineering/issues and /engineering/course needed the viewer's scope,
+# which this dispatcher has no way to pass. spending.html, velocity.html,
+# health.html and alerts.html joined at E19·3 (issue_01M35K5EAZD85FBYXEBQVRKVZV)
+# for the same reason. crews.html, signals.html, signals-prs.html,
+# signals-changelogs.html, engineering.html and roster.html joined at E19·4
+# (issue_01M35K5JQ7Z7MHYZGWRSB5F85M), when /crews, /archives, /archives/prs,
+# /archives/changelogs, /reference and /engineering/roster needed the
+# viewer's scope too.
+_EXTRA_FALLBACK_FILENAMES = {"home.full.html", "home.contractor.html", "corrections.html",
+                             "issues.html", "course.html", "chart-house.html",
+                             "spending.html", "velocity.html", "health.html", "alerts.html",
+                             "crews.html", "signals.html", "signals-prs.html",
+                             "signals-changelogs.html", "engineering.html", "roster.html"}
 
 # home_build.py writes `f"home.{tier}.html"` (a computed name, not a literal
 # string) for both tiers in one loop — the one fallback filename in the whole
@@ -56,9 +70,17 @@ def _quoted(name: str) -> re.Pattern[str]:
     return re.compile(r'["\']' + re.escape(name) + r'["\']')
 
 
+# Every quoted `name.html` literal in `handle_get`: the explicit blocks E19·3
+# and E19·4 moved pages into (SCOPED_DASHBOARDS, SCOPED_ROUTES, the ARCH log
+# and the per-page blocks) each name their fallback file there, so reading the
+# source covers a block added later without a hand-kept list.
+_HANDLE_GET_HTML = re.compile(r'"([a-z0-9][a-z0-9.-]*\.html)"')
+
+
 def _fallback_filenames_from_route_map() -> set[str]:
     names = {page for page, _renderer in srv._full_only_routes().values()}
     names |= _EXTRA_FALLBACK_FILENAMES
+    names |= set(_HANDLE_GET_HTML.findall(inspect.getsource(srv.handle_get)))
     assert names, "no fallback filenames found — _full_only_routes() moved or emptied"
     return names
 

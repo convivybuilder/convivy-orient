@@ -16,6 +16,7 @@ import json
 from html import escape
 from pathlib import Path
 
+import crew_registry
 import design_system as ds
 import orient_time
 from paths import STATE_ROOT
@@ -120,13 +121,24 @@ def _table(bucket: dict[str, dict], first_col: str) -> str:
             + ths + "</tr></thead><tbody>" + _rows(bucket, first_col) + "</tbody></table></div>")
 
 
-def render(data: dict) -> str:
+def render(data: dict, scope: frozenset[str] = frozenset(), whole_fleet: bool = True) -> str:
+    """`scope`/`whole_fleet` (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M):
+    `by_repo` is keyed by repo name, so a row the registry lists under no
+    project in `scope` is dropped before its table is built. `overall` and
+    `by_model` carry no repo dimension this file can filter them by, so
+    they render only for a whole-fleet viewer; a scoped viewer sees the
+    (now-filtered) "By repo" table and nothing else. The defaults
+    (`whole_fleet=True`) keep every existing caller unchanged."""
     fresh = freshness(data)
     win = data.get("window_days")
     o = data.get("overall") or {}
     win_label = f"trailing {win} days" if win else "all recorded"
+    by_repo = data.get("by_repo") or {}
+    if not whole_fleet:
+        repos = crew_registry.repos_in_scope(scope)
+        by_repo = {name: m for name, m in by_repo.items() if name in repos}
 
-    if not o.get("merged_prs"):
+    if whole_fleet and not o.get("merged_prs"):
         body = ('<div class="page-head"><h1>Warrant</h1>'
                 f'<p class="page-sub">Did agent-merged work deserve to exist? '
                 f'As of {escape(orient_time.now_label())}.</p></div>'
@@ -134,29 +146,43 @@ def render(data: dict) -> str:
                 '<code>warrant-scorecard</code> harvester has not run.</div>')
         return ds.page_shell(title="warrant", nav_html=ds.nav_component("/warrant", "full"),
                              body=body, extra_css=_PAGE_CSS)
+    if not whole_fleet and not by_repo:
+        body = ('<div class="page-head"><h1>Warrant</h1>'
+                f'<p class="page-sub">Did agent-merged work deserve to exist? '
+                f'As of {escape(orient_time.now_label())}.</p></div>'
+                '<div class="empty">No warrant-scorecard data yet for a project in your scope.</div>')
+        return ds.page_shell(title="warrant", nav_html=ds.nav_component("/warrant", "full"),
+                             body=body, extra_css=_PAGE_CSS)
 
-    cards = "".join([
-        ds.stat_card("Unwarranted rate", f'{_num(o.get("unwarranted_rate"), 1)}%'),
-        ds.stat_card("Reverted", f'{_num(o.get("reverted"))} ({_num(o.get("revert_rate"), 1)}%)'),
-        ds.stat_card("Merged agent PRs", _num(o.get("merged_prs"))),
-        ds.stat_card("Bug-reverts", f'{_num(o.get("bug_reverts"))} ({_num(o.get("bug_revert_rate"), 1)}%)'),
-    ])
-    clean_banner = ""
-    if not o.get("reverted"):
-        clean_banner = ('<div class="clean">No reverts recorded in this window — nothing has been '
-                        'flagged as unwarranted or reverted for a bug yet. The rate populates as revert '
-                        'PRs land carrying a <code>Revert-reason:</code> tag.</div>')
-
-    body = (
+    head = (
         '<div class="page-head"><h1>Warrant</h1>'
         f'<p class="page-sub">Did agent-merged work deserve to exist? The <b>unwarranted-merge rate</b> — '
         f'agent PRs later reverted because the change shouldn\'t have been built (a hallucinated premise), '
         f'not because of a bug — over the {escape(win_label)}. As of {escape(fresh.text)}.</p></div>'
         + ds.stalled_banner_html("Warrant scorecard", fresh)
-        + f'<div class="statcards">{cards}</div>'
-        + clean_banner
-        + '<div class="sec-h2">By producer model</div>' + _table(data.get("by_model") or {}, "Model")
-        + '<div class="sec-h2">By repo</div>' + _table(data.get("by_repo") or {}, "Repo")
+    )
+    fleet_only = ""
+    if whole_fleet:
+        cards = "".join([
+            ds.stat_card("Unwarranted rate", f'{_num(o.get("unwarranted_rate"), 1)}%'),
+            ds.stat_card("Reverted", f'{_num(o.get("reverted"))} ({_num(o.get("revert_rate"), 1)}%)'),
+            ds.stat_card("Merged agent PRs", _num(o.get("merged_prs"))),
+            ds.stat_card("Bug-reverts",
+                        f'{_num(o.get("bug_reverts"))} ({_num(o.get("bug_revert_rate"), 1)}%)'),
+        ])
+        clean_banner = ""
+        if not o.get("reverted"):
+            clean_banner = ('<div class="clean">No reverts recorded in this window — nothing has been '
+                            'flagged as unwarranted or reverted for a bug yet. The rate populates as revert '
+                            'PRs land carrying a <code>Revert-reason:</code> tag.</div>')
+        fleet_only = (
+            f'<div class="statcards">{cards}</div>' + clean_banner
+            + '<div class="sec-h2">By producer model</div>' + _table(data.get("by_model") or {}, "Model")
+        )
+    body = (
+        head
+        + fleet_only
+        + '<div class="sec-h2">By repo</div>' + _table(by_repo, "Repo")
         + '<ul class="notes">'
         '<li>A hallucinated-but-correct PR scores <b>positively</b> on every other axis — merged, survives '
         '7 days, +velocity, zero security findings — so it\'s invisible unless measured here. Code review '
@@ -176,16 +202,26 @@ def render(data: dict) -> str:
                          body=body, extra_css=_PAGE_CSS)
 
 
-def live_html() -> str:
+def live_html(scope: frozenset[str] = frozenset(), whole_fleet: bool = True) -> str:
     """Render /warrant from the current warrant-report.json at request time
-    (ARCH-182). Cheap: one JSON read. `warrant-scorecard` stays the data producer."""
-    return render(load())
+    (ARCH-182), restricted to `scope` (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M).
+    Cheap: one JSON read. `warrant-scorecard` stays the data producer."""
+    return render(load(), scope, whole_fleet)
 
 
 def main() -> None:
+    """Seed the static fallback, deliberately empty (E19·4,
+    issue_01M35K5JQ7Z7MHYZGWRSB5F85M) — this used to write the current, real,
+    unscoped report, which a scoped viewer would see on any live-render
+    failure (the same leak class 26bb079 fixed for crews/signals/engineering/
+    roster)."""
     OUT.mkdir(exist_ok=True)
-    (OUT / "warrant.html").write_text(render(load()), encoding="utf-8")
-    print("Wrote site/warrant.html")
+    fallback = ds.page_shell(
+        title="warrant", nav_html=ds.nav_component("/warrant", "full"),
+        body=ds.empty_state("Live view unavailable — reload in a moment."),
+        extra_css=_PAGE_CSS)
+    (OUT / "warrant.html").write_text(fallback, encoding="utf-8")
+    print("Wrote site/warrant.html (empty static fallback)")
 
 
 if __name__ == "__main__":

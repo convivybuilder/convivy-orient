@@ -24,7 +24,12 @@ initiative.)
   platform-internal docs are physically absent, not hidden in-browser).
 - **`server.py`** — identity-aware origin on `127.0.0.1:8099`. Reads the
   Cloudflare Access `Cf-Access-Authenticated-User-Email` header and serves the
-  bundle for that email's tier. No header → 403.
+  bundle for that email's tier. No header → 403. With `tailnet.json`
+  configured (CQ·150, E21) it also binds a second listener on the tailnet,
+  which trusts no header at all: identity there comes from asking the local
+  Tailscale daemon, via `whois`, which login owns the connecting peer
+  (`tailnet_identity.py`, `tailscale_whois.py`). With no `tailnet.json`,
+  nothing about this changes.
 - **`tiers.json`** — `{"full": [emails]}`. Listed emails get the full bundle;
   every other authenticated email gets contractor (least privilege). Re-read per
   request — add someone and it takes effect without a restart. It is gitignored,

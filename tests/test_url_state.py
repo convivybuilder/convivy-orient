@@ -158,7 +158,7 @@ def _velocity_html(tmp_path, monkeypatch):
                                                   "survival_pct": None}}}},
     }))
     monkeypatch.setattr(vb, "DATA_PATH", p)
-    return vb.render(vb.load())
+    return vb.render(vb.load(), frozenset({"vivy"}), True)
 
 
 def test_velocity_embeds_url_state_functions(tmp_path, monkeypatch):

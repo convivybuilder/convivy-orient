@@ -158,7 +158,7 @@ BROWSE_EXCLUDE_IDS: set[str] = set()
 # quieter than the `VISIBLE_KINDS` miss this fix is mainly about, and the same
 # defect one list over (reviewer, PR #156). `brief` is also absent; left alone
 # here rather than fixed in passing, since this PR is about `bead`.
-KIND_ORDER = ["overview", "bead", "brand", "prd", "spec", "decision", "architecture",
+KIND_ORDER = ["overview", "bead", "brand", "prd", "spec", "build-plan", "decision", "architecture",
               "reference", "field-notes", "runbook", "skill", "instruction-block",
               "meeting-notes",
               "legal", "agent"]

@@ -41,6 +41,7 @@ from html import escape
 
 import alert_policy_store
 import code_health_build
+import crew_registry
 import dashboard_build
 import design_system as ds
 import kb_build
@@ -191,12 +192,25 @@ def freshness_banners() -> str:
     return "".join(banners)
 
 
-def gather() -> list[dict]:
+def gather(scope: frozenset[str], whole_fleet: bool) -> list[dict]:
     """Every current alert, from the same persisted snapshots each source
     dashboard's own live_html() reads — no live gh/API calls. Each source is
     isolated: a bad or missing snapshot degrades to "no alerts from that
     source" rather than breaking the page, mirroring waiting_build.gather's
     per-tile isolation on Home.
+
+    Restricted to `scope` (E19·3, issue_01M35K5EAZD85FBYXEBQVRKVZV): a
+    code-health row names a real repo (`row["repo"]`), so it is dropped
+    before `code_health_alerts` ever sees it unless the registry lists that
+    repo under a project in scope.
+    The Spending and KB categories carry NO per-project dimension at all —
+    `spending_alert`'s subject is the literal string "account-wide" and
+    `kb_alerts`' are "golden set"/"live queries" — so there is no row to
+    filter; `whole_fleet` (the viewer's scope covers every registry project)
+    gates whether either runs at
+    all, the same call `dashboard_build.spending_render`'s own
+    `show_account_wide` makes for the same reason, on that same page's own
+    account-wide panel.
 
     Fetches each of the three settable thresholds fresh on every call (no
     cache) — the same invariant `alert_policy_store.get`'s own docstring
@@ -206,24 +220,27 @@ def gather() -> list[dict]:
     alerts: list[dict] = []
     try:
         _, health_rows = code_health_build.load_snapshot()
+        repos = crew_registry.repos_in_scope(scope)
+        health_rows = [r for r in health_rows if r.get("repo") in repos]
         t = alert_policy_store.get("code_health.ci_pass_rate")
         alerts += code_health_alerts(health_rows, t)
     except Exception:
         pass
-    try:
-        t = alert_policy_store.get("spending.overage_runs")
-        a = spending_alert(dashboard_build.load_latest_snapshot(), t)
-        if a:
-            alerts.append(a)
-    except Exception:
-        pass
-    try:
-        ev = kb_build.load_eval()
-        q = kb_build.load_query_stats()
-        t = alert_policy_store.get("kb.recall")
-        alerts += kb_alerts(ev, q, t)
-    except Exception:
-        pass
+    if whole_fleet:
+        try:
+            t = alert_policy_store.get("spending.overage_runs")
+            a = spending_alert(dashboard_build.load_latest_snapshot(), t)
+            if a:
+                alerts.append(a)
+        except Exception:
+            pass
+        try:
+            ev = kb_build.load_eval()
+            q = kb_build.load_query_stats()
+            t = alert_policy_store.get("kb.recall")
+            alerts += kb_alerts(ev, q, t)
+        except Exception:
+            pass
     alerts.sort(key=lambda a: (_SEVERITY_ORDER.get(a["severity"], 9), a["category"], a["subject"]))
     return alerts
 
@@ -338,18 +355,28 @@ def render(alerts: list[dict], asof: str | None = None, banners: str = "") -> st
                          body=body, extra_css=_PAGE_CSS)
 
 
-def live_html() -> str:
+def live_html(scope: frozenset[str], whole_fleet: bool) -> str:
     """Render /alerts from the current persisted snapshots at request time
-    (ARCH-182). Each source dashboard stays the data producer; this only
+    (ARCH-182), restricted to `scope`/`whole_fleet` (E19·3,
+    issue_01M35K5EAZD85FBYXEBQVRKVZV — see `gather`'s docstring for what each
+    gates). Each source dashboard stays the data producer; this only
     re-reads what they already wrote."""
-    return render(gather(), banners=freshness_banners())
+    return render(gather(scope, whole_fleet), banners=freshness_banners())
 
 
 def build() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
-    alerts = gather()
-    (OUT / "alerts.html").write_text(render(alerts, banners=freshness_banners()), encoding="utf-8")
-    print(f"Wrote site/alerts.html ({len(alerts)} alerts).")
+    # The static fallback is served (ARCH-182) to ANY viewer whose live render
+    # throws, before scope is known to this file at all — the old
+    # unconditional gather() named every alerting repo with no scope check on
+    # the way out (E19·3, issue_01M35K5EAZD85FBYXEBQVRKVZV). Deliberately
+    # empty rather than that, same discipline as issue_build.main().
+    (OUT / "alerts.html").write_text(
+        render([], banners=freshness_banners()).replace(
+            "No alerts — every tracked metric is inside its policy threshold.",
+            "Live view unavailable — reload in a moment."),
+        encoding="utf-8")
+    print("Wrote site/alerts.html (static fallback, empty).")
 
 
 if __name__ == "__main__":

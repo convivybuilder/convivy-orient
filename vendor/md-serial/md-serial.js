@@ -65,44 +65,53 @@ const MAX_INLINE_DEPTH = 100;
 // 1 000 characters.
 const MAX_BRACKET_SCAN = 1000;
 
-// Maximum characters scanned per findDelimiter call.  The '_'-specific closer
-// rule rejects any candidate where the next character is alphanumeric, so in
-// patterns like "_word _word _word …" every opener exhausts the full line
-// before giving up — O(N²) total.  Capping each scan bounds the cost to
-// O(N·bound).  Characters beyond the cap become verbatim text, preserving all
-// bytes: this is a rendering bound, never a data-loss one.
+// findDelimiter's closerHorizon cache (defined in parseInlines, read and
+// extended in findDelimiter below) records a span as "proven to hold no
+// closer" so a later opener's scan starting inside it returns immediately
+// instead of rescanning. Before 583bf4f0 that scan, and so the span it could
+// prove, stopped at the first '\n'; that commit let a delimiter close across
+// a softbreak, which made the scan unit a whole paragraph instead of a line —
+// the '_'-specific closer rule rejects any candidate followed by an
+// alphanumeric, so "_word _word _word …" fails every closer check, and every
+// opener's scan ran to the paragraph's end. Review of knowledge#883 on
+// 2026-10-13 measured a 640 KB paragraph of that shape going from well under
+// a second to 4.2 s without a cache.
 //
-// RAISED FROM 1 000 ON 2026-08-05, BECAUSE 1 000 WAS ALREADY BEING HIT.  The
-// old comment said the corpus contained no emphasis spanning more than a few
-// hundred characters.  That was true of spans that MATCH; it said nothing about
-// a scan that fails and gives up early.  Measured over the 616 documents under
-// projects/ at 551054f: 191 lines already exceed 1 000 characters, the longest
-// is 3 017, the scan reached the bound twice, and on
-// constance/specs/flow-2-shift-note-constance-task.md that cost one real `em`
-// node — emphasis rendering as literal asterisks in the editor while the
-// read-only Python renderer showed it correctly.  That is the two-renderer
-// divergence this package exists to avoid, arriving through the bound.
+// A cache that answers from where a DIFFERENT scan happened to stop is only
+// sound when what that scan skipped over doesn't depend on where it started.
+// Two more rounds of the same review found code spans violated that: the
+// skip used to detect a code span from each scan's own cursor, so which
+// backtick a scan treated as opening one — and so which characters it
+// skipped looking for a closer — differed by start position. That let a
+// cached "no closer" answer from an earlier, narrower scan suppress a real
+// closer a later opener's own scan would have found (round 2), and, once the
+// skip was capped at the first such backtick to close that gap, left any
+// paragraph mixing code spans with unclosed delimiter runs getting almost no
+// caching at all — the same 640 KB shape above, with a code span glued to
+// every opener, went from 22 ms to 36 s (round 3).
 //
-// 8 000 clears the longest line in the corpus by 2.65×, so the bound no longer
-// decides anything about a document that exists.  It costs 25 ms across the
-// whole corpus (112 ms → 137 ms for 616 documents, about 0.04 ms each) and
-// still caps the pathological shape: a single 100 KB line of "_word " parses in
-// 322 ms rather than growing quadratically.
-//
-// THE BOUND IS A CONSTANT RATHER THAN DERIVED FROM THE CORPUS, deliberately.
-// This parser runs inside Deck's editor against one document, with no corpus in
-// reach, and a bound that varied with what OTHER documents contain would make a
-// document parse differently in two places for reasons its author cannot see.
-// What tracks the corpus instead is `boundStats()` below, which reports when a
-// bound fires so the next crossing is visible on the first document that does
-// it rather than the first one somebody notices.
-const MAX_DELIMITER_SCAN = 8000;
+// CommonMark resolves code spans before emphasis, left to right across the
+// whole paragraph, independent of any opener's position. computeCodeSpanRanges
+// (below) does exactly that once per parseInlines call, and findDelimiter
+// skips those fixed ranges instead of detecting them itself mid-scan. A
+// scan's result no longer depends on where it started, so caching it is
+// sound — and since openers within one parseInlines call are only ever tried
+// left to right, and a real (uncached) scan for one delimiter string only
+// ever covers text no earlier scan for that string has already covered, the
+// total work across every call for one delimiter string is O(paragraph
+// length) regardless of content. That holds with no separate bound on a
+// single scan's length: a bound sized smaller than the paragraph would
+// reintroduce exactly the unsoundness above, because a result reached only
+// because the bound cut a scan short is not "no closer exists" — a later
+// opener's own, later-starting scan has a different window, and may reach a
+// closer the bounded scan never got to. A MAX_DELIMITER_SCAN constant stood
+// here through 2026-10-13 for that purpose and was removed for this reason.
 
 // ─── bound reporting ─────────────────────────────────────────────────────────
 
 // A bound firing is INVISIBLE TO EVERY EXISTING CHECK, which is why this
-// exists.  Past a bound a construct stops parsing as a link or as emphasis and
-// its characters become verbatim text; the bytes are unchanged, so the corpus
+// exists.  Past a bound a construct stops parsing as a link and its
+// characters become verbatim text; the bytes are unchanged, so the corpus
 // test's byte-identity assertion passes either way, and the document renders
 // differently in the editor with nothing anywhere saying so.
 //
@@ -111,7 +120,10 @@ const MAX_DELIMITER_SCAN = 8000;
 // them once at the end; `resetBoundStats()` is there for a caller that wants a
 // window.  Nothing in the parse path reads them, so they cannot change what a
 // document parses to.
-const boundHits = { inlineDepth: 0, bracketScan: 0, delimiterScan: 0 };
+//
+// No delimiterScan counter: findDelimiter has no per-scan bound to fire (see
+// the closerHorizon cache comment above).
+const boundHits = { inlineDepth: 0, bracketScan: 0 };
 
 /** How many times each bound has truncated a scan since the last reset. */
 export function boundStats() {
@@ -122,7 +134,6 @@ export function boundStats() {
 export function resetBoundStats() {
   boundHits.inlineDepth = 0;
   boundHits.bracketScan = 0;
-  boundHits.delimiterScan = 0;
 }
 
 // ─── block regexps ───────────────────────────────────────────────────────────
@@ -509,10 +520,36 @@ function parseTable(src, pos) {
 function parseTableRow(raw) {
   // Split on |, trimming leading/trailing pipes
   const trimmed = raw.replace(/^\|/, '').replace(/\|$/, '');
-  return trimmed.split('|').map(cell => {
+  return splitTableCells(trimmed).map(cell => {
     const trimmedCell = cell.trim();
     return { raw: cell, inlines: parseInlines(trimmedCell, 0, trimmedCell.length) };
   });
+}
+
+// Split a table row on unescaped pipes. "\|" (GFM's table-cell pipe escape)
+// is consumed here as a literal "|" rather than a cell boundary, before
+// parseInlines ever sees it — this parser has no general backslash-escape
+// mechanism for any other construct, so the escape exists only at this one
+// boundary.
+function splitTableCells(raw) {
+  const cells = [];
+  let cur = '';
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i];
+    if (ch === '\\' && raw[i + 1] === '|') {
+      cur += '|';
+      i++;
+      continue;
+    }
+    if (ch === '|') {
+      cells.push(cur);
+      cur = '';
+      continue;
+    }
+    cur += ch;
+  }
+  cells.push(cur);
+  return cells;
 }
 
 function parseTableSeparator(raw) {
@@ -535,7 +572,6 @@ function parseList(src, pos, markerMatch, listType, depth = 0) {
   const marker = markerMatch[listType === 'bullet' ? 2 : 2];
   const markerSpace = markerMatch[listType === 'bullet' ? 3 : 4];
   const markerFull = markerMatch[0]; // the full matched prefix (indent + marker + space)
-  const continuationIndent = markerFull.length; // width of the full prefix
 
   let p = pos;
 
@@ -554,7 +590,12 @@ function parseList(src, pos, markerMatch, listType, depth = 0) {
       if (itemMatch[1].length !== firstIndent.length) break;
     }
 
-    const itemResult = parseListItem(src, p, itemMatch, continuationIndent, depth);
+    // Each item's continuation indent comes from its OWN marker width, not the
+    // first item's: an ordered list crossing item 9 to 10 widens the marker
+    // (e.g. "1. " is 3 columns, "10. " is 4), and CommonMark sets a list
+    // item's content indent from that item's own marker.
+    const itemContinuationIndent = itemMatch[0].length;
+    const itemResult = parseListItem(src, p, itemMatch, itemContinuationIndent, depth);
     items.push(itemResult.node);
     afterBlanks.push(false); // default: no blank after this item
     p = itemResult.pos;
@@ -795,6 +836,25 @@ function parseInlines(src, start, end, depth = 0) {
   let pos = start;
   let textStart = pos;
 
+  // Per-delimiter-string "no closer found beyond here" cache, scoped to this
+  // call: positions tried in this loop only move forward, so once a scan for
+  // a given delimiter string fails all the way to some point, a later scan
+  // for the same string starting before that point can skip straight to
+  // failure instead of re-walking already-proven text. See findDelimiter.
+  const closerHorizon = Object.create(null);
+
+  // This call's code-span ranges, computed once in a single left-to-right
+  // pass over the whole of src[start..end) — not per opener — so findDelimiter
+  // can skip them without its result depending on which opener asked. See
+  // computeCodeSpanRanges and the closerHorizon comment near MAX_BRACKET_SCAN.
+  const codeSpanRanges = computeCodeSpanRanges(src, start, end);
+
+  // Walks codeSpanRanges in step with pos below (both only move forward), so
+  // the dispatch loop's own code-span check is an O(1) lookup into the
+  // already-computed ranges instead of a second scan — see the
+  // computeCodeSpanRanges comment for why a second scan was a second O(n²).
+  let csIdx = 0;
+
   function flushText(to) {
     if (textStart < to) {
       nodes.push({ type: 'text', start: textStart, end: to, content: src.slice(textStart, to) });
@@ -870,13 +930,23 @@ function parseInlines(src, start, end, depth = 0) {
       }
     }
 
-    // Inline code: `code` or ``code``
+    // Inline code: `code` or ``code`` — codeSpanRanges already found every
+    // code span in src[start, end) in one pass before this loop started, so
+    // this takes the next one in order rather than calling tryParseCode
+    // again from pos (which re-scans to the paragraph's end on every
+    // position inside a long unclosed backtick run — see the
+    // computeCodeSpanRanges comment).
     if (ch === '`') {
-      const r = tryParseCode(src, pos, end);
-      if (r) {
+      while (csIdx < codeSpanRanges.length && codeSpanRanges[csIdx].end <= pos) csIdx++;
+      if (csIdx < codeSpanRanges.length && codeSpanRanges[csIdx].start === pos) {
+        const r = codeSpanRanges[csIdx];
         flushText(pos);
-        nodes.push(r.node);
+        nodes.push({
+          type: 'code_span', start: r.start, end: r.end,
+          tick: r.tick, content: r.content, wasSpaceStripped: r.wasSpaceStripped,
+        });
         pos = r.end;
+        csIdx++;
         textStart = pos;
         continue;
       }
@@ -898,27 +968,22 @@ function parseInlines(src, start, end, depth = 0) {
     }
 
     // Bold/italic: ** __ * _
+    //
+    // No run-length skip-ahead here for a long consecutive delimiter run with
+    // no closer: the closerHorizon cache already makes that O(run length)
+    // rather than O(run length²), because the first position's failed scan
+    // for each of '*'/'**'/'_'/'__' extends that delimiter string's horizon
+    // past the whole run (nothing in it can close), and every later position
+    // in the run is then an O(1) cache hit before tryParseEmphasis even
+    // starts scanning.
     if (ch === '*' || ch === '_') {
-      const r = tryParseEmphasis(src, pos, end, depth);
+      const r = tryParseEmphasis(src, pos, end, depth, closerHorizon, codeSpanRanges);
       if (r) {
         flushText(pos);
         nodes.push(r.node);
         pos = r.end;
         textStart = pos;
         continue;
-      }
-      // tryParseEmphasis failed.  If we're inside a consecutive delimiter run
-      // longer than MAX_DELIMITER_SCAN, positions up to run_end-MAX_DELIMITER_SCAN
-      // all fail (their scan window is entirely within the run, so findDelimiter
-      // can't reach the close).  Skip past them in one O(run_length) scan rather
-      // than retrying each position individually at O(MAX_DELIMITER_SCAN) each.
-      if (pos + 1 < end && src[pos + 1] === ch) {
-        let runEnd = pos + 2;
-        while (runEnd < end && src[runEnd] === ch) runEnd++;
-        const runLen = runEnd - pos;
-        if (runLen > MAX_DELIMITER_SCAN) {
-          pos += runLen - MAX_DELIMITER_SCAN - 1; // skip to where close is reachable
-        }
       }
     }
 
@@ -929,7 +994,15 @@ function parseInlines(src, start, end, depth = 0) {
   return nodes;
 }
 
-function tryParseCode(src, pos, end) {
+// The one-position-at-a-time code-span matching rule: count the backticks
+// starting exactly at pos, then scan forward for the first later position
+// holding the same count of backticks not itself followed by another
+// backtick. This defines what a code span IS; it is no longer in the parse
+// path (see computeCodeSpanRanges below, which reaches the identical result
+// for every position without re-running this scan at each one) and is kept,
+// exported, only as the slow-but-obviously-correct oracle a differential
+// test checks the fast path against.
+export function tryParseCode(src, pos, end) {
   // Count opening backticks
   let tickCount = 0;
   let p = pos;
@@ -957,6 +1030,131 @@ function tryParseCode(src, pos, end) {
     cp++;
   }
   return null;
+}
+
+/** Every maximal run of consecutive backtick characters in src[start, end), left to right. */
+function findBacktickRuns(src, start, end) {
+  const runs = [];
+  let i = start;
+  while (i < end) {
+    if (src[i] === '`') {
+      const runStart = i;
+      while (i < end && src[i] === '`') i++;
+      runs.push({ start: runStart, end: i, length: i - runStart });
+    } else {
+      i++;
+    }
+  }
+  return runs;
+}
+
+/**
+ * Code-span ranges for src[start..end), computed once per parseInlines call,
+ * reaching the exact same result as calling tryParseCode at every position
+ * left to right from the paragraph's own start — never at an opener's
+ * position — but without tryParseCode's own O(run length × remaining text)
+ * cost for a long backtick run that never closes. Review of knowledge#883
+ * round 4 (2026-10-13) measured that cost at 953 ms for a 16,754-character
+ * paragraph holding one unclosed run and 60 s at 134,022 characters, both via
+ * this function's own position-at-a-time predecessor and via the main
+ * parseInlines dispatch loop's direct tryParseCode call, which had the
+ * identical shape (472 ms at the smaller size on main, before this round
+ * touched either call site).
+ *
+ * Because tryParseCode counts backticks starting AT pos, a position pos
+ * inside a run of length L has its own opening count T = (that run's end -
+ * pos), decreasing by one for each position deeper into the run, while the
+ * search for a closer always starts at the run's end regardless of which
+ * position within the run is asking. So within one run, trying positions
+ * left to right is trying T = L, L-1, ..., 1 in that order and stopping at
+ * the first success — and "a closer of length >= T exists after this run"
+ * is true for exactly the T's at or below the longest later run's length, a
+ * fact about the rest of the paragraph that doesn't change as T shrinks. The
+ * first (largest) T to succeed is therefore min(L, the longest later run),
+ * and the closing run it uses is the first (leftmost) later run at least
+ * that long — both computed below from one pass over the runs, right to
+ * left, over a stack that discards any run dominated by a shorter-index run
+ * at least as long (it can never be anyone's answer once that exists), so
+ * each run is pushed and popped at most once; finding the leftmost
+ * same-or-longer run is then one binary search per run, since the stack ends
+ * up sorted with run length decreasing in the same direction as run index.
+ *
+ * A run with no later run at all — only possible for the last run in the
+ * whole range — closes nothing at any position within it and is skipped.
+ * Every other run finds a match, because T = 1 against any single later
+ * backtick always succeeds.
+ */
+function computeCodeSpanRanges(src, start, end) {
+  const runs = findBacktickRuns(src, start, end);
+  const m = runs.length;
+  if (m === 0) return [];
+
+  // matchJ[k]/matchT[k]: the closing run index and the backtick count that
+  // close run k, or matchJ[k] === -1 if nothing after run k can close it.
+  const matchJ = new Array(m).fill(-1);
+  const matchT = new Array(m);
+
+  // Stack entries {idx, length}, built scanning runs right to left and kept
+  // sorted with length (and idx) decreasing from the front of the array to
+  // the back: inserting run k discards every entry it dominates (anything
+  // already at the back with length <= runs[k].length can never be anyone's
+  // answer again, since k is both closer — smaller idx — and at least as
+  // long), so what survives in front of k is always strictly longer than it.
+  // By the time run k is considered (before k itself is pushed), the stack
+  // holds exactly the runs after k that could possibly be the
+  // leftmost-qualifying closer for some threshold.
+  const stack = [];
+  for (let k = m - 1; k >= 0; k--) {
+    const longestAfter = stack.length ? stack[0].length : 0;
+    if (longestAfter > 0) {
+      const T = Math.min(runs[k].length, longestAfter);
+      // The front of the stack holds the longest (and largest-idx) runs;
+      // length >= T holds for a prefix of the array, and the smallest idx
+      // among that prefix — the leftmost qualifying closer — is its last
+      // (rightmost) entry, since idx decreases in step with length.
+      let lo = 0, hi = stack.length - 1, found = -1;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        if (stack[mid].length >= T) { found = mid; lo = mid + 1; }
+        else hi = mid - 1;
+      }
+      matchJ[k] = stack[found].idx;
+      matchT[k] = T;
+    }
+    while (stack.length && stack[stack.length - 1].length <= runs[k].length) stack.pop();
+    stack.push({ idx: k, length: runs[k].length });
+  }
+
+  const ranges = [];
+  let k = 0;
+  while (k < m) {
+    const j = matchJ[k];
+    if (j === -1) { k++; continue; }
+    const T = matchT[k];
+    const matchStart = runs[k].end - T;
+    const matchEnd = runs[j].end;
+    let content = src.slice(matchStart + T, matchEnd - T);
+    let wasSpaceStripped = false;
+    if (content.length >= 2 && content[0] === ' ' && content[content.length - 1] === ' ' &&
+        content.trim() !== '') {
+      content = content.slice(1, -1);
+      wasSpaceStripped = true;
+    }
+    ranges.push({ start: matchStart, end: matchEnd, tick: '`'.repeat(T), content, wasSpaceStripped });
+    k = j + 1;
+  }
+  return ranges;
+}
+
+/** Index of the first range in a sorted, non-overlapping list whose end is after pos. */
+function firstCodeSpanIndexFrom(ranges, pos) {
+  let lo = 0, hi = ranges.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (ranges[mid].end <= pos) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
 }
 
 function tryParseLink(src, pos, end, depth = 0) {
@@ -1037,7 +1235,7 @@ function parseLinkDestination(raw) {
   return { url: trimmed, title: null };
 }
 
-function tryParseEmphasis(src, pos, end, depth = 0) {
+function tryParseEmphasis(src, pos, end, depth = 0, closerHorizon = Object.create(null), codeSpanRanges = []) {
   const ch = src[pos];
 
   // For '_': do not open if the preceding character is alphanumeric.
@@ -1058,7 +1256,7 @@ function tryParseEmphasis(src, pos, end, depth = 0) {
   // Try bold first (** or __)
   if (delimLen >= 2) {
     const delim = ch.repeat(2);
-    const closeIdx = findDelimiter(src, pos + 2, end, delim);
+    const closeIdx = findDelimiter(src, pos + 2, end, delim, closerHorizon, codeSpanRanges);
     if (closeIdx !== -1) {
       const content = parseInlines(src, pos + 2, closeIdx, depth + 1);
       return {
@@ -1071,7 +1269,7 @@ function tryParseEmphasis(src, pos, end, depth = 0) {
   // Try italic (* or _)
   if (delimLen >= 1) {
     const delim = ch;
-    const closeIdx = findDelimiter(src, pos + 1, end, delim);
+    const closeIdx = findDelimiter(src, pos + 1, end, delim, closerHorizon, codeSpanRanges);
     if (closeIdx !== -1) {
       // Make sure we're not consuming part of a longer delimiter run
       if (closeIdx + 1 < end && src[closeIdx + 1] === ch) {
@@ -1090,36 +1288,36 @@ function tryParseEmphasis(src, pos, end, depth = 0) {
 }
 
 /** Find a closing delimiter string, skipping code spans and respecting _ word-boundary rules. */
-function findDelimiter(src, pos, end, delim) {
+function findDelimiter(src, pos, end, delim, closerHorizon = Object.create(null), codeSpanRanges = []) {
   const ch = delim[0];
   const len = delim.length;
+
+  // A prior scan for this exact delimiter string already proved no closer
+  // exists from wherever it started up to `horizon`. Callers only move
+  // forward within one parseInlines call, so a query starting inside that
+  // proven span is a subset of it and is answered without rescanning. Sound
+  // because codeSpanRanges is fixed for the whole paragraph and does not
+  // depend on where this scan starts — see the comment near MAX_BRACKET_SCAN.
+  const horizon = closerHorizon[delim] || 0;
+  if (pos < horizon) return -1;
+
   let i = pos;
-  const limit = pos + MAX_DELIMITER_SCAN;
+  // Index into codeSpanRanges of the first range not yet fully behind i.
+  let ri = firstCodeSpanIndexFrom(codeSpanRanges, i);
 
-  while (i <= end - len && i < limit) {
-    const c = src[i];
+  while (i <= end - len) {
+    // A softbreak is whitespace, not a block boundary: `end` already stops at
+    // the enclosing paragraph (parseParagraph joins only that paragraph's own
+    // lines into one `src`), so a '\n' here is a line wrap CommonMark allows a
+    // delimiter run to close across. Fall through and let the flanking check
+    // below treat it like any other whitespace.
 
-    // Stop at line boundaries (emphasis doesn't span lines in this parser).
-    if (c === '\n') return -1;
-
-    // Skip code spans — a `_` inside backtick-code is not a delimiter.
-    if (c === '`') {
-      let tLen = 0;
-      while (i + tLen < end && src[i + tLen] === '`') tLen++;
-      const tick = src.slice(i, i + tLen);
-      // Find matching close (same number of backticks, not immediately followed by another).
-      let ci = i + tLen;
-      let found = false;
-      while (ci + tLen - 1 < end) {
-        if (src.slice(ci, ci + tLen) === tick &&
-            (ci + tLen >= end || src[ci + tLen] !== '`')) {
-          i = ci + tLen;
-          found = true;
-          break;
-        }
-        ci++;
-      }
-      if (!found) i += tLen;
+    // Skip a code span in one jump — a `_` inside backtick-code is not a
+    // delimiter. codeSpanRanges is sorted and non-overlapping, and i only
+    // increases within this loop, so ri only ever advances.
+    while (ri < codeSpanRanges.length && codeSpanRanges[ri].end <= i) ri++;
+    if (ri < codeSpanRanges.length && codeSpanRanges[ri].start <= i) {
+      i = codeSpanRanges[ri].end;
       continue;
     }
 
@@ -1127,8 +1325,9 @@ function findDelimiter(src, pos, end, delim) {
       const prevCh = i > 0 ? src[i - 1] : ' ';
       const nextCh = i + len < end ? src[i + len] : ' ';
 
-      // Right-flanking check: must not be preceded by whitespace.
-      if (prevCh === ' ' || prevCh === '\t') { i++; continue; }
+      // Right-flanking check: must not be preceded by whitespace. A softbreak
+      // is whitespace here too, same as the space or tab it stands in for.
+      if (prevCh === ' ' || prevCh === '\t' || prevCh === '\n') { i++; continue; }
 
       // Don't match if followed by the same char (*** or ___ runs).
       if (nextCh === ch) { i++; continue; }
@@ -1151,9 +1350,10 @@ function findDelimiter(src, pos, end, delim) {
 
     i++;
   }
-  // Same test as findMatchingBracket: the bound fired only if it, rather than
-  // the end of the line, is what the loop ran into. A newline returns above.
-  if (limit <= end - len) boundHits.delimiterScan++;
+  // Reached the paragraph's own end without finding a closer — no bound cut
+  // this scan short, so the whole span from `pos` to `i` is genuinely proven
+  // empty, and caching it is always sound.
+  closerHorizon[delim] = Math.max(horizon, i);
   return -1;
 }
 

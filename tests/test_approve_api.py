@@ -232,6 +232,20 @@ def test_a_holder_scoped_to_another_product_is_refused(client, approved):
     assert not approved
 
 
+def test_an_out_of_scope_epic_and_a_missing_one_answer_byte_identically(client, approved, monkeypatch):
+    """E19·2 (issue_01M35K5AB4PRTJ71DMQW7Q4D3B): an epic outside the caller's
+    scope must read exactly like one that does not exist, not a distinct
+    refusal that would confirm the epic is there. The route already reads the
+    epic before checking scope, so this pins that the two 404 paths converge
+    on the same bytes rather than merely the same status code."""
+    out_of_scope = _post(client, _human("scoped@example.com"))
+    monkeypatch.setattr(library_client, "get_issue_item", lambda _id: None)
+    missing = _post(client, _human("scoped@example.com"))
+    assert out_of_scope.status_code == missing.status_code == 404
+    assert out_of_scope.content == missing.content
+    assert not approved
+
+
 def test_the_same_scoped_holder_approves_an_epic_in_their_own_product(
         client, approved, monkeypatch):
     """The positive control for the test above. Without it, that refusal would

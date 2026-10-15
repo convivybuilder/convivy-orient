@@ -93,6 +93,32 @@ SITE = STATE_ROOT / "site"
 LANE_ISSUES = "issues"
 LANE_BLOCKERS = "blockers"
 
+# The default for a caller that does not filter by viewer (most of this
+# module's own tests, which exercise rendering rather than scoping) — every
+# product, the same value the Library sends back for an administrator
+# (authz.in_scope's own "*"). Every production caller (server.py) passes the
+# viewer's Library-resolved scope explicitly instead of relying on this.
+_ALL_PRODUCTS: frozenset[str] = frozenset({"*"})
+
+
+def _in_scope(product: str, scope: frozenset[str]) -> bool:
+    """Whether `product` is in the viewer's Library-resolved scope. "*" means
+    every product — the Library's own answer for an administrator, never a
+    flag this module branches on, matching kb_index._by_identity's rule."""
+    return "*" in scope or product in scope
+
+
+def _ref_in_scope(item_id, scope: frozenset[str]) -> bool:
+    """Whether an item another item points at (its `found_during`, its
+    `refs.duplicate_of`) is in the viewer's scope. Those references can name
+    an item in any product, and the resolve API accepts a duplicate_of
+    without a same-product check, so printing the id unchecked would confirm
+    that an item exists in a project the viewer cannot see (review rounds 1
+    and 2 on PR #372). An id the Library does not return reads as out of
+    scope."""
+    target = library_client.get_issue_item(str(item_id))
+    return target is not None and _in_scope(target.product, scope)
+
 
 def lane_of(item) -> str:
     """Which of the two queues an issue belongs to. Total over active issues."""
@@ -428,16 +454,21 @@ def _thread(item, limit: int = _THREAD_RENDER_LIMIT) -> str:
     return f'<div class="thread">{"".join(rows)}</div>'
 
 
-def _ref_chips(refs) -> str:
+def _ref_chips(refs, scope: frozenset[str] = _ALL_PRODUCTS) -> str:
     """Render the refs dict as escaped chips; a value that is a clean http(s)
     URL links. `refs` is agent-written, so the link check is an allowlist
     (`url_safety.safe_http_url`), not a scheme prefix — `str.startswith` does
     not require an authority and survives an escaped control character, so a
-    stored `"http://\\njavascript:alert(1)"` would otherwise pass through."""
+    stored `"http://\\njavascript:alert(1)"` would otherwise pass through.
+
+    `duplicate_of` names another item, which can be in any product, so its
+    chip is dropped unless that item is in `scope` (`_ref_in_scope`)."""
     if not isinstance(refs, dict) or not refs:
         return ""
     chips = []
     for k, v in list(refs.items())[:8]:
+        if k == "duplicate_of" and not _ref_in_scope(v, scope):
+            continue
         key = escape(str(k))
         val = str(v)
         safe = safe_http_url(val)
@@ -494,7 +525,7 @@ def _outcome_banner(item: library_client.IssueRecord) -> str:
     return ""
 
 
-def _prerequisite_line(entry: dict) -> str:
+def _prerequisite_line(entry: dict, scope: frozenset[str] = _ALL_PRODUCTS) -> str:
     """One prerequisite, as a reader needs to see it.
 
     Three shapes, and the third is the one worth getting right. A `{text:}`
@@ -504,6 +535,12 @@ def _prerequisite_line(entry: dict) -> str:
     **shown as a blocker they cannot open, rather than hidden or rendered as an
     empty link.** Hiding it would say the item is blocked by nothing; an empty
     link would say the blocker is untitled. Both read as a defect in the page.
+
+    An `{item:}` entry in a project outside the viewer's scope can name work in
+    any product (platform/decisions/0074's own example is a Deck item waiting
+    on a Bosun item), so it is shown as a blocker in a project the viewer
+    cannot see, with no id and no title (review round 2 on PR #372). It still
+    counts toward "blocked", so the item never reads as blocked by nothing.
     """
     if "text" in entry:
         met = bool(entry.get("met"))
@@ -515,6 +552,10 @@ def _prerequisite_line(entry: dict) -> str:
                 f'{escape(entry.get("text") or "")}{by}</li>')
     raw_id = str(entry.get("item") or "?")
     iid = escape(raw_id)
+    if not entry.get("missing") and not _ref_in_scope(raw_id, scope):
+        return ('<li class="pq unmet missing"><span class="pq-mark">blocked</span>'
+                'Waiting on an item in a project you cannot see. '
+                '<span class="pq-by">not visible to you</span></li>')
     if entry.get("missing"):
         return ('<li class="pq unmet missing"><span class="pq-mark">blocked</span>'
                 f'Waiting on <code>{iid}</code>, which you cannot see. '
@@ -534,7 +575,8 @@ def _prerequisite_line(entry: dict) -> str:
             f'Waiting on <a href="{href}">{title}</a></li>')
 
 
-def _blocked_banner(item: library_client.IssueRecord) -> str:
+def _blocked_banner(item: library_client.IssueRecord,
+                   scope: frozenset[str] = _ALL_PRODUCTS) -> str:
     """Why this item cannot proceed, listed rather than counted.
 
     Prerequisites replaced parking (platform/decisions/0074) because a blocker
@@ -553,11 +595,12 @@ def _blocked_banner(item: library_client.IssueRecord) -> str:
         head = (f'<span class="oc-label">Blocked</span>'
                 f'{unmet} of {len(prereqs)} '
                 f'{"prerequisite" if len(prereqs) == 1 else "prerequisites"} not yet met')
-    rows = "".join(_prerequisite_line(p) for p in prereqs)
+    rows = "".join(_prerequisite_line(p, scope) for p in prereqs)
     return f'<div class="outcome blocked">{head}<ul class="pq-list">{rows}</ul></div>'
 
 
-def _terminal_banner(item: library_client.IssueRecord) -> str:
+def _terminal_banner(item: library_client.IssueRecord,
+                     scope: frozenset[str] = _ALL_PRODUCTS) -> str:
     """How a terminal issue ended, for the detail page.
 
     **The queue cannot show this and that is the point of the page.** The active
@@ -574,7 +617,7 @@ def _terminal_banner(item: library_client.IssueRecord) -> str:
            "redirected": "redirected"}.get(item.resolution or "", "done")
     bits = [escape(item.resolved_by or "?")]
     dupe_of = (item.refs or {}).get("duplicate_of") if isinstance(item.refs, dict) else None
-    if dupe_of:
+    if dupe_of and _ref_in_scope(dupe_of, scope):
         # The original is a LINK now that an issue id resolves to a page. A
         # duplicate whose banner names an id the reader cannot open is the same
         # dead end this whole page exists to close.
@@ -765,8 +808,10 @@ def _card(item: library_client.IssueRecord, now, comment_count: int = 0,
     </article>'''
 
 
-def _resolved_row(item: library_client.IssueRecord) -> str:
-    """One row in the recently-resolved strip."""
+def _resolved_row(item: library_client.IssueRecord,
+                  scope: frozenset[str] = _ALL_PRODUCTS) -> str:
+    """One row in the recently-resolved strip. A duplicate's original is
+    named only when it is in the viewer's scope (`_ref_in_scope`)."""
     icon = {"fixed": "✓", "wontfix": "✕", "duplicate": "⧉", "redirected": "↪"}.get(item.resolution or "", "·")
     status_cls = {"fixed": "done", "wontfix": "wontfix", "duplicate": "duplicate", "redirected": "redirected"}.get(item.resolution or "", "done")
     label = _RESOLUTION_LABELS.get(item.resolution or "", item.resolution or "?")
@@ -774,7 +819,8 @@ def _resolved_row(item: library_client.IssueRecord) -> str:
     # Surface the original on the row. A resolved-duplicate whose row says only
     # "Duplicate" tells the reader the one thing they already knew.
     dupe_of = (item.refs or {}).get("duplicate_of") if isinstance(item.refs, dict) else None
-    dupe_bit = f' · of <code>{escape(str(dupe_of))}</code>' if dupe_of else ""
+    dupe_bit = (f' · of <code>{escape(str(dupe_of))}</code>'
+                if dupe_of and _ref_in_scope(dupe_of, scope) else "")
     sub = (f'<span class="verdict">{escape(label)}</span>{dupe_bit} · '
            f'{escape(item.resolved_by or "?")} · {outcome}')
     return f'''
@@ -1006,15 +1052,20 @@ def _comment_cap_note(fetched: int, total: int) -> str:
             f'more than {_QUEUE_LIMIT} Library round trips for comments.')
 
 
-def live_html() -> str:
+def live_html(scope: frozenset[str] = _ALL_PRODUCTS) -> str:
     """Render the Epics page from the Library: an epic per project, each
     expanding into its active work items (the operator, 2026-08-29 —
     issue_01M1518ZFBGHAWC4Z46W893H2S). Full-tier only (server-gated).
 
-    Visibility model: the page shows every product's epics to any full-tier
-    viewer — the same tier boundary /archives uses. Per-product scoping is the
-    API's job, because agents hold narrow per-product bearer tokens; a human
-    web viewer is gated at the coarse tier boundary.
+    Visibility model (E19·2, issue_01M35K5AB4PRTJ71DMQW7Q4D3B): the page shows
+    only the epics (and their children) of a project in `scope`, the viewer's
+    Library-resolved project scope — an administrator's scope is simply the
+    full project set the Library returns for them, so this filter makes no
+    role branch of its own. `all_items` is filtered to scope before any
+    grouping or counting runs, so every count, chip, project section and
+    cross-product child derived from it is already scoped; `known_products`
+    (the "Log an issue" datalist) and the per-product chips can therefore
+    never name a project outside `scope`.
 
     Reuses `_card` unchanged for both an epic's own row and each child card,
     so the resolve actions, claim banner, thread and escaping stay exactly the
@@ -1052,6 +1103,7 @@ def live_html() -> str:
     all."""
     now = utcnow()
     all_items = library_client.list_issue_items()
+    all_items = [it for it in all_items if _in_scope(it.product, scope)]
     related, related_failed = _read_related_items(all_items)
     epics, children_by_parent, _ = _epic_and_correction_groups(all_items, related)
 
@@ -1096,10 +1148,16 @@ def live_html() -> str:
                        comment_note=_comment_cap_note(comment_total - comment_hidden, comment_total))
 
 
-def live_html_corrections(query: dict | None = None) -> str:
+def live_html_corrections(query: dict | None = None,
+                          scope: frozenset[str] = _ALL_PRODUCTS) -> str:
     """Render the Corrections page from the Library: the corrections queue
     per project, each expanding into its active work items (the operator, 2026-08-29 —
     issue_01M1518ZFBGHAWC4Z46W893H2S). Full-tier only (server-gated).
+
+    `scope` is the viewer's Library-resolved project scope (E19·2,
+    issue_01M35K5AB4PRTJ71DMQW7Q4D3B) — applied to `all_items` before any
+    grouping, sort or count, the same `live_html` filters by, so a project
+    outside it has no section, chip or datalist entry on this page either.
 
     `?sort=topic` groups each project's items by area (`_topic_groups`).
     `?sort=severity` (issue_01M2P9385P23PMZCZFB1BZW9SN) reorders each
@@ -1128,6 +1186,7 @@ def live_html_corrections(query: dict | None = None) -> str:
     by_severity = sort == "severity"
     now = utcnow()
     all_items = library_client.list_issue_items()
+    all_items = [it for it in all_items if _in_scope(it.product, scope)]
     _, _, corrections = _epic_and_correction_groups(all_items)
 
     by_product: dict[str, list] = {}
@@ -1193,7 +1252,7 @@ def live_html_corrections(query: dict | None = None) -> str:
         # to carry, kept here as the closest descendant of the old flat page.
         key=lambda it: (it.resolved_at or dt.datetime.min, it.created_at),
         reverse=True)[:_RESOLVED_LIMIT]
-    resolved_html = "".join(_resolved_row(it) for it in resolved)
+    resolved_html = "".join(_resolved_row(it, scope) for it in resolved)
 
     known_products = sorted({it.product for it in all_items})
     chips = _chips(products, len(corrections))
@@ -1206,7 +1265,8 @@ def live_html_corrections(query: dict | None = None) -> str:
 _DETAIL_PREFIX = "/engineering/issues/"
 
 
-def _detail_page(item: library_client.IssueRecord, now) -> str:
+def _detail_page(item: library_client.IssueRecord, now,
+                 scope: frozenset[str] = _ALL_PRODUCTS) -> str:
     """One issue's page, assembled through the shared Atelier shell.
 
     **The card is the queue's card, not a second rendering of one.** It carries
@@ -1214,6 +1274,12 @@ def _detail_page(item: library_client.IssueRecord, now) -> str:
     one resolve path rather than two that drift. What the page adds around it is
     what a list cannot hold: the whole thread rather than its last twelve, and a
     banner for an issue the queue has stopped showing at all.
+
+    `scope` reaches the two found-during pieces: the "found during" link in the
+    meta line and `_found_during_section`. A found-during link joins items
+    across products (that cross-product case is the feature), so those are
+    the pieces of this page that can name an item in a project outside the
+    viewer's scope.
     """
     badges = [f'<span class="badge prod">{escape(item.product)}</span>']
     if item.type:
@@ -1238,7 +1304,9 @@ def _detail_page(item: library_client.IssueRecord, now) -> str:
     elif item.parent_id:
         href = escape(f"{_DETAIL_PREFIX}{quote(str(item.parent_id), safe='')}", quote=True)
         meta_bits.append(f'under <a href="{href}">{escape(item.parent_id)}</a>')
-    if item.found_during:
+    # `found_during` can name an epic in another product, so the link is shown
+    # only when that epic is in the viewer's scope (`_ref_in_scope`).
+    if item.found_during and _ref_in_scope(item.found_during, scope):
         href = escape(f"{_DETAIL_PREFIX}{quote(str(item.found_during), safe='')}", quote=True)
         meta_bits.append(f'found during <a href="{href}">{escape(item.found_during)}</a>')
 
@@ -1256,12 +1324,12 @@ def _detail_page(item: library_client.IssueRecord, now) -> str:
     {_model_section(item, now)}
     {_spec_section(item)}
     {_reviews_section(item)}
-    {_found_during_section(item)}
+    {_found_during_section(item, scope)}
     <div class="queue" id="queue">
-      {_blocked_banner(item)}
-      {_terminal_banner(item)}
+      {_blocked_banner(item, scope)}
+      {_terminal_banner(item, scope)}
       {_card(item, now, thread_limit=_THREAD_DETAIL_LIMIT)
-       if item.state in ISSUE_ACTIVE else _frozen_card(item, now)}
+       if item.state in ISSUE_ACTIVE else _frozen_card(item, now, scope)}
     </div>
     <div class="footnote">
       Signed in as <strong>__WHOAMI__</strong>. This is the URL every issue already
@@ -1283,13 +1351,21 @@ def _detail_page(item: library_client.IssueRecord, now) -> str:
     )
 
 
-def _found_during_section(item: library_client.IssueRecord) -> str:
+def _found_during_section(item: library_client.IssueRecord,
+                          scope: frozenset[str] = _ALL_PRODUCTS) -> str:
     """On an epic's page, the items whose `found_during` names it, open ones
     first. They stay in the corrections lane, so this is the only place they
-    are shown against the epic. Absent on a non-epic and on an epic with none."""
+    are shown against the epic. Absent on a non-epic and on an epic with none.
+
+    A found-during item is filed against whatever product it was actually
+    found in, not necessarily the epic's own — that cross-product case is the
+    feature — so this is filtered to `scope` on its own rather than inheriting
+    the epic's already-checked visibility; an epic in scope must not leak the
+    title of a found-during item in a project the viewer cannot see."""
     if item.type != ISSUE_TYPE_EPIC:
         return ""
-    found = library_client.list_found_during(item.id)
+    found = [it for it in library_client.list_found_during(item.id)
+             if _in_scope(it.product, scope)]
     if not found:
         return ""
     found.sort(key=lambda it: (it.state not in ISSUE_ACTIVE, it.created_at))
@@ -1515,7 +1591,8 @@ def _model_section(item: library_client.IssueRecord, now) -> str:
             f'{shown}{control}</section>')
 
 
-def _frozen_card(item: library_client.IssueRecord, now) -> str:
+def _frozen_card(item: library_client.IssueRecord, now,
+                 scope: frozenset[str] = _ALL_PRODUCTS) -> str:
     """A terminal issue: everything the card shows, and no buttons.
 
     Built rather than reusing `_card` with the actions stripped, because the
@@ -1527,19 +1604,18 @@ def _frozen_card(item: library_client.IssueRecord, now) -> str:
     return f'''
     <article class="card frozen" data-prod="{escape(item.product, quote=True)}" data-id="{escape(item.id, quote=True)}" data-state="{escape(item.state, quote=True)}">
       {body}
-      {_ref_chips(item.refs)}
+      {_ref_chips(item.refs, scope)}
       {_thread(item, limit=_THREAD_DETAIL_LIMIT)}
     </article>'''
 
 
-def detail_html(item_id: str):
-    """Render one issue's page, or None when there is no such issue.
-
-    **Visibility matches the queue this page is reached from**: any full-tier
-    viewer sees any product's issue, the same coarse tier boundary every other
-    full-tier page uses. Gating it more tightly would 404 links the queue itself
-    renders. If a scoped, non-admin full role is ever added to roles.json,
-    revisit this.
+def detail_html(item_id: str, scope: frozenset[str] = _ALL_PRODUCTS):
+    """Render one issue's page, or None when there is no such issue — or
+    when `item_id` names one whose product is outside `scope`, the viewer's
+    Library-resolved project scope (E19·2, issue_01M35K5AB4PRTJ71DMQW7Q4D3B).
+    Both answer None identically, and server.py turns None into the same 404
+    either way, so an id outside scope reads exactly like one that does not
+    exist — it must not confirm the id is real.
 
     **A terminal issue renders**, which is most of the point. The active queue
     holds none, and the resolved strip keeps twelve — so the ids that most need
@@ -1547,9 +1623,9 @@ def detail_html(item_id: str):
     """
     now = utcnow()
     item = library_client.get_issue_item(item_id)
-    if item is None:
+    if item is None or not _in_scope(item.product, scope):
         return None
-    return _detail_page(item, now)
+    return _detail_page(item, now, scope)
 
 
 def _log_swallowed(what: str, ex: BaseException) -> None:
@@ -1633,10 +1709,15 @@ def _course_page(sections_html: str) -> str:
     )
 
 
-def live_html_course() -> str:
+def live_html_course(scope: frozenset[str] = _ALL_PRODUCTS) -> str:
     """Render the Course page from the Library: the Course per project, its
     entries in sequence (the operator, 2026-08-29 — issue_01M1518ZFBGHAWC4Z46W893H2S).
     Full-tier only (server-gated).
+
+    `scope` is the viewer's Library-resolved project scope (E19·2,
+    issue_01M35K5AB4PRTJ71DMQW7Q4D3B): a project's Course is dropped before
+    any section is built for it, the same "filter before grouping" rule
+    `live_html` and `live_html_corrections` apply.
 
     Read-only — a Course entry carries no resolve action of its own; the
     linked issue does. `list_courses` raises on failure, uncaught, matching
@@ -1646,7 +1727,9 @@ def live_html_course() -> str:
     detail call still degrades to its `list_courses` record on its own
     failure, the same discipline `chart_house_build._course_rows` applies,
     so one course's timeout cannot take every other row down with it."""
-    courses = sorted(library_client.list_courses(status="live"), key=lambda c: c.product)
+    courses = sorted((c for c in library_client.list_courses(status="live")
+                      if _in_scope(c.product, scope)),
+                     key=lambda c: c.product)
     sections = []
     for course in courses:
         try:
@@ -2385,11 +2468,14 @@ def _lane_page(lane: str, cards_html: str, count: int, products) -> str:
     )
 
 
-def _live_lane(lane: str) -> str:
+def _live_lane(lane: str, scope: frozenset[str] = _ALL_PRODUCTS) -> str:
     """Render one lane. Counts come from the full matching set, never from
-    len(rendered rows)."""
+    len(rendered rows). `scope` (E19·2, issue_01M35K5AB4PRTJ71DMQW7Q4D3B) is
+    applied to `all_items` before the lane split, so an out-of-scope
+    project's items are absent from the count, the chips and the cards alike."""
     now = utcnow()
     all_items = library_client.list_issue_items()
+    all_items = [it for it in all_items if _in_scope(it.product, scope)]
     active_matching = _active_in_lane(all_items, lane)
     total = len(active_matching)
     products = _product_counts(active_matching)
@@ -2399,6 +2485,6 @@ def _live_lane(lane: str) -> str:
     return _lane_page(lane, cards, total, products)
 
 
-def live_html_blockers() -> str:
+def live_html_blockers(scope: frozenset[str] = _ALL_PRODUCTS) -> str:
     """/engineering/blockers — active issues only the operator can finish."""
-    return _live_lane(LANE_BLOCKERS)
+    return _live_lane(LANE_BLOCKERS, scope)

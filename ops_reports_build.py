@@ -226,9 +226,14 @@ _MEMORY_CSS = r"""
 """
 
 
-def briefings_live_html() -> str:
+def briefings_live_html(scope: frozenset[str] = frozenset(), whole_fleet: bool = True) -> str:
     """/reference/briefings — the daily AI briefings, plus every KB memory kind
     engineering_build.VISIBLE_KINDS drops from the canonical browse.
+
+    Restricted to `scope` (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M) the same
+    way `engineering_build.live_html`'s own doc list is: a brief or memory
+    whose project is outside `scope` is dropped before the `projects` pill
+    list or either payload is built from it.
 
     Split out of Reports by ARCH-362/R2. These sit under **Memory**, not
     Engineering: they are outside-world industry reading rather than our
@@ -251,6 +256,9 @@ def briefings_live_html() -> str:
     metas = _entitled_metas()  # one listing pass, filtered into both groups
     briefs = _load_kb_docs(("brief",), metas)
     other = _load_kb_docs(tuple(_MEMORY_KIND_LABEL), metas)
+    if not whole_fleet:
+        briefs = [d for d in briefs if d["project"] in scope]
+        other = [d for d in other if d["project"] in scope]
     projects = sorted({d["project"] for d in (*briefs, *other)})
 
     briefs_payload = [_memory_entry(d) for d in briefs]
@@ -306,20 +314,20 @@ def briefings_live_html() -> str:
 
 
 def build_static() -> None:
-    """Seed empty-state fallbacks (served only if a live render throws)."""
+    """Seed empty-state fallbacks, deliberately empty rather than calling the
+    live renderer (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M) — this used to
+    call `briefings_live_html()` with no scope argument, the same
+    zero-argument leak 26bb079 found and fixed in
+    `archives_build.build_static()`."""
     SITE.mkdir(parents=True, exist_ok=True)
     # engineering-reports.html and engineering-notes.html are gone with their
     # pages (the latter retired 2026-08-26, the operator): a fallback nothing serves is
     # a file that only ever misleads whoever finds it in site/.
-    for name, fn in (("memory-briefings.html", briefings_live_html),):
-        try:
-            html = fn()
-        except Exception:
-            html = _page(title="AI Briefings & Memories", area_nav="/engineering/reports", eyebrow="", heading="",
-                         lede="", cards_html="", chips_html="",
-                         empty_msg="Live view unavailable — reload in a moment.", footnote="")
-        (SITE / name).write_text(html, encoding="utf-8")
-        print(f"Wrote site/{name}")
+    html = _page(title="AI Briefings & Memories", area_nav="/engineering/reports", eyebrow="", heading="",
+                lede="", cards_html="", chips_html="",
+                empty_msg="Live view unavailable — reload in a moment.", footnote="")
+    (SITE / "memory-briefings.html").write_text(html, encoding="utf-8")
+    print("Wrote site/memory-briefings.html (static fallback)")
 
 
 _CSS = r"""

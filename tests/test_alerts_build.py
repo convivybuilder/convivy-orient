@@ -6,8 +6,11 @@ live_html() reads its snapshot). These pin: each category's threshold is the
 one its source page already colors by, severity-only alerts fire (good never
 does), missing/None values never fire, and render()'s empty/non-empty states.
 """
+import json
+
 import alerts_build as ab
 import code_health_build as ch
+import crew_registry
 import dashboard_build as db
 import kb_build as kb
 
@@ -118,7 +121,7 @@ def test_gather_isolates_a_broken_source(monkeypatch):
     monkeypatch.setattr(db, "load_latest_snapshot", lambda: {})
     monkeypatch.setattr(kb, "load_eval", lambda: None)
     monkeypatch.setattr(kb, "load_query_stats", lambda: {"empty_rate": None})
-    assert ab.gather() == []
+    assert ab.gather(frozenset({"*"}), True) == []
 
 
 def test_gather_sorts_bad_before_warn():
@@ -211,3 +214,56 @@ def test_freshness_banners_isolates_a_broken_source(monkeypatch):
 def test_render_embeds_freshness_banners():
     html = ab.render([], banners='<div class="stalled-banner">boo</div>')
     assert 'class="stalled-banner"' in html
+
+
+# --- gather() scoping (E19·3, issue_01M35K5EAZD85FBYXEBQVRKVZV) ------------
+
+
+def test_gather_scopes_code_health_alerts_and_whole_fleet_only_sources(tmp_path, monkeypatch):
+    """Definition of done: a scoped viewer's alert set equals the same set
+    computed over their project alone — the other project's repo alert never
+    appears — and the account-wide Spending/KB categories (no per-project
+    dimension at all: their subjects are literally "account-wide"/"golden
+    set", not a repo) reach only a viewer whose scope covers every registry
+    project. That viewer sees every repo and both of those categories."""
+    # A repo's name is not its project's slug, so the fixture's repos differ
+    # from both slugs: a filter against the slug drops every row.
+    registry = tmp_path / "projects.json"
+    registry.write_text(json.dumps({"_meta": {}, "alpha": {"repos": ["alpha-repo"]},
+                                    "beta": {"repos": ["beta-repo"]}}))
+    monkeypatch.setattr(crew_registry, "REGISTRY", registry)
+    rows = [{"repo": "alpha-repo", "ci_pass_rate_main": 0.1, "oldest_open_days": None, "reverts_recent": None},
+            {"repo": "beta-repo", "ci_pass_rate_main": 0.1, "oldest_open_days": None, "reverts_recent": None}]
+    monkeypatch.setattr(ch, "load_snapshot", lambda: ("2026-09-27T00:00:00Z", rows))
+    monkeypatch.setattr(db, "load_latest_snapshot",
+                        lambda: {"overage": {"runs_reporting": 3, "runs_in_overage": 1}})
+    monkeypatch.setattr(kb, "load_eval", lambda: {"overall": {"recall@1": 0.1, "mrr": 0.1}})
+    monkeypatch.setattr(kb, "load_query_stats", lambda: {"empty_rate": None})
+
+    scoped = ab.gather(frozenset({"alpha"}), False)
+    subjects = {a["subject"] for a in scoped}
+    assert subjects == {"alpha-repo"}
+    assert "account-wide" not in subjects and "golden set" not in subjects
+
+    whole = ab.gather(frozenset({"alpha", "beta"}), True)
+    subjects = {a["subject"] for a in whole}
+    assert {"alpha-repo", "beta-repo", "account-wide", "golden set"} <= subjects
+
+
+def test_build_writes_an_empty_static_fallback_naming_no_repo(tmp_path, monkeypatch):
+    """server.py serves site/alerts.html to ANY viewer whose live render
+    throws, before scope is known to this file at all — so the fallback
+    `build()` writes must name no repo, even though a real harvest might
+    hold several alerting ones."""
+    monkeypatch.setattr(ab, "OUT", tmp_path)
+    rows = [{"repo": "alpha", "ci_pass_rate_main": 0.1, "oldest_open_days": None, "reverts_recent": None}]
+    monkeypatch.setattr(ch, "load_snapshot", lambda: ("2026-09-27T00:00:00Z", rows))
+    monkeypatch.setattr(db, "load_latest_snapshot", lambda: {})
+    monkeypatch.setattr(kb, "load_eval", lambda: None)
+    monkeypatch.setattr(kb, "load_query_stats", lambda: {"empty_rate": None})
+
+    ab.build()
+
+    fallback = (tmp_path / "alerts.html").read_text()
+    assert "alpha" not in fallback
+    assert "Live view unavailable" in fallback

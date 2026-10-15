@@ -166,7 +166,7 @@ def _docs():
 
 
 def test_render_has_browse_scaffold_and_edit_base():
-    html = E.render(_docs())
+    html = E.render(_docs(), frozenset(), True)
     # Title is now "Engineering" (ARCH-219 rename; old "Convivy · Knowledge Base" gone)
     for marker in ('<title>Knowledge Base · Orient · Convivy Builder</title>', 'Human-readable docs', 'Browse by type',
                    'class="drawer"', 'ARCH platform decision log'):
@@ -274,7 +274,7 @@ console.log(JSON.stringify({
 
 def test_render_browse_has_atelier_nav():
     """Browse page is on the Atelier design system: nav, tokens, no old palette."""
-    html = E.render(_docs())
+    html = E.render(_docs(), frozenset(), True)
     # Atelier nav class present (ds.nav_component output)
     assert 'atelier-nav' in html
     # Engineering area is active in the nav
@@ -298,7 +298,7 @@ def test_render_escapes_script_in_doc_blurb():
     but `blurb` still does — the payload-wide `</` escape must still guard it."""
     docs = _docs()
     docs[0]["blurb"] = "before </script><script>alert(1)</script> after"
-    html = E.render(docs)
+    html = E.render(docs, frozenset(), True)
     # the raw closing tag must be escaped inside the JSON payload so it can't
     # break out of the <script id="data"> block.
     assert "</script><script>alert(1)" not in html
@@ -313,7 +313,7 @@ def test_render_drops_body_from_payload():
     appear in the rendered HTML."""
     docs = _docs()
     docs[0]["body"] = "UNIQUE_BODY_MARKER_NOT_ELSEWHERE_ON_PAGE"
-    html = E.render(docs)
+    html = E.render(docs, frozenset(), True)
     assert "UNIQUE_BODY_MARKER_NOT_ELSEWHERE_ON_PAGE" not in html
     assert '"body":' not in html
     # `blurb` and `len` stay — the row excerpt and the drawer threshold
@@ -332,7 +332,7 @@ def test_browse_sanitizes_doc_body_before_innerhtml():
     parses `bodyCache.get(d.id)` (the fetch cache) and the drawer parses `body`
     (the fetch response), and both call sites are checked here rather than the
     old single `d.body` one."""
-    html = E.render(_docs())
+    html = E.render(_docs(), frozenset(), True)
     assert "Cure53" in html, "DOMPurify library not inlined into the browse bundle"
     assert "DOMPurify.sanitize(marked.parse(bodyCache.get(d.id)))" in html  # inline row inset
     assert "DOMPurify.sanitize(marked.parse(body))" in html                # side drawer
@@ -348,7 +348,7 @@ def test_body_search_failure_is_not_silently_treated_as_empty(monkeypatch):
     distinction away — a 503 or network error resolved to the same empty
     match set as a genuinely empty result. A non-2xx response must now be
     treated as a rejection, not silently coerced into a fabricated `{ids: []}`."""
-    html = E.render(_docs())
+    html = E.render(_docs(), frozenset(), True)
     assert "r.ok ? r.json() : { ids: [] }" not in html
     assert "if (!r.ok) throw new Error(" in html
     # the failure is tracked as its own state, distinct from a real (possibly
@@ -361,7 +361,7 @@ def test_body_search_failure_and_pending_states_are_visible_in_listing():
     """A failed or in-flight body search must render a visible note, not
     render identically to "genuinely no body match" — the same silent-loss
     failure mode this issue exists to close, moved onto the outage path."""
-    html = E.render(_docs())
+    html = E.render(_docs(), frozenset(), True)
     assert "Couldn't check document text" in html
     assert "Checking document text" in html
     assert "function bodySearchStatus(" in html
@@ -371,7 +371,7 @@ def test_body_search_has_a_minimum_query_length():
     """Search is now keystroke-driven behind a 250ms debounce; a 1-character
     query fired a full server round trip (Library BM25 + an in-process ARCH
     scan) on every keystroke. A short query is skipped rather than searched."""
-    html = E.render(_docs())
+    html = E.render(_docs(), frozenset(), True)
     assert "MIN_BODY_SEARCH_LEN" in html
     assert "s.length < MIN_BODY_SEARCH_LEN" in html
 
@@ -550,7 +550,7 @@ def test_kind_pill_click_preserves_the_typed_query():
     nothing on the landing page — now that landing search works, clearing it
     would discard the reader's query at the exact moment they narrow it with
     a type pill."""
-    html = E.render(_docs())
+    html = E.render(_docs(), frozenset(), True)
     assert "kind = (k==='__home')?null:k; openRow=null; render();" in html
     assert "qEl.value=''" not in html
 
@@ -567,7 +567,7 @@ def test_arch_log_sanitizes_entry_body_before_innerhtml(tmp_path, monkeypatch):
 
 
 def test_render_drawer_threshold_in_payload():
-    html = E.render(_docs())
+    html = E.render(_docs(), frozenset(), True)
     assert str(E.DRAWER_THRESHOLD) in html
 
 
@@ -723,7 +723,15 @@ def test_every_ordered_project_has_a_label():
 
 
 def test_render_project_order_puts_company_first():
-    html = E.render(_docs())
+    # `projectOrder` is narrowed to the projects actually present in `docs`
+    # (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M) — `_docs()` carries none
+    # under "company", so this test adds one rather than asserting against
+    # the full static PROJECT_ORDER regardless of what's shown.
+    docs = _docs() + [{"id": "company/decisions/0002-bar", "project": "company",
+                       "kind": "decision", "title": "Bar decision", "reflabel": "ADR-0002",
+                       "status": "current", "reviewed": "2026-06-01", "ref": "",
+                       "human": True, "blurb": "", "len": 10, "body": ""}]
+    html = E.render(docs, frozenset(), True)
     order = json.loads(re.search(r'"projectOrder":\s*(\[[^\]]*\])', html).group(1))
     # The company-altitude scope leads every category page. It was `shared` until
     # Phase 0 step 5 emptied that scope and `convivy` became `company`; the intent
@@ -736,12 +744,12 @@ def test_render_links_project_group_header_to_its_project_page():
     entry point is wired from the "All projects" grouped-by-project header on
     this browse page, since that's where a project name already renders as a
     label — no new nav item was added for it."""
-    html = E.render(_docs())
+    html = E.render(_docs(), frozenset(), True)
     assert 'class="grp-link" href="/projects/${encodeURIComponent(p)}"' in html
 
 
 def test_render_makes_doc_id_searchable():
-    html = E.render(_docs())
+    html = E.render(_docs(), frozenset(), True)
     assert "d.id.toLowerCase().includes(s)" in html
 
 
@@ -862,7 +870,7 @@ def test_arch_docs_cache_invalidates_when_the_log_changes(tmp_path, monkeypatch)
 
 
 def test_render_carries_arch_kind_and_descriptive_labels():
-    html = E.render(_docs())
+    html = E.render(_docs(), frozenset(), True)
     assert '"arch"' in html                          # arch is in kindOrder (VISIBLE_KINDS)
     # descriptive labels (ARCH-200) — not terse DEC/ARCH
     assert '"Platform Decisions (ARCH)"' in html
@@ -871,7 +879,7 @@ def test_render_carries_arch_kind_and_descriptive_labels():
 
 
 def test_render_carries_kind_tooltips():
-    html = E.render(_docs())
+    html = E.render(_docs(), frozenset(), True)
     # each category has a hover tooltip; the ARCH-vs-architecture disambiguation is explicit
     assert "kindTooltip" in html and "function kindTip(" in html
     assert "the steward's engineering decision log" in html   # arch tooltip
@@ -891,12 +899,12 @@ def test_tag_draft_uses_tokens_not_hardcoded_hex():
 
 
 def test_browse_row_has_role_button():
-    html = E.render(_docs())
+    html = E.render(_docs(), frozenset(), True)
     assert 'role="button"' in html
 
 
 def test_browse_card_has_role_button_and_tabindex():
-    html = E.render(_docs())
+    html = E.render(_docs(), frozenset(), True)
     # Cards in the feature landing grid need keyboard operability.
     assert 'role="button" tabindex="0"' in html or 'tabindex="0" role="button"' in html or (
         'class="card" role="button" tabindex="0"' in html or
@@ -905,7 +913,7 @@ def test_browse_card_has_role_button_and_tabindex():
 
 
 def test_eng_stat_has_role_button():
-    html = E.render(_docs())
+    html = E.render(_docs(), frozenset(), True)
     # Kind-count stat chips on the landing need role=button for keyboard activation.
     assert 'class="eng-stat" role="button"' in html
 
@@ -929,15 +937,29 @@ def test_live_html_includes_arch_docs(monkeypatch):
          "title": "review integrity", "reflabel": "ARCH-189", "status": "current",
          "reviewed": "", "ref": "substrate/decisions.md", "human": False,
          "blurb": "b", "len": 50, "body": "body"}])
-    html = E.live_html()
+    html = E.live_html(frozenset(), True)
     assert '"ARCH-189"' in html and '"substrate/arch/arch-189"' in html
+
+
+def test_build_static_seeds_an_empty_fallback_not_real_data(tmp_path, monkeypatch):
+    """engineering.html is served to ANY viewer's failed render, scoped or
+    not (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M) — a snapshot naming a real
+    document would leak to a scoped viewer."""
+    monkeypatch.setattr(E, "load_docs", lambda: _docs())
+    monkeypatch.setattr(E, "arch_docs", lambda: [])
+    monkeypatch.setattr(E, "OUT", tmp_path)
+    E.build_static()
+    html = (tmp_path / "engineering.html").read_text(encoding="utf-8")
+    assert "Foo decision" not in html
+    assert "Big arch" not in html
+    assert '"docs": []' in html
 
 
 def test_doc_drawer_content_contains_overflow_guards():
     """Wide doc content (multi-column tables, long inline-code file paths) must
     scroll within its own box, not spill the drawer edge (the operator 2026-07-17)."""
     import engineering_build
-    html = engineering_build.render([])
+    html = engineering_build.render([], frozenset(), True)
     # the table becomes its own horizontal-scroll container
     assert ".eng-doc-content table { display: block; overflow-x: auto;" in html
     # long unbroken strings wrap instead of forcing a wide canvas
@@ -1456,7 +1478,7 @@ def test_the_browse_payload_carries_the_kb_write_placeholder():
     rather than on an attribute, since the rows it gates are built client-side
     from `DATA`. A literal reaching the browser would be read by `canEdit` as a
     role string."""
-    html = E.render(_docs())
+    html = E.render(_docs(), frozenset(), True)
     assert '"canKbWrite": "__CAN_KB_WRITE__"' in html
     payload = re.search(r'<script id="data" type="application/json">(.*?)</script>',
                         html, re.S).group(1)

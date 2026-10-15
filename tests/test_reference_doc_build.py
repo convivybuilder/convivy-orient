@@ -31,7 +31,7 @@ def test_a_team_audience_document_renders(monkeypatch):
     # (the gate moved into library_client, PR #205 review), so the builder sees
     # exactly what it sees for a missing one.
     monkeypatch.setattr(library_client, "get_reference_document", lambda doc_id, **k: _doc())
-    html = reference_doc_build.detail_html("proj/kind/doc-1")
+    html = reference_doc_build.detail_html("proj/kind/doc-1", frozenset(), True)
     assert html is not None
     assert "A Document" in html
     assert "Some body text." in html
@@ -40,7 +40,7 @@ def test_a_team_audience_document_renders(monkeypatch):
 def test_the_page_shows_project_kind_status_topics_and_last_reviewed(monkeypatch):
     doc = _doc(status="draft", topics=["security", "keel"])
     monkeypatch.setattr(library_client, "get_reference_document", lambda doc_id, **k: doc)
-    html = reference_doc_build.detail_html("proj/kind/doc-1")
+    html = reference_doc_build.detail_html("proj/kind/doc-1", frozenset(), True)
     assert "proj" in html
     assert "reference" in html
     assert "draft" in html
@@ -51,7 +51,32 @@ def test_the_page_shows_project_kind_status_topics_and_last_reviewed(monkeypatch
 
 def test_an_unknown_id_is_none(monkeypatch):
     monkeypatch.setattr(library_client, "get_reference_document", lambda doc_id, **k: None)
-    assert reference_doc_build.detail_html("proj/kind/missing") is None
+    assert reference_doc_build.detail_html("proj/kind/missing", frozenset(), True) is None
+
+
+# --- scope (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M) -------------------------
+
+
+def test_a_document_outside_the_viewers_scope_is_none(monkeypatch):
+    """A document id can be guessed or enumerated (the module docstring's own
+    reasoning for the audience check) — so a scoped viewer who is not
+    entitled to "proj" gets the same answer as a missing id, not the
+    document."""
+    monkeypatch.setattr(library_client, "get_reference_document", lambda doc_id, **k: _doc())
+    assert reference_doc_build.detail_html("proj/kind/doc-1", frozenset({"other"}), False) is None
+
+
+def test_a_document_inside_the_viewers_scope_still_renders(monkeypatch):
+    monkeypatch.setattr(library_client, "get_reference_document", lambda doc_id, **k: _doc())
+    html = reference_doc_build.detail_html("proj/kind/doc-1", frozenset({"proj"}), False)
+    assert html is not None
+    assert "A Document" in html
+
+
+def test_a_whole_fleet_viewer_skips_the_scope_check(monkeypatch):
+    monkeypatch.setattr(library_client, "get_reference_document", lambda doc_id, **k: _doc())
+    html = reference_doc_build.detail_html("proj/kind/doc-1", frozenset(), True)
+    assert html is not None
 
 
 def test_the_page_asks_for_the_team_audience_and_nothing_else(monkeypatch):
@@ -67,7 +92,7 @@ def test_the_page_asks_for_the_team_audience_and_nothing_else(monkeypatch):
         return _doc()
 
     monkeypatch.setattr(library_client, "get_reference_document", fake)
-    reference_doc_build.detail_html("proj/kind/doc-0001")
+    reference_doc_build.detail_html("proj/kind/doc-0001", frozenset(), True)
     assert seen["audience"] == "team"
 
 
@@ -78,7 +103,7 @@ def test_a_gated_document_reads_exactly_like_a_missing_one(monkeypatch):
     confirm a document exists."""
     monkeypatch.setattr(library_client, "get_reference_document",
                         lambda doc_id, **k: None)
-    assert reference_doc_build.detail_html("proj/kind/agent-doc") is None
+    assert reference_doc_build.detail_html("proj/kind/agent-doc", frozenset(), True) is None
 
 
 def test_a_library_failure_renders_error_state_not_a_traceback(monkeypatch):
@@ -86,7 +111,7 @@ def test_a_library_failure_renders_error_state_not_a_traceback(monkeypatch):
         raise RuntimeError("Library unreachable")
 
     monkeypatch.setattr(library_client, "get_reference_document", _boom)
-    html = reference_doc_build.detail_html("proj/kind/doc-1")
+    html = reference_doc_build.detail_html("proj/kind/doc-1", frozenset(), True)
     assert html is not None
     assert "error-state" in html
     assert "RuntimeError" in html
@@ -109,7 +134,7 @@ def test_the_clean_body_policy_strips_frontmatter_and_provenance(monkeypatch):
             "## Provenance\n\nHidden text that must not render.\n")
     doc = _doc(body=body)
     monkeypatch.setattr(library_client, "get_reference_document", lambda doc_id, **k: doc)
-    html = reference_doc_build.detail_html("proj/kind/doc-1")
+    html = reference_doc_build.detail_html("proj/kind/doc-1", frozenset(), True)
     content_start = html.index('<div class="doc-content">')
     content_end = html.index('</div>', content_start)
     display = html[content_start:content_end]
@@ -122,7 +147,7 @@ def test_the_clean_body_policy_strips_frontmatter_and_provenance(monkeypatch):
 def test_the_body_is_rendered_as_markdown_not_escaped_source(monkeypatch):
     doc = _doc(body="# Heading\n\nSome **bold** text.")
     monkeypatch.setattr(library_client, "get_reference_document", lambda doc_id, **k: doc)
-    html = reference_doc_build.detail_html("proj/kind/doc-1")
+    html = reference_doc_build.detail_html("proj/kind/doc-1", frozenset(), True)
     assert "<h1>Heading</h1>" in html
     assert "<strong>bold</strong>" in html
 
@@ -140,7 +165,7 @@ def test_the_page_ships_the_shared_editor_controller(monkeypatch):
     page's HTML."""
     monkeypatch.setattr(library_client, "get_reference_document",
                         lambda doc_id, **k: _doc())
-    html = reference_doc_build.detail_html("proj/kind/doc-1")
+    html = reference_doc_build.detail_html("proj/kind/doc-1", frozenset(), True)
     assert "window.KbEditor = (function" in html, "the controller itself must be on the page"
     assert "window.KbEditor.open(mount, data.docId" in html
     controller = html.index("window.KbEditor = (function")
@@ -156,7 +181,7 @@ def test_the_editor_has_no_draft_only_mode(monkeypatch):
     gone."""
     monkeypatch.setattr(library_client, "get_reference_document",
                         lambda doc_id, **k: _doc())
-    html = reference_doc_build.detail_html("proj/kind/doc-0001")
+    html = reference_doc_build.detail_html("proj/kind/doc-0001", frozenset(), True)
     assert "data-save-configured" not in html
     assert "saveConfigured" not in html
     assert "copy anything you want to keep" not in html
@@ -168,7 +193,7 @@ def test_the_editor_affordance_carries_the_can_kb_write_placeholder(monkeypatch)
     gated section, not to know the viewer's role."""
     doc = _doc()
     monkeypatch.setattr(library_client, "get_reference_document", lambda doc_id, **k: doc)
-    html = reference_doc_build.detail_html("proj/kind/doc-1")
+    html = reference_doc_build.detail_html("proj/kind/doc-1", frozenset(), True)
     assert 'data-can-kb-write="__CAN_KB_WRITE__"' in html
     assert 'id="kbEditBtn"' in html
 
@@ -186,7 +211,7 @@ def test_the_editor_box_is_not_on_the_page_until_edit_is_clicked(monkeypatch):
     `display:flex` children."""
     doc = _doc()
     monkeypatch.setattr(library_client, "get_reference_document", lambda doc_id, **k: doc)
-    html = reference_doc_build.detail_html("proj/kind/doc-1")
+    html = reference_doc_build.detail_html("proj/kind/doc-1", frozenset(), True)
     editor_section = html[html.index('<section class="kb-editor"'):
                           html.index("</section>", html.index('<section class="kb-editor"'))]
     assert "<textarea" not in editor_section, (
@@ -213,7 +238,7 @@ def test_the_editor_payload_carries_the_doc_id_and_no_body(monkeypatch):
     so an editor seeded from it could never save."""
     doc = _doc(doc_id="proj/kind/doc-9", body="# Heading\n\nUnique-body-marker text.")
     monkeypatch.setattr(library_client, "get_reference_document", lambda doc_id, **k: doc)
-    html = reference_doc_build.detail_html("proj/kind/doc-9")
+    html = reference_doc_build.detail_html("proj/kind/doc-9", frozenset(), True)
     assert _editor_payload(html) == {"docId": "proj/kind/doc-9"}
     # The reader still gets the document, rendered, so the marker is on the
     # page. It must not also ride in the editor's data block.
@@ -229,7 +254,7 @@ def test_the_editor_fills_from_the_checkout_response_not_the_page(monkeypatch):
     `test_kb_editor.test_opening_checks_the_document_out_and_seeds_the_draft_from_it`;
     what this page must not do is offer it a body to use instead."""
     monkeypatch.setattr(library_client, "get_reference_document", lambda doc_id, **k: _doc())
-    html = reference_doc_build.detail_html("proj/kind/doc-1")
+    html = reference_doc_build.detail_html("proj/kind/doc-1", frozenset(), True)
     assert "data.body" not in html
 
 
@@ -240,7 +265,7 @@ def test_the_editor_payload_escapes_script_close_tags(monkeypatch):
     block early."""
     doc = _doc(doc_id="proj/</script><script>alert(1)</script>/doc")
     monkeypatch.setattr(library_client, "get_reference_document", lambda doc_id, **k: doc)
-    html = reference_doc_build.detail_html("proj/kind/doc-1")
+    html = reference_doc_build.detail_html("proj/kind/doc-1", frozenset(), True)
     assert "</script><script>alert(1)</script>" not in html
     assert "<\\/script><script>alert(1)<\\/script>" in html
     assert _editor_payload(html) == {"docId": "proj/</script><script>alert(1)</script>/doc"}
@@ -249,6 +274,6 @@ def test_the_editor_payload_escapes_script_close_tags(monkeypatch):
 def test_a_title_written_as_markup_is_escaped(monkeypatch):
     doc = _doc(title="<script>alert(1)</script>")
     monkeypatch.setattr(library_client, "get_reference_document", lambda doc_id, **k: doc)
-    html = reference_doc_build.detail_html("proj/kind/doc-1")
+    html = reference_doc_build.detail_html("proj/kind/doc-1", frozenset(), True)
     assert "<script>alert(1)</script>" not in html
     assert "&lt;script&gt;" in html

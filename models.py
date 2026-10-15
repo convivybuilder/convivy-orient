@@ -55,20 +55,31 @@ class ReadingRoom(Base):
 
 
 class RoomEntry(Base):
-    """One curated doc in a member's room: the KB doc id plus its presentation
-    (section grouping, order, optional note, pinned). doc_id references a KB doc
-    by id; the room holds no doc content of its own beyond the note. Uniqueness on
-    (room_id, doc_id) makes a doc appear at most once per room. The render still
-    intersects every entry against the live grant, so an entry is a curation
-    intent, never an authorization to read."""
+    """One curated entry in a member's room: a reference plus its presentation
+    (section grouping, order, optional note, pinned). The room holds no content
+    of its own beyond the note — `doc_id` is the referenced thing's own id, in
+    whichever store `kind` names (ARCH-357, widened for CQ·147, E22):
+
+      - kind="doc"    → a KB doc id, e.g. "sous-chef/runbooks/mini"
+      - kind="item"   → a Chart House work item or epic id
+      - kind="signal" → an Archives entry id
+
+    Uniqueness on (room_id, kind, doc_id) makes one reference appear at most
+    once per room, now that the same id text can in principle name a doc and
+    an item without colliding. The render still intersects every entry against
+    the live grant, so an entry is a curation intent, never an authorization to
+    read."""
 
     __tablename__ = "room_entries"
-    __table_args__ = (UniqueConstraint("room_id", "doc_id", name="uq_room_entry_doc"),)
+    __table_args__ = (
+        UniqueConstraint("room_id", "kind", "doc_id", name="uq_room_entry_kind_doc"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     room_id: Mapped[str] = mapped_column(
         ForeignKey("reading_rooms.id", ondelete="CASCADE"), index=True)
-    doc_id: Mapped[str] = mapped_column(String(200))  # the KB doc id, e.g. "sous-chef/runbooks/mini"
+    kind: Mapped[str] = mapped_column(String(20), default="doc")  # doc | item | signal
+    doc_id: Mapped[str] = mapped_column(String(200))  # the referenced thing's own id
     section: Mapped[str] = mapped_column(String(120), default="")  # display grouping: "Start here", "Sous Chef"
     position: Mapped[int] = mapped_column(Integer, default=0)      # order within section
     note: Mapped[str | None] = mapped_column(Text)                 # per-entry annotation, markdown

@@ -173,6 +173,20 @@ def test_resolving_a_missing_item_is_404(client, lib, monkeypatch):
     assert not lib
 
 
+def test_an_out_of_scope_resolve_and_a_missing_item_answer_byte_identically(client, lib, monkeypatch):
+    """E19·2 (issue_01M35K5AB4PRTJ71DMQW7Q4D3B): an item outside the caller's
+    scope must read exactly like one that does not exist, never a distinct
+    refusal that would confirm the item is there. `client`'s default
+    `get_issue_item` already answers a `convivy-orient` item, out of
+    `scoped@example.com`'s own `vivy` scope."""
+    out_of_scope = _resolve(client, _human("scoped@example.com"))
+    monkeypatch.setattr(library_client, "get_issue_item", lambda _id: None)
+    missing = _resolve(client, _human("scoped@example.com"))
+    assert out_of_scope.status_code == missing.status_code == 404
+    assert out_of_scope.content == missing.content
+    assert not lib
+
+
 @pytest.mark.parametrize("body", [
     {}, {"resolution": ""}, {"resolution": 5}, {"resolution": "fixed", "outcome_note": 5},
     {"resolution": "fixed", "refs": "x"}, {"resolution": "fixed", "refs": {"other": "x"}},

@@ -293,7 +293,7 @@ def test_roster_counts_sums_agents_across_lanes(monkeypatch):
                    {"name": "overnight", "label": "Overnight", "agents": [{}]}]},
     ], "autonomous": []}
     monkeypatch.setattr(cr.roster_build, "load_roster", lambda: fake_roster)
-    counts = cr._roster_counts()
+    counts = cr._roster_counts(frozenset(), True)
     assert counts == {"vivy": {"label": "Vivy", "agents": 3}}
 
 
@@ -307,7 +307,7 @@ def test_roster_counts_renders_agent_platform_as_bosun(monkeypatch):
         {"slug": "agent-platform", "label": "Agent Platform", "repo": "/x", "lanes": []},
     ], "autonomous": []}
     monkeypatch.setattr(cr.roster_build, "load_roster", lambda: fake_roster)
-    counts = cr._roster_counts()
+    counts = cr._roster_counts(frozenset(), True)
     assert counts["agent-platform"]["label"] == "Bosun"
 
 
@@ -316,8 +316,119 @@ def test_roster_counts_leaves_an_unmapped_crews_label_alone(monkeypatch):
         {"slug": "selector-backend", "label": "Selector Backend", "repo": "/x", "lanes": []},
     ], "autonomous": []}
     monkeypatch.setattr(cr.roster_build, "load_roster", lambda: fake_roster)
-    counts = cr._roster_counts()
+    counts = cr._roster_counts(frozenset(), True)
     assert counts["selector-backend"]["label"] == "Selector Backend"
+
+
+# --- scope (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M): a crew whose repo is --
+# --- not reachable from the viewer's project scope carries no row, no -------
+# --- collision and no live-run line -----------------------------------------
+
+
+def _registry(tmp_path, monkeypatch, units):
+    """Point `crew_registry.REGISTRY` at a scratch file, as
+    tests/test_crew_registry.py does — never the real
+    ~/Convivy/agent-platform/config/projects.json, which CI has no checkout
+    of."""
+    path = tmp_path / "projects.json"
+    path.write_text(json.dumps(units))
+    monkeypatch.setattr(cr.crew_registry, "REGISTRY", path)
+
+
+def test_roster_counts_drops_a_crew_whose_repo_is_out_of_scope(tmp_path, monkeypatch):
+    """`_visible_repos` resolves through the registry's project->repos
+    mapping, the same gap `crew_registry.repos_in_scope`'s own docstring
+    names: the roster row is keyed "agent-platform" (the repo), the scope is
+    keyed "bosun" (the project)."""
+    _registry(tmp_path, monkeypatch, {
+        "bosun": {"crew": "bosun", "lifecycle": "active", "repos": ["agent-platform"]},
+        "vivy": {"crew": "vivy", "lifecycle": "active", "repos": ["vivy"]},
+    })
+    fake_roster = {"projects": [
+        {"slug": "agent-platform", "label": "Agent Platform", "repo": "/x", "lanes": []},
+        {"slug": "vivy", "label": "Vivy", "repo": "/y", "lanes": []},
+    ], "autonomous": []}
+    monkeypatch.setattr(cr.roster_build, "load_roster", lambda: fake_roster)
+    counts = cr._roster_counts(frozenset({"bosun"}), False)
+    assert set(counts) == {"agent-platform"}
+
+
+def test_live_html_hides_a_crews_row_entirely_when_out_of_scope(tmp_path, monkeypatch):
+    _registry(tmp_path, monkeypatch, {
+        "vivy": {"crew": "vivy", "lifecycle": "active", "repos": ["vivy"]},
+        "selector": {"crew": "selector", "lifecycle": "active", "repos": ["selector"]},
+    })
+    roster = {"projects": [
+        {"slug": "vivy", "label": "Vivy", "repo": "/x", "lanes": []},
+        {"slug": "selector", "label": "Selector", "repo": "/y", "lanes": []},
+    ], "autonomous": []}
+    _patch_sources(monkeypatch, roster=roster)
+    html = cr.live_html(frozenset({"vivy"}), False)
+    assert ">Vivy<" in html
+    assert ">Selector<" not in html
+
+
+def test_live_html_hides_an_out_of_scope_collision(tmp_path, monkeypatch):
+    """The "Collisions" list is not keyed by roster slug, so filtering the
+    roster alone would not reach it — `_visible_refusals` filters it against
+    the same visible-repo set."""
+    _registry(tmp_path, monkeypatch, {
+        "vivy": {"crew": "vivy", "lifecycle": "active", "repos": ["vivy"]},
+    })
+    _patch_sources(monkeypatch, refusals=[
+        _refusal("ref1", "vivy", requester="in-scope-session", root="issue_in_scope"),
+        _refusal("ref2", "keel", requester="out-of-scope-session", root="issue_out_of_scope")])
+    html = cr.live_html(frozenset({"vivy"}), False)
+    assert "in-scope-session" in html
+    assert "out-of-scope-session" not in html
+    assert "issue_out_of_scope" not in html
+
+
+def test_live_html_shows_every_collision_to_a_whole_fleet_viewer(tmp_path, monkeypatch):
+    """`product=None` (unattributed) collisions show only to a whole-fleet
+    viewer (default-deny), same rule as `whole_fleet`'s other gated figures."""
+    _registry(tmp_path, monkeypatch, {
+        "vivy": {"crew": "vivy", "lifecycle": "active", "repos": ["vivy"]},
+    })
+    _patch_sources(monkeypatch, refusals=[_refusal("ref1", None, requester="orphan")])
+    narrow = cr.live_html(frozenset({"vivy"}), False)
+    assert "orphan" not in narrow
+    whole = cr.live_html(frozenset({"vivy"}), True)
+    assert "orphan" in whole
+
+
+def test_live_html_hides_an_out_of_scope_live_run(tmp_path, monkeypatch):
+    """The raw "Live Bosun state" list is not keyed by roster slug either —
+    `_visible_live_runs` filters it against the same visible-repo set."""
+    _registry(tmp_path, monkeypatch, {
+        "vivy": {"crew": "vivy", "lifecycle": "active", "repos": ["vivy"]},
+        "selector": {"crew": "selector", "lifecycle": "active", "repos": ["selector"]},
+    })
+    in_scope_run = lc.LiveRunRecord(run_id="r1", agent="a", task="in-scope task",
+                                    started_at=dt.datetime(2026, 9, 2, 20, 0), repo="vivy",
+                                    worktree="/x", pid=1, parent_run=None, holds=[])
+    out_of_scope_run = lc.LiveRunRecord(run_id="r2", agent="a", task="out-of-scope task",
+                                        started_at=dt.datetime(2026, 9, 2, 20, 0),
+                                        repo="selector", worktree="/x", pid=2,
+                                        parent_run=None, holds=[])
+    _patch_sources(monkeypatch, live_runs=_live_runs_result([in_scope_run, out_of_scope_run]))
+    html = cr.live_html(frozenset({"vivy"}), False)
+    assert "in-scope task" in html
+    assert "out-of-scope task" not in html
+
+
+def test_runs_html_cannot_reach_an_out_of_scope_crews_runs(tmp_path, monkeypatch):
+    """A `?product=` naming a repo outside the viewer's scope isn't `in
+    roster` (already filtered), so it falls to the same "pick a crew" empty
+    state an unknown product name gets — no separate scope check needed."""
+    _registry(tmp_path, monkeypatch, {
+        "selector": {"crew": "selector", "lifecycle": "active", "repos": ["selector"]},
+    })
+    roster = {"projects": [{"slug": "selector", "label": "Selector", "repo": "/x", "lanes": []}],
+             "autonomous": []}
+    _patch_sources(monkeypatch, roster=roster)
+    html = cr.runs_html({"product": "selector"}, frozenset({"vivy"}), False)
+    assert "Pick a crew" in html
 
 
 def test_live_html_renders_bosun_rather_than_agent_platform(monkeypatch):
@@ -325,7 +436,7 @@ def test_live_html_renders_bosun_rather_than_agent_platform(monkeypatch):
         {"slug": "agent-platform", "label": "Agent Platform", "repo": "/x", "lanes": []},
     ], "autonomous": []}
     _patch_sources(monkeypatch, roster=roster)
-    html = cr.live_html()
+    html = cr.live_html(frozenset(), True)
     assert ">Bosun<" in html
     assert "Agent Platform" not in html
 
@@ -372,7 +483,7 @@ def test_live_html_renders_a_row_per_roster_crew(monkeypatch):
         {"slug": "constance", "label": "Constance", "repo": "/y", "lanes": []},
     ], "autonomous": []}
     _patch_sources(monkeypatch, roster=roster)
-    html = cr.live_html()
+    html = cr.live_html(frozenset(), True)
     assert "Vivy" in html
     assert "Constance" in html
 
@@ -381,7 +492,7 @@ def test_live_html_links_a_crew_that_is_also_a_known_project(monkeypatch):
     roster = {"projects": [{"slug": "vivy", "label": "Vivy", "repo": "/x", "lanes": []}],
              "autonomous": []}
     _patch_sources(monkeypatch, roster=roster)
-    html = cr.live_html()
+    html = cr.live_html(frozenset(), True)
     assert 'href="/projects/vivy"' in html
 
 
@@ -391,7 +502,7 @@ def test_live_html_does_not_link_a_crew_with_no_project_page(monkeypatch):
     roster = {"projects": [{"slug": "selector-backend", "label": "Selector Backend",
                            "repo": "/x", "lanes": []}], "autonomous": []}
     _patch_sources(monkeypatch, roster=roster)
-    html = cr.live_html()
+    html = cr.live_html(frozenset(), True)
     assert 'href="/projects/selector-backend"' not in html
     assert "Selector Backend" in html
 
@@ -403,7 +514,7 @@ def test_live_html_defers_nothing_and_names_no_missing_library_route(monkeypatch
     missing would be the page lying about the Library — the exact failure this
     epic's thread records twice over."""
     _patch_sources(monkeypatch)
-    html = cr.live_html()
+    html = cr.live_html(frozenset(), True)
     assert "Bosun" in html
     assert "lease refusals (neither has a Library route" not in html
     # The RENDERED element, not the string: `.awaiting-state` is a rule in the
@@ -417,7 +528,7 @@ def test_live_html_no_longer_blames_the_library_for_course_progress(monkeypatch)
     exists)" — was wrong (issue_01M0TKX6DW2E1TXGN9QT6K61J5's reconciliation):
     `GET /courses` is live and served by the Library today."""
     _patch_sources(monkeypatch)
-    html = cr.live_html()
+    html = cr.live_html(frozenset(), True)
     assert "no Library read path exists" not in html
     assert "no route yet" not in html
 
@@ -445,7 +556,7 @@ def test_live_html_does_not_claim_orient_lacks_a_courses_client(monkeypatch):
     until someone copied `_BEAD_PROJECT_ALIASES`."""
     monkeypatch.setattr(cr.library_client, "probe_route", lambda path, **k: None)
     _patch_sources(monkeypatch)
-    html = cr.live_html()
+    html = cr.live_html(frozenset(), True)
     assert "a client for GET /courses" not in html
     assert "Course progress" not in html
     assert '<div class="awaiting-state' not in html
@@ -456,7 +567,7 @@ def test_live_html_no_longer_claims_bosun_state_is_awaiting_orient(monkeypatch):
     real render — the Bosun panel must never again claim to be waiting on
     Orient, which is exactly what it said before this was built."""
     _patch_sources(monkeypatch)
-    html = cr.live_html()
+    html = cr.live_html(frozenset(), True)
     assert "WAITING ON ORIENT — a client for GET /runs" not in html
 
 
@@ -465,7 +576,7 @@ def test_live_html_shows_a_live_run_when_the_bosun_register_has_one(monkeypatch)
                            started_at=dt.datetime(2026, 9, 2, 20, 0), repo="agent-platform",
                            worktree="/x", pid=123, parent_run=None, holds=[])
     _patch_sources(monkeypatch, live_runs=_live_runs_result([run]))
-    html = cr.live_html()
+    html = cr.live_html(frozenset(), True)
     assert "deck-coder" in html
     assert "ship the thing" in html
 
@@ -476,14 +587,14 @@ def test_live_html_names_the_reason_when_the_bosun_register_is_degraded(monkeypa
     which would be indistinguishable from the healthy empty case."""
     _patch_sources(monkeypatch, live_runs=_live_runs_result(
         available=False, reason="bosun unreachable"))
-    html = cr.live_html()
+    html = cr.live_html(frozenset(), True)
     assert "bosun unreachable" in html
     assert "No runs on foot right now." not in html
 
 
 def test_live_html_says_so_when_no_runs_are_on_foot(monkeypatch):
     _patch_sources(monkeypatch, live_runs=_live_runs_result())
-    html = cr.live_html()
+    html = cr.live_html(frozenset(), True)
     assert "No runs on foot right now." in html
 
 
@@ -493,14 +604,14 @@ def test_live_html_in_flight_column_counts_a_crews_live_runs(monkeypatch):
                            started_at=dt.datetime(2026, 9, 2, 20, 0), repo="vivy",
                            worktree="/x", pid=1, parent_run=None, holds=[])
     _patch_sources(monkeypatch, roster=roster, live_runs=_live_runs_result([run]))
-    html = cr.live_html()
+    html = cr.live_html(frozenset(), True)
     assert "1 running" in html
 
 
 def test_live_html_in_flight_column_is_em_dash_with_no_live_runs(monkeypatch):
     roster = _roster_one_crew(slug="vivy", label="Vivy")
     _patch_sources(monkeypatch, roster=roster)
-    html = cr.live_html()
+    html = cr.live_html(frozenset(), True)
     assert "running</span>" not in html
 
 
@@ -515,7 +626,7 @@ def test_live_html_renders_a_collision_as_who_was_blocked_by_whom(monkeypatch):
     _patch_sources(monkeypatch, refusals=[
         _refusal("ref1", "keel", requester="session-B", holder="session-A",
                  root="issue_epic1")])
-    html = cr.live_html()
+    html = cr.live_html(frozenset(), True)
     assert "session-B" in html
     assert "session-A" in html
     assert "issue_epic1" in html
@@ -542,13 +653,13 @@ def test_the_caption_says_where_the_fence_sat_and_claims_nothing_more(
     guessing here."""
     _patch_sources(monkeypatch, refusals=[
         _refusal("ref1", "keel", root="issue_same", wanted="issue_same")])
-    itself = cr.live_html()
+    itself = cr.live_html(frozenset(), True)
     assert "the item itself" in itself
     assert "fences what it asked for" not in itself
 
     _patch_sources(monkeypatch, refusals=[
         _refusal("ref1", "keel", root="issue_epic", wanted="issue_child")])
-    above = cr.live_html()
+    above = cr.live_html(frozenset(), True)
     assert "fences what it asked for" in above
     assert "the item itself" not in above
 
@@ -565,7 +676,7 @@ def test_a_race_for_one_leaf_is_not_captioned_as_the_item_itself(monkeypatch):
     row cannot tell this apart from E fencing a DIFFERENT leaf."""
     _patch_sources(monkeypatch, refusals=[
         _refusal("ref1", "keel", root="issue_epic_E", wanted="issue_leaf_L")])
-    html = cr.live_html()
+    html = cr.live_html(frozenset(), True)
     assert "the item itself" not in html
     assert "fences what it asked for" in html
     assert "issue_epic_E" in html
@@ -579,7 +690,7 @@ def test_a_descendant_collision_is_captioned_as_one(monkeypatch):
     _patch_sources(monkeypatch, refusals=[
         _refusal("ref1", "keel", blocks_by="descendant",
                  root="issue_child", wanted="issue_parent")])
-    assert "sits under what it asked for" in cr.live_html()
+    assert "sits under what it asked for" in cr.live_html(frozenset(), True)
 
 
 def test_a_withheld_blocker_says_so_rather_than_rendering_three_blanks(
@@ -595,7 +706,7 @@ def test_a_withheld_blocker_says_so_rather_than_rendering_three_blanks(
     exactly the kind of thing that stops being true quietly."""
     _patch_sources(monkeypatch, refusals=[
         _refusal("ref1", "keel", blocked=True, wanted="issue_asked")])
-    html = cr.live_html()
+    html = cr.live_html(frozenset(), True)
     assert "outside this view" in html
     assert "issue_asked" in html
     # The em-dash placeholder is what the blank-rendering bug looked like.
@@ -606,7 +717,7 @@ def test_the_collisions_section_says_it_is_unwindowed(monkeypatch):
     """It sits beside a rolling cost window, so the asymmetry reads as a bug to
     anyone who has not read the PR that defended it (reviewer, PR #200)."""
     _patch_sources(monkeypatch)
-    assert "all time" in cr.live_html()
+    assert "all time" in cr.live_html(frozenset(), True)
 
 
 def test_live_html_says_so_plainly_when_no_crew_has_been_refused(monkeypatch):
@@ -614,7 +725,7 @@ def test_live_html_says_so_plainly_when_no_crew_has_been_refused(monkeypatch):
     feature. One refusal exists across the whole live store, so this is what
     the section shows almost always."""
     _patch_sources(monkeypatch)
-    assert "No crew has been refused a lease." in cr.live_html()
+    assert "No crew has been refused a lease." in cr.live_html(frozenset(), True)
 
 
 def test_a_refusal_with_no_product_is_still_shown_even_though_it_counts_nowhere(
@@ -624,14 +735,14 @@ def test_a_refusal_with_no_product_is_still_shown_even_though_it_counts_nowhere(
     the list would hide a real collision. So it counts nowhere and shows."""
     _patch_sources(monkeypatch, refusals=[
         _refusal("ref1", None, requester="orphan-session")])
-    html = cr.live_html()
+    html = cr.live_html(frozenset(), True)
     assert "orphan-session" in html
     assert cr._refusals_by_crew([_refusal("ref1", None)]) == {}
 
 
 def test_live_html_never_throws_on_every_source_empty(monkeypatch):
     _patch_sources(monkeypatch)
-    html = cr.live_html()
+    html = cr.live_html(frozenset(), True)
     assert "Crews" in html
 
 
@@ -641,7 +752,7 @@ def test_live_html_shows_leases_as_alive_and_dead_not_just_a_total(monkeypatch):
     items = [_item("i1", "vivy", "claimed"), _item("i2", "vivy", "claimed")]
     leases = [_lease("l1", "i1", dead=False), _lease("l2", "i2", dead=True)]
     _patch_sources(monkeypatch, roster=roster, items=items, leases=leases)
-    html = cr.live_html()
+    html = cr.live_html(frozenset(), True)
     assert "1 alive" in html
     assert "1 dead" in html
 
@@ -659,7 +770,7 @@ def test_live_html_marks_a_lease_near_expiry_before_it_expires_with_time_remaini
     leases = [_lease("l1", "i1", dead=False, expires_at=now + dt.timedelta(minutes=4),
                      heartbeat_at=now - dt.timedelta(minutes=30))]
     _patch_sources(monkeypatch, roster=roster, items=items, leases=leases)
-    html = cr.live_html()
+    html = cr.live_html(frozenset(), True)
     assert "near expiry" in html
     # The quoted attribute, not a bare substring: the stylesheet defines
     # `.cr-lease-near` regardless of whether any row uses it, so a bare
@@ -683,7 +794,7 @@ def test_live_html_marks_a_lease_near_expiry_on_the_max_lease_arm_end_to_end(
                      expires_at=taken_at + dt.timedelta(seconds=policy.max_lease_seconds),
                      heartbeat_at=now - dt.timedelta(seconds=5), taken_at=taken_at)]
     _patch_sources(monkeypatch, roster=roster, items=items, leases=leases, policy=policy)
-    html = cr.live_html()
+    html = cr.live_html(frozenset(), True)
     assert "near expiry" in html
     assert 'class="cr-lease-near"' in html
 
@@ -702,7 +813,7 @@ def test_live_html_renders_near_expiry_alive_and_dead_as_three_distinct_states(
         _lease("l3", "i3", dead=True),                        # dead
     ]
     _patch_sources(monkeypatch, roster=roster, items=items, leases=leases)
-    html = cr.live_html()
+    html = cr.live_html(frozenset(), True)
     # Quoted attributes, not bare substrings — see the comment on the test
     # above for why a bare `"cr-lease-near" in html` check is a false
     # positive (the stylesheet always defines the class).
@@ -714,23 +825,32 @@ def test_live_html_renders_near_expiry_alive_and_dead_as_three_distinct_states(
 # --- the assumption the Library's disclosure bound rests on -------------------
 
 
-def test_crews_is_full_tier_only_because_the_disclosure_bound_depends_on_it():
-    """**The Library bounds this disclosure on an assumption THIS page has to
-    keep** (security-reviewer, PR #200).
+def test_crews_is_full_tier_only_and_also_filters_by_viewer_scope():
+    """**The Library bounds this disclosure on an assumption THIS page used to
+    rely on the tier gate alone to keep** (security-reviewer, PR #200).
 
     `GET /lease-refusals`'s docstring accepts that a refusal names the holder it
     collided with because "the row is already scoped to products the reader can
     see." That scoping is applied to ORIENT'S credential, which carries
-    `products: ["*"]` — so the client receives every crew's refusals and the
-    bound is actually enforced one layer up, by this site's own tier gate.
+    `products: ["*"]` — so the client receives every crew's refusals, and the
+    bound used to be enforced only one layer up, by this site's binary tier
+    gate.
 
-    Nothing in `crews_build.py` re-derives per-viewer scope; the page trusts the
-    binary tier gate to be the only audience distinction that will ever exist.
-    Add a narrower full-ish tier later and the Library's comment silently stops
-    being true here, in a second codebase nobody would think to reread. This
-    test is where that assumption is written down."""
+    E19·4 (issue_01M35K5JQ7Z7MHYZGWRSB5F85M) closes that gap from the other
+    side too: `live_html` now re-derives the viewer's own scope and filters
+    the refusal list and the raw "Live Bosun state" list against it
+    (`_visible_refusals`/`_visible_live_runs`), rather than trusting the tier
+    gate to be the only audience distinction that will ever exist. /crews
+    left `_full_only_routes()` for its own explicit, scope-threading block in
+    server.py — pinned here via the dispatch source, the way
+    test_chart_house_build.py pins /engineering/course — but the full-tier
+    gate inside that block is unchanged."""
+    import inspect
     import server as srv
-    assert "/crews" in srv._full_only_routes()
+    assert "/crews" not in srv._full_only_routes()
+    source = inspect.getsource(srv.handle_get)
+    assert 'if path == "/crews":' in source
+    assert "crews_build.live_html(scope, whole_fleet)" in source
 
 
 def test_a_hostile_requester_name_cannot_break_out_of_the_collision_line(
@@ -745,7 +865,7 @@ def test_a_hostile_requester_name_cannot_break_out_of_the_collision_line(
     nasty = '<script>alert(1)</script>'
     _patch_sources(monkeypatch, refusals=[
         _refusal("r1", "vivy", requester=nasty, holder=nasty, root=nasty)])
-    html = cr.live_html()
+    html = cr.live_html(frozenset(), True)
     assert "<script>alert(1)</script>" not in html
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
 
@@ -846,9 +966,9 @@ def test_date_dirs_does_not_raise_when_until_is_date_max():
 
 def test_runs_html_does_not_500_on_boundary_to_dates(monkeypatch):
     _patch_sources(monkeypatch, roster=_roster_one_crew())
-    html_min = cr.runs_html({"product": "convivy-orient", "to": "0001-01-01"})
+    html_min = cr.runs_html({"product": "convivy-orient", "to": "0001-01-01"}, frozenset(), True)
     assert "Crew runs" in html_min
-    html_max = cr.runs_html({"product": "convivy-orient", "to": "9999-12-31"})
+    html_max = cr.runs_html({"product": "convivy-orient", "to": "9999-12-31"}, frozenset(), True)
     assert "Crew runs" in html_max
 
 
@@ -1174,7 +1294,7 @@ def test_live_html_sorts_most_recent_activity_first_by_default(tmp_path, monkeyp
         {"slug": "quiet", "label": "Quiet", "repo": "/y", "lanes": []},
     ], "autonomous": []}
     _patch_sources(monkeypatch, roster=roster)
-    html = cr.live_html()
+    html = cr.live_html(frozenset(), True)
     assert html.index(">Vivy<") < html.index(">Quiet<")
 
 
@@ -1188,13 +1308,13 @@ def test_live_html_a_crew_with_no_activity_signal_sorts_last(tmp_path, monkeypat
         {"slug": "active", "label": "Active", "repo": "/x", "lanes": []},
     ], "autonomous": []}
     _patch_sources(monkeypatch, roster=roster)
-    html = cr.live_html()
+    html = cr.live_html(frozenset(), True)
     assert html.index(">Active<") < html.index(">Quiet<")
 
 
 def test_live_html_renders_click_to_sort_column_headers(monkeypatch):
     _patch_sources(monkeypatch)
-    html = cr.live_html()
+    html = cr.live_html(frozenset(), True)
     assert 'class="cr-sort-btn' in html
     assert 'data-col="0"' in html
     assert 'data-default-dir="desc"' in html  # "Last activity" is the default
@@ -1217,7 +1337,7 @@ def test_live_html_shows_a_runs_panel_for_a_crew_with_recent_runs(tmp_path, monk
               repo="convivy-orient", started_at=f"{today}T10:00:00Z",
               ended_at=f"{today}T10:20:00Z")
     _patch_sources(monkeypatch, roster=_roster_one_crew())
-    html = cr.live_html()
+    html = cr.live_html(frozenset(), True)
     assert "orient-coder" in html
     assert "ship-crews-page" in html
     assert "cr-runs" in html
@@ -1232,14 +1352,14 @@ def test_live_html_runs_panel_has_column_headers(tmp_path, monkeypatch):
     _write_run(root, today, "run-1", repo="convivy-orient",
               started_at=f"{today}T10:00:00Z", ended_at=f"{today}T10:20:00Z")
     _patch_sources(monkeypatch, roster=_roster_one_crew())
-    html = cr.live_html()
+    html = cr.live_html(frozenset(), True)
     assert '<div class="cr-run cr-run-head">' in html
     assert "<span class=\"cr-run-when\">Started</span>" in html
 
 
 def test_live_html_shows_no_runs_panel_for_a_crew_with_none_in_window(monkeypatch):
     _patch_sources(monkeypatch, roster=_roster_one_crew())
-    html = cr.live_html()
+    html = cr.live_html(frozenset(), True)
     assert 'class="cr-runs"' not in html
 
 
@@ -1249,7 +1369,7 @@ def test_live_html_renders_an_in_flight_run_as_running(tmp_path, monkeypatch):
     _write_run(root, today, "run-live", repo="convivy-orient",
               started_at=f"{today}T10:00:00Z", ended_at=None, no_cost=True, no_outcome=True)
     _patch_sources(monkeypatch, roster=_roster_one_crew())
-    html = cr.live_html()
+    html = cr.live_html(frozenset(), True)
     assert "running" in html
     assert "in progress" in html  # the cost cell, honest about not being $0
 
@@ -1261,7 +1381,7 @@ def test_live_html_names_an_unresolved_session_rather_than_dropping_the_run(
     _write_run(root, today, "run-orphan", repo="convivy-orient", co_session="ghost-session",
               started_at=f"{today}T10:00:00Z", ended_at=f"{today}T10:10:00Z")
     _patch_sources(monkeypatch, roster=_roster_one_crew())
-    html = cr.live_html()
+    html = cr.live_html(frozenset(), True)
     assert "run-orphan" not in html  # run_id itself isn't rendered, but the row must be
     assert "session not recorded" in html
 
@@ -1273,7 +1393,7 @@ def test_live_html_names_a_session_with_no_recorded_model(tmp_path, monkeypatch)
               started_at=f"{today}T10:00:00Z", ended_at=f"{today}T10:10:00Z")
     _write_session(root, today, "sess-1", model="")
     _patch_sources(monkeypatch, roster=_roster_one_crew())
-    html = cr.live_html()
+    html = cr.live_html(frozenset(), True)
     assert "model not recorded" in html
 
 
@@ -1284,7 +1404,7 @@ def test_live_html_caps_the_panel_and_links_to_view_all(tmp_path, monkeypatch):
         _write_run(root, today, f"run-{i:03d}", repo="convivy-orient", co_session=f"sess-{i}",
                   started_at=f"{today}T{i % 20:02d}:00:00Z", ended_at=f"{today}T{i % 20:02d}:10:00Z")
     _patch_sources(monkeypatch, roster=_roster_one_crew())
-    html = cr.live_html()
+    html = cr.live_html(frozenset(), True)
     assert "3 more in this window" in html
     assert "/crews/runs?product=convivy-orient" in html
 
@@ -1296,7 +1416,7 @@ def test_live_html_escapes_a_hostile_run_label(tmp_path, monkeypatch):
               label="<script>alert(1)</script>",
               started_at=f"{today}T10:00:00Z", ended_at=f"{today}T10:10:00Z")
     _patch_sources(monkeypatch, roster=_roster_one_crew())
-    html = cr.live_html()
+    html = cr.live_html(frozenset(), True)
     assert "<script>alert(1)</script>" not in html
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
 
@@ -1306,13 +1426,13 @@ def test_live_html_escapes_a_hostile_run_label(tmp_path, monkeypatch):
 
 def test_runs_html_with_no_product_asks_the_reader_to_pick_a_crew(monkeypatch):
     _patch_sources(monkeypatch, roster=_roster_one_crew())
-    html = cr.runs_html({})
+    html = cr.runs_html({}, frozenset(), True)
     assert "Pick a crew" in html
 
 
 def test_runs_html_with_an_unknown_product_also_asks_the_reader_to_pick_a_crew(monkeypatch):
     _patch_sources(monkeypatch, roster=_roster_one_crew())
-    html = cr.runs_html({"product": "not-a-real-crew"})
+    html = cr.runs_html({"product": "not-a-real-crew"}, frozenset(), True)
     assert "Pick a crew" in html
 
 
@@ -1323,7 +1443,7 @@ def test_runs_html_lists_a_crews_runs_over_the_default_window(tmp_path, monkeypa
               repo="convivy-orient", started_at=f"{today}T10:00:00Z",
               ended_at=f"{today}T10:10:00Z")
     _patch_sources(monkeypatch, roster=_roster_one_crew())
-    html = cr.runs_html({"product": "convivy-orient"})
+    html = cr.runs_html({"product": "convivy-orient"}, frozenset(), True)
     assert "orient-coder" in html
     assert "a-task" in html
 
@@ -1335,9 +1455,9 @@ def test_runs_html_honors_an_explicit_custom_range(tmp_path, monkeypatch):
               ended_at="2026-08-01T10:10:00Z")
     _patch_sources(monkeypatch, roster=_roster_one_crew())
     # Outside the default window, so it should be absent with no range given...
-    assert "archived-task" not in cr.runs_html({"product": "convivy-orient"})
+    assert "archived-task" not in cr.runs_html({"product": "convivy-orient"}, frozenset(), True)
     # ...and present once the range covers it.
-    html = cr.runs_html({"product": "convivy-orient", "from": "2026-08-01", "to": "2026-08-01"})
+    html = cr.runs_html({"product": "convivy-orient", "from": "2026-08-01", "to": "2026-08-01"}, frozenset(), True)
     assert "archived-task" in html
 
 
@@ -1346,7 +1466,7 @@ def test_runs_html_says_so_when_a_crew_has_no_runs_in_the_chosen_window(monkeypa
     # ("Orient"), so this is what the roster's own label resolves to
     # regardless of the fixture's own (unused) `label=` default.
     _patch_sources(monkeypatch, roster=_roster_one_crew())
-    html = cr.runs_html({"product": "convivy-orient"})
+    html = cr.runs_html({"product": "convivy-orient"}, frozenset(), True)
     assert "No runs for Orient in this window." in html
 
 
@@ -1400,7 +1520,7 @@ def test_a_run_with_a_list_shaped_meta_is_skipped_and_other_crews_still_render(
         {"slug": "selector", "label": "Selector", "repo": "/y", "lanes": []},
     ], "autonomous": []}
     _patch_sources(monkeypatch, roster=roster)
-    html = cr.live_html()
+    html = cr.live_html(frozenset(), True)
     assert "good-task" in html
     assert "orient-coder" in html
 
@@ -1426,7 +1546,7 @@ def test_a_run_with_list_shaped_exit_status_does_not_crash_other_crews(tmp_path,
         {"slug": "selector", "label": "Selector", "repo": "/y", "lanes": []},
     ], "autonomous": []}
     _patch_sources(monkeypatch, roster=roster)
-    html = cr.live_html()
+    html = cr.live_html(frozenset(), True)
     assert "good-task" in html
 
 
@@ -1448,7 +1568,7 @@ def test_a_run_with_int_shaped_prs_opened_does_not_crash_other_crews(tmp_path, m
         {"slug": "selector", "label": "Selector", "repo": "/y", "lanes": []},
     ], "autonomous": []}
     _patch_sources(monkeypatch, roster=roster)
-    html = cr.live_html()
+    html = cr.live_html(frozenset(), True)
     assert "good-task" in html
 
 
@@ -1473,7 +1593,7 @@ def test_a_run_with_int_shaped_agent_does_not_crash_other_crews(tmp_path, monkey
         {"slug": "selector", "label": "Selector", "repo": "/y", "lanes": []},
     ], "autonomous": []}
     _patch_sources(monkeypatch, roster=roster)
-    html = cr.live_html()
+    html = cr.live_html(frozenset(), True)
     assert "good-task" in html
 
 
@@ -1514,3 +1634,21 @@ def test_a_session_with_list_shaped_session_id_does_not_crash_the_load(tmp_path)
     sessions = cr._load_session_records(date_dirs)
     assert "sess-good" in sessions
     assert len(sessions) == 1
+
+
+# --- build_static: the static fallback must never carry real crew data ------
+
+
+def test_build_static_seeds_an_empty_fallback_not_real_data(tmp_path, monkeypatch):
+    """crews.html is served to ANY viewer's failed render, scoped or not
+    (issue_01M2KVHTVFF4MAQF94M2SP6TZ0's own crews.html-shaped leak, closed
+    further at E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M): a snapshot naming a
+    real crew would leak to a scoped viewer."""
+    roster = {"projects": [{"slug": "vivy", "label": "Vivy", "repo": "/x", "lanes": []}],
+             "autonomous": []}
+    _patch_sources(monkeypatch, roster=roster)
+    monkeypatch.setattr(cr, "OUT", tmp_path)
+    cr.build_static()
+    html = (tmp_path / "crews.html").read_text(encoding="utf-8")
+    assert "Vivy" not in html
+    assert "Live view unavailable" in html

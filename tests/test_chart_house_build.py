@@ -2,9 +2,10 @@
 issue_01M15C4G6YJHH73KJCHGK7B0J9's approved mockup: one row per product's
 live Course, drawn at true scale.
 
-Both data sources are monkeypatched: cost reads local files via
-`dashboard_build.normalize()`, and Courses/bead ids read `library_client`,
-which every test here fakes rather than calling the network.
+Every data source is monkeypatched on `library_client`, which every test
+here fakes rather than calling the network: cost reads the Library's
+finished-run records (CQ·154, issue_01M4ZBBQK0KFH9YQ16MNK75HJT), and
+Courses/bead ids read their own `library_client` functions.
 """
 from __future__ import annotations
 
@@ -63,37 +64,56 @@ def _no_prs_or_merges(monkeypatch):
     monkeypatch.setattr(ch.merge_queue_build, "cached_open_prs", lambda: None)
 
 
+@pytest.fixture(autouse=True)
+def _no_finished_runs(monkeypatch):
+    """Default to "nothing ran this window" so a test that doesn't care about
+    cost need not know `library_client.list_finished_runs` exists."""
+    monkeypatch.setattr(library_client, "list_finished_runs", lambda since, until=None: [])
+
+
 def _pr(repo, number, group, ci, *, conflicting=False):
     return {"repo": repo, "number": number, "group": group, "ci": ci,
             "conflicting": conflicting, "draft": group == "draft",
             "cleared": group == "cleared"}
 
 
-def _fact(product, cost_usd, date):
-    return {"product": product, "cost_usd": cost_usd, "date": date}
+def _finished_run(product, cost_usd):
+    return library_client.FinishedRun(
+        signal_id="sig", product=product, run="run-1", persona=None, repo=product,
+        work_item=None, model="claude-sonnet-5", cost=library_client.FinishedRunCost(
+            usd=cost_usd, tokens=None, by_model=None),
+        outcome=None, produced_at=None,
+        ingested_at=dt.datetime.now(dt.timezone.utc).replace(tzinfo=None))
 
 
-# --- _cost_rollup / _cost_for (local file reads via dashboard_build) ------
+# --- _cost_rollup / _cost_for (the Library's finished-run records) --------
 
 
-def test_cost_rollup_sums_per_product_within_the_window(monkeypatch):
-    today = dt.datetime.now(dt.timezone.utc).date()
-    in_window = today.isoformat()
-    monkeypatch.setattr(ch.dashboard_build, "normalize", lambda: [
-        _fact("vivy", 1.5, in_window),
-        _fact("vivy", 2.5, in_window),
-        _fact("constance", 3.0, in_window),
+def test_cost_rollup_sums_per_product(monkeypatch):
+    monkeypatch.setattr(library_client, "list_finished_runs", lambda since, until=None: [
+        _finished_run("vivy", 1.5),
+        _finished_run("vivy", 2.5),
+        _finished_run("constance", 3.0),
     ])
     rollup = ch._cost_rollup()
     assert rollup["vivy"] == {"cost_usd": 4.0, "runs": 2}
     assert rollup["constance"] == {"cost_usd": 3.0, "runs": 1}
 
 
-def test_cost_rollup_excludes_rows_outside_the_window(monkeypatch):
-    today = dt.datetime.now(dt.timezone.utc).date()
-    old = (today - dt.timedelta(days=ch.WINDOW_DAYS + 5)).isoformat()
-    monkeypatch.setattr(ch.dashboard_build, "normalize", lambda: [_fact("vivy", 9.0, old)])
-    assert ch._cost_rollup() == {}
+def test_cost_rollup_asks_the_library_for_the_trailing_window(monkeypatch):
+    """The windowing itself is `list_finished_runs`'s own job (tested in
+    `test_library_client.py`); this page's contract is asking for the right
+    `since` — `WINDOW_DAYS` back from now — and nothing more."""
+    seen = {}
+
+    def fake(since, until=None):
+        seen["since"] = since
+        return []
+
+    monkeypatch.setattr(library_client, "list_finished_runs", fake)
+    ch._cost_rollup()
+    expected = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None) - dt.timedelta(days=ch.WINDOW_DAYS)
+    assert abs((seen["since"] - expected).total_seconds()) < 5
 
 
 def test_cost_for_matches_the_hollis_canonicalization():
@@ -392,7 +412,6 @@ def test_live_html_links_a_project_with_a_bead_and_leaves_one_without_unlinked(m
                         {"course_1": with_bead, "course_2": without_bead}[cid])
     monkeypatch.setattr(library_client, "list_reference_documents",
                         lambda **k: [_bead_doc("convivy-orient")])
-    monkeypatch.setattr(ch.dashboard_build, "normalize", lambda: [])
     html = ch.live_html()
     assert 'href="/reference/doc/convivy-orient/bead/convivy-orient"' in html
     # vivy carries no href to any /reference/doc/ URL at all...
@@ -410,7 +429,6 @@ def test_live_html_never_renders_unattributed_cost_as_a_dollar_amount(monkeypatc
     course = _course("course_1", "convivy-deck", "Make Deck run", entries=[_entry("i1", "open")])
     monkeypatch.setattr(library_client, "list_courses", lambda **k: [course])
     monkeypatch.setattr(library_client, "get_course", lambda cid: course)
-    monkeypatch.setattr(ch.dashboard_build, "normalize", lambda: [])  # no ledger rows at all
     html = ch.live_html()
     assert "$0.00" not in html
     assert "no attributed cost" in html
@@ -428,7 +446,6 @@ def test_live_html_draws_one_track_cell_per_step_with_the_right_maturity_class(m
     ])
     monkeypatch.setattr(library_client, "list_courses", lambda **k: [course])
     monkeypatch.setattr(library_client, "get_course", lambda cid: course)
-    monkeypatch.setattr(ch.dashboard_build, "normalize", lambda: [])
     html = ch.live_html()
     assert html.count('<span class="sg d"></span>') == 1
     assert html.count('<span class="sg a"></span>') == 1
@@ -441,7 +458,6 @@ def test_live_html_draws_one_track_cell_per_step_with_the_right_maturity_class(m
 
 def test_live_html_renders_with_no_live_courses(monkeypatch):
     monkeypatch.setattr(library_client, "list_courses", lambda **k: [])
-    monkeypatch.setattr(ch.dashboard_build, "normalize", lambda: [])
     html = ch.live_html()
     assert "Chart House" in html
     assert "No live Courses." in html
@@ -456,11 +472,11 @@ def test_live_html_raises_when_the_library_is_down(monkeypatch):
 
 
 def test_live_html_shows_pr_and_cost_figures_when_present(monkeypatch):
-    today = dt.datetime.now(dt.timezone.utc).date().isoformat()
     course = _course("course_1", "vivy", "Ship it", entries=[_entry("i1", "open")])
     monkeypatch.setattr(library_client, "list_courses", lambda **k: [course])
     monkeypatch.setattr(library_client, "get_course", lambda cid: course)
-    monkeypatch.setattr(ch.dashboard_build, "normalize", lambda: [_fact("vivy", 12.5, today)])
+    monkeypatch.setattr(library_client, "list_finished_runs",
+                        lambda since, until=None: [_finished_run("vivy", 12.5)])
     html = ch.live_html()
     assert "$12.50" in html
     assert "1 run<" in html
@@ -474,7 +490,6 @@ def test_live_html_uses_one_display_name_per_product(monkeypatch):
         _entry("i1", "open", maturity="proposed")])
     monkeypatch.setattr(library_client, "list_courses", lambda **k: [course])
     monkeypatch.setattr(library_client, "get_course", lambda cid: course)
-    monkeypatch.setattr(ch.dashboard_build, "normalize", lambda: [])
     html = ch.live_html()
     assert ">Bosun<" in html
     assert "Agent Platform" not in html
@@ -489,7 +504,6 @@ def test_live_html_escapes_a_course_version_containing_markup(monkeypatch):
                      entries=[_entry("i1", "open")])
     monkeypatch.setattr(library_client, "list_courses", lambda **k: [course])
     monkeypatch.setattr(library_client, "get_course", lambda cid: course)
-    monkeypatch.setattr(ch.dashboard_build, "normalize", lambda: [])
     html = ch.live_html()
     assert "<script>boom</script>" not in html
     assert "&lt;script&gt;boom&lt;/script&gt;" in html
@@ -501,7 +515,6 @@ def test_live_html_signals_a_product_awaiting_sign_off(monkeypatch):
         _entry("i1", "open", maturity="proposed", specification="do the thing")])
     monkeypatch.setattr(library_client, "list_courses", lambda **k: [course])
     monkeypatch.setattr(library_client, "get_course", lambda cid: course)
-    monkeypatch.setattr(ch.dashboard_build, "normalize", lambda: [])
     html = ch.live_html()
     assert "awaiting your sign-off" in html
     assert "awaits your sign-off" in html  # the row's own chip label
@@ -527,7 +540,6 @@ def test_live_html_counts_only_proposed_entries_that_carry_a_specification(monke
     ])
     monkeypatch.setattr(library_client, "list_courses", lambda **k: [course])
     monkeypatch.setattr(library_client, "get_course", lambda cid: course)
-    monkeypatch.setattr(ch.dashboard_build, "normalize", lambda: [])
     html = ch.live_html()
     # the banner. The phrase is now wrapped in a link to the product's own
     # Course section (issue_01M17W7DRZ3FJNRNYCAQFWHS1F), so assert the count
@@ -559,7 +571,6 @@ def test_live_html_row_never_claims_the_operator_is_blocking_a_purely_unspecifie
     ])
     monkeypatch.setattr(library_client, "list_courses", lambda **k: [course])
     monkeypatch.setattr(library_client, "get_course", lambda cid: course)
-    monkeypatch.setattr(ch.dashboard_build, "normalize", lambda: [])
     html = ch.live_html()
     assert "awaits your sign-off" not in html
     assert "awaiting you" not in html
@@ -579,7 +590,6 @@ def test_live_html_does_not_count_a_specification_with_unset_maturity_as_awaitin
         _entry("i1", "open", maturity=None, specification="written ahead of maturity")])
     monkeypatch.setattr(library_client, "list_courses", lambda **k: [course])
     monkeypatch.setattr(library_client, "get_course", lambda cid: course)
-    monkeypatch.setattr(ch.dashboard_build, "normalize", lambda: [])
     html = ch.live_html()
     assert "awaiting your sign-off" not in html
     assert "proposed with no specification" not in html
@@ -590,7 +600,6 @@ def test_live_html_treats_a_whitespace_only_specification_as_absent(monkeypatch)
         _entry("i1", "open", maturity="proposed", specification="   \n\t  ")])
     monkeypatch.setattr(library_client, "list_courses", lambda **k: [course])
     monkeypatch.setattr(library_client, "get_course", lambda cid: course)
-    monkeypatch.setattr(ch.dashboard_build, "normalize", lambda: [])
     html = ch.live_html()
     assert "awaiting your sign-off" not in html
     assert "has 1 step proposed with no specification written yet" in html
@@ -619,7 +628,6 @@ def test_awaiting_sign_off_text_is_a_link_to_the_products_own_course_section(mon
         _entry("i1", "open", maturity="proposed", specification="the one real spec")])
     monkeypatch.setattr(library_client, "list_courses", lambda **k: [course])
     monkeypatch.setattr(library_client, "get_course", lambda cid: course)
-    monkeypatch.setattr(ch.dashboard_build, "normalize", lambda: [])
     html = ch.live_html()
     href = ch.issue_build.course_anchor_href("bosun")
     assert href == "/engineering/course#course-bosun"
@@ -627,12 +635,17 @@ def test_awaiting_sign_off_text_is_a_link_to_the_products_own_course_section(mon
     assert f'<a href="{href}">1 spec awaiting you</a>' in html
     assert f'<a href="{href}">1 spec awaiting your sign-off</a>' in html
     # and that's a real, full-tier route registered against the Course
-    # renderer — not a string that merely looks like one.
+    # renderer — not a string that merely looks like one. /engineering/course
+    # left `_full_only_routes()` at E19·2 (issue_01M35K5AB4PRTJ71DMQW7Q4D3B,
+    # alongside /engineering/issues) because that dispatcher calls its
+    # renderer with no arguments and the page now needs the viewer's scope,
+    # so this reads the dispatch source directly instead of that table.
+    import inspect
     import server
-    routes = server._full_only_routes()
     base = href.split("#")[0]
-    assert base in routes
-    assert routes[base][1] is ch.issue_build.live_html_course
+    source = inspect.getsource(server.handle_get)
+    assert f'path == "{base}"' in source
+    assert "issue_build.live_html_course" in source
 
 
 def test_an_unspecified_proposal_gets_no_sign_off_link(monkeypatch):
@@ -643,7 +656,6 @@ def test_an_unspecified_proposal_gets_no_sign_off_link(monkeypatch):
         _entry("i1", "open", maturity="proposed")])
     monkeypatch.setattr(library_client, "list_courses", lambda **k: [course])
     monkeypatch.setattr(library_client, "get_course", lambda cid: course)
-    monkeypatch.setattr(ch.dashboard_build, "normalize", lambda: [])
     html = ch.live_html()
     assert "awaiting you" not in html
     assert "/engineering/course#course-bosun" not in html
@@ -658,7 +670,6 @@ def test_no_proposed_steps_renders_no_sign_off_link(monkeypatch):
         _entry("i1", "fixed")])
     monkeypatch.setattr(library_client, "list_courses", lambda **k: [course])
     monkeypatch.setattr(library_client, "get_course", lambda cid: course)
-    monkeypatch.setattr(ch.dashboard_build, "normalize", lambda: [])
     html = ch.live_html()
     assert "awaits your sign-off" not in html
     assert "awaiting your sign-off" not in html
@@ -667,12 +678,12 @@ def test_no_proposed_steps_renders_no_sign_off_link(monkeypatch):
 
 
 def test_live_html_flags_running_uncharted_with_an_anomaly_note(monkeypatch):
-    today = dt.datetime.now(dt.timezone.utc).date().isoformat()
     course = _course("course_1", "vivy", "Make the numbers act on", version=1,
                      entries=[_entry("i1", "open", maturity=None)])
     monkeypatch.setattr(library_client, "list_courses", lambda **k: [course])
     monkeypatch.setattr(library_client, "get_course", lambda cid: course)
-    monkeypatch.setattr(ch.dashboard_build, "normalize", lambda: [_fact("vivy", 903.49, today)])
+    monkeypatch.setattr(library_client, "list_finished_runs",
+                        lambda since, until=None: [_finished_run("vivy", 903.49)])
     html = ch.live_html()
     assert "running uncharted" in html
     assert "row-anomaly" in html
@@ -778,7 +789,6 @@ def test_live_html_never_renders_a_false_zero_when_the_pr_feed_is_cold(monkeypat
     course = _course("course_1", "vivy", "Ship it", entries=[_entry("i1", "open")])
     monkeypatch.setattr(library_client, "list_courses", lambda **k: [course])
     monkeypatch.setattr(library_client, "get_course", lambda cid: course)
-    monkeypatch.setattr(ch.dashboard_build, "normalize", lambda: [])
     monkeypatch.setattr(ch.merge_queue_build, "cached_open_prs", lambda: None)
     today = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
     monkeypatch.setattr(library_client, "list_signals", lambda **k: [_signal("vivy", today)])
@@ -793,7 +803,6 @@ def test_live_html_wires_the_open_pr_ribbon_per_row(monkeypatch):
     course = _course("course_1", "vivy", "Ship it", entries=[_entry("i1", "open")])
     monkeypatch.setattr(library_client, "list_courses", lambda **k: [course])
     monkeypatch.setattr(library_client, "get_course", lambda cid: course)
-    monkeypatch.setattr(ch.dashboard_build, "normalize", lambda: [])
     monkeypatch.setattr(ch.merge_queue_build, "cached_open_prs",
                         lambda: [_pr("vivy", 1, "cleared", "passing")])
     html = ch.live_html()
@@ -1024,3 +1033,47 @@ def test_an_unset_maturity_step_reaches_no_signal_line(monkeypatch):
     assert ch._step_class(_entry("i", "open", maturity=None)) == "u"
     assert "proposed with no specification written yet" not in html, (
         "an unset-maturity step must not be reported as a proposed one")
+
+
+def test_the_chart_house_shows_only_the_viewers_projects(monkeypatch):
+    """Review round 3 on PR #372: /chart-house listed every project's Course
+    and every epic awaiting approval to any full-tier viewer. A viewer scoped
+    to vivy sees neither bosun's Course nor its epic; a viewer scoped to both
+    sees both, so the omission is the scope filter."""
+    vivy = _course("course_v", "vivy", "VIVY-COURSE-TITLE", entries=[_entry("v1", "open", maturity="approved")])
+    bosun = _course("course_b", "bosun", "BOSUN-COURSE-TITLE", entries=[_entry("b1", "open", maturity="approved")])
+    courses = {"course_v": vivy, "course_b": bosun}
+    monkeypatch.setattr(library_client, "list_courses", lambda **k: [vivy, bosun])
+    monkeypatch.setattr(library_client, "get_course", lambda cid: courses.get(cid))
+    monkeypatch.setattr(library_client, "list_issue_items", lambda: [
+        _item("issue_vivy_ep", product="vivy", title="VIVY-EPIC-TITLE"),
+        _item("issue_bosun_ep", product="bosun", title="BOSUN-EPIC-TITLE")])
+    scoped = ch.live_html(frozenset({"vivy"}))
+    assert "VIVY-COURSE-TITLE" in scoped and "VIVY-EPIC-TITLE" in scoped
+    assert "BOSUN-COURSE-TITLE" not in scoped
+    assert "BOSUN-EPIC-TITLE" not in scoped and "issue_bosun_ep" not in scoped
+    assert "1 project " in scoped
+    both = ch.live_html(frozenset({"vivy", "bosun"}))
+    assert "BOSUN-COURSE-TITLE" in both and "BOSUN-EPIC-TITLE" in both
+
+
+def test_the_static_fallback_names_no_project(monkeypatch, tmp_path):
+    """Review round 5 on PR #372: server.py serves site/chart-house.html to any
+    viewer whose live render failed, so the deploy-time fallback must not be a
+    snapshot of every project. With two projects' Courses and epics in the
+    Library, the written file names neither and says the view is unavailable."""
+    vivy = _course("course_v", "vivy", "VIVY-COURSE-TITLE", entries=[_entry("v1", "open", maturity="approved")])
+    bosun = _course("course_b", "bosun", "BOSUN-COURSE-TITLE", entries=[_entry("b1", "open", maturity="approved")])
+    courses = {"course_v": vivy, "course_b": bosun}
+    monkeypatch.setattr(library_client, "list_courses", lambda **k: [vivy, bosun])
+    monkeypatch.setattr(library_client, "get_course", lambda cid: courses.get(cid))
+    monkeypatch.setattr(library_client, "list_issue_items", lambda: [
+        _item("issue_vivy_ep", product="vivy", title="VIVY-EPIC-TITLE"),
+        _item("issue_bosun_ep", product="bosun", title="BOSUN-EPIC-TITLE")])
+    monkeypatch.setattr(ch, "OUT", tmp_path)
+    ch.build_static()
+    written = (tmp_path / "chart-house.html").read_text(encoding="utf-8")
+    for name in ("VIVY-COURSE-TITLE", "BOSUN-COURSE-TITLE", "VIVY-EPIC-TITLE",
+                 "BOSUN-EPIC-TITLE", "issue_vivy_ep", "issue_bosun_ep"):
+        assert name not in written
+    assert "Live view unavailable" in written

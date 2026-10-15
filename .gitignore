@@ -62,6 +62,10 @@ jwt.json*
 tiers.json*
 roles.json*
 
+# The tailnet listener's bind config (CQ·150, E21) — same untracked-with-an-
+# .example-template convention as the three above, same trailing-glob reason.
+tailnet.json*
+
 # Agent platform: .claude/ is individuated locally by `knowledge-ctx use <profile>`
 # (agents, skills, settings) — regenerated on every dispatch, not committed. This
 # repo has no root CLAUDE.md; if one is ever added it is outside this pattern and

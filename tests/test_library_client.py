@@ -1310,6 +1310,230 @@ def test_a_signal_library_outage_raises_rather_than_returning_an_empty_list(monk
         library_client.list_signals()
 
 
+# --- list_finished_runs / cost_rollup_by_project (CQ·154, finished-run cost) -
+
+
+def _resolution_row(n, *, product="convivy-orient", produced_at, ingested_at=None,
+                    cost_usd=1.0, repo=None):
+    """A minimal-but-complete `model_resolution` signal row — every key
+    `library_client._finished_run` reads out of `meta`."""
+    return {
+        "id": f"res_{n:04d}", "source": "agentctl", "stream": None,
+        "kind": "model_resolution", "actor": "agentctl", "ingested_by": None,
+        "product": product, "body": "", "refs": {},
+        "meta": {"run": f"run-{n:04d}", "persona": "coder", "repo": repo or product,
+                 "work_item": "issue_0001", "model": "claude-sonnet-5",
+                 "cost": {"usd": cost_usd, "tokens": 12345, "by_model": [{"model": "claude-sonnet-5", "cost": cost_usd}]},
+                 "outcome": "merged"},
+        "privacy_class": "internal", "produced_at": produced_at,
+        "ingested_at": ingested_at or produced_at or "2026-10-15T00:00:00Z",
+    }
+
+
+def test_list_finished_runs_asks_for_the_model_resolution_kind(monkeypatch, token_env):
+    seen = {}
+
+    def fake_urlopen(req, timeout=None):
+        seen["params"] = urllib.parse.parse_qsl(urllib.parse.urlsplit(req.full_url).query)
+        return _FakeResponse({"signals": [], "count": 0, "offset": 0, "truncated": False})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    library_client.list_finished_runs(dt.datetime(2026, 10, 1))
+    assert ("kind", "model_resolution") in seen["params"]
+
+
+def test_list_finished_runs_parses_every_field_the_epic_names(monkeypatch, token_env):
+    row = _resolution_row(0, product="convivy-orient", produced_at="2026-10-15T10:00:00Z",
+                          cost_usd=3.25, repo="convivy-orient")
+
+    def fake_urlopen(req, timeout=None):
+        return _FakeResponse({"signals": [row], "count": 1, "offset": 0, "truncated": False})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    got = library_client.list_finished_runs(dt.datetime(2026, 10, 1), until=dt.datetime(2026, 10, 16))
+
+    assert len(got) == 1
+    run = got[0]
+    assert run.product == "convivy-orient"
+    assert run.run == "run-0000"
+    assert run.persona == "coder"
+    assert run.repo == "convivy-orient"
+    assert run.work_item == "issue_0001"
+    assert run.model == "claude-sonnet-5"
+    assert run.outcome == "merged"
+    assert run.cost.usd == 3.25
+    assert run.cost.tokens == 12345
+    assert run.cost.by_model == [{"model": "claude-sonnet-5", "cost": 3.25}]
+
+
+def test_list_finished_runs_a_run_with_no_cost_still_has_a_record(monkeypatch, token_env):
+    """An in-flight or cost-unknown run must still be countable (`runs`),
+    distinct from a run whose cost is a real zero — matching the
+    cost.json-absent-is-meaningful convention `crews_build` already applies."""
+    row = _resolution_row(0, produced_at="2026-10-15T10:00:00Z")
+    row["meta"]["cost"] = None
+
+    def fake_urlopen(req, timeout=None):
+        return _FakeResponse({"signals": [row], "count": 1, "offset": 0, "truncated": False})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    got = library_client.list_finished_runs(dt.datetime(2026, 10, 1), until=dt.datetime(2026, 10, 16))
+    assert got[0].cost is None
+
+
+def test_list_finished_runs_falls_back_to_ingested_at_when_produced_at_is_absent(
+        monkeypatch, token_env):
+    row = _resolution_row(0, produced_at=None, ingested_at="2026-10-15T09:00:00Z")
+
+    def fake_urlopen(req, timeout=None):
+        return _FakeResponse({"signals": [row], "count": 1, "offset": 0, "truncated": False})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    kept = library_client.list_finished_runs(
+        dt.datetime(2026, 10, 15, 8), until=dt.datetime(2026, 10, 15, 10))
+    assert len(kept) == 1
+    dropped = library_client.list_finished_runs(
+        dt.datetime(2026, 10, 15, 9, 30), until=dt.datetime(2026, 10, 15, 10))
+    assert dropped == []
+
+
+def test_list_finished_runs_stops_at_the_window_edge_without_a_full_scan(
+        monkeypatch, token_env):
+    """Walks newest-first and must stop the moment a row falls before
+    `since` — a 5,000-row table with a 51-row window must take exactly one
+    request, not the ~25 a full scan at MAX_PAGE would need."""
+    total = 5000
+    base = dt.datetime(2026, 10, 15, 12, 0, 0)
+    rows = [_resolution_row(n, produced_at=(base - dt.timedelta(minutes=n)).isoformat() + "Z")
+            for n in range(total)]
+    requests_made = []
+
+    def fake_urlopen(req, timeout=None):
+        requests_made.append(req)
+        params = _query(req.full_url)
+        offset, limit = int(params["offset"]), int(params["limit"])
+        page = rows[offset:offset + limit]
+        return _FakeResponse({"signals": page, "count": len(page), "total": total,
+                              "offset": offset, "truncated": offset + len(page) < total})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    since = base - dt.timedelta(minutes=50)
+    got = library_client.list_finished_runs(since, until=base)
+
+    assert len(got) == 51  # minutes 0..50 inclusive
+    assert len(requests_made) == 1
+
+
+def test_list_finished_runs_a_late_ingested_old_record_does_not_end_the_walk(
+        monkeypatch, token_env):
+    """The walk is ordered by `ingested_at` and stops on it. A record
+    produced before the window but ingested inside it, first in the walk,
+    is skipped, and the in-window rows behind it are still read."""
+    base = dt.datetime(2026, 10, 15, 12, 0, 0)
+    late = _resolution_row(1, produced_at="2026-10-14T01:00:00Z",
+                           ingested_at=(base + dt.timedelta(minutes=5)).isoformat() + "Z")
+    in_window = [_resolution_row(10 + n, produced_at=(base - dt.timedelta(minutes=n)).isoformat() + "Z")
+                 for n in range(3)]
+    older = _resolution_row(99, produced_at="2026-10-13T00:00:00Z")
+
+    def fake_urlopen(req, timeout=None):
+        rows = [late, *in_window, older]
+        return _FakeResponse({"signals": rows, "count": len(rows), "offset": 0, "truncated": False})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    got = library_client.list_finished_runs(base - dt.timedelta(hours=1),
+                                            until=base + dt.timedelta(hours=1))
+    assert sorted(r.run for r in got) == ["run-0010", "run-0011", "run-0012"]
+
+
+def test_list_finished_runs_follows_the_cursor_and_stops_partway(monkeypatch, token_env):
+    """Pages after the first are fetched by `next_cursor`, and the walk stops
+    on the page where the window's start falls."""
+    base = dt.datetime(2026, 10, 15, 12, 0, 0)
+    pages = {
+        None: [_resolution_row(n, produced_at=(base - dt.timedelta(minutes=n)).isoformat() + "Z")
+               for n in range(3)],
+        "c1": [_resolution_row(n, produced_at=(base - dt.timedelta(minutes=n)).isoformat() + "Z")
+               for n in range(3, 6)],
+        "c2": [_resolution_row(n, produced_at=(base - dt.timedelta(minutes=n)).isoformat() + "Z")
+               for n in range(6, 9)],
+    }
+    nxt = {None: "c1", "c1": "c2", "c2": "c3"}
+    asked = []
+
+    def fake_urlopen(req, timeout=None):
+        cursor = _query(req.full_url).get("cursor")
+        asked.append(cursor)
+        rows = pages[cursor]
+        return _FakeResponse({"signals": rows, "count": len(rows), "offset": 0,
+                              "truncated": True, "next_cursor": nxt[cursor]})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    got = library_client.list_finished_runs(base - dt.timedelta(minutes=4), until=base)
+    assert sorted(r.run for r in got) == [f"run-{n:04d}" for n in range(5)]
+    assert asked == [None, "c1"]
+
+
+def test_list_finished_runs_offset_fallback_counts_rows_seen_not_rows_kept(
+        monkeypatch, token_env):
+    """A row newer than `until` is read but dropped; the NEXT page's offset
+    must still account for it. Counting only rows KEPT (as `len(out)`) would
+    re-read the same page forever once any row got filtered out of it —
+    `list_signals`' own `_page_signals` makes the identical distinction for
+    its count-capped walk."""
+    base = dt.datetime(2026, 10, 15, 12, 0, 0)
+    newer = [_resolution_row(n, produced_at=(base + dt.timedelta(minutes=n + 1)).isoformat() + "Z")
+            for n in range(library_client.MAX_PAGE)]
+    in_window = [_resolution_row(9999, produced_at=base.isoformat() + "Z")]
+    rows = newer + in_window
+    requests_made = []
+
+    def fake_urlopen(req, timeout=None):
+        requests_made.append(req)
+        params = _query(req.full_url)
+        assert "cursor" not in params
+        offset, limit = int(params["offset"]), int(params["limit"])
+        page = rows[offset:offset + limit]
+        return _FakeResponse({"signals": page, "count": len(page), "total": len(rows),
+                              "offset": offset, "truncated": offset + len(page) < len(rows),
+                              "next_cursor": None})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    got = library_client.list_finished_runs(base, until=base)
+
+    offsets = [int(_query(r.full_url)["offset"]) for r in requests_made]
+    assert offsets == [0, library_client.MAX_PAGE]
+    assert len(got) == 1
+
+
+def test_list_finished_runs_raises_on_a_library_outage(monkeypatch, token_env):
+    def fake_urlopen(req, timeout=None):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(urllib.error.URLError):
+        library_client.list_finished_runs(dt.datetime(2026, 10, 1))
+
+
+def test_cost_rollup_by_project_sums_usd_and_counts_every_run_including_unknown_cost():
+    """A fixture where projects' costs differ (CQ·154's own DoD language),
+    plus a run whose cost is unknown — it must still count toward `runs`
+    without moving `cost_usd`."""
+    def run(product, cost_usd):
+        cost = None if cost_usd is None else library_client.FinishedRunCost(
+            usd=cost_usd, tokens=None, by_model=None)
+        return library_client.FinishedRun(
+            signal_id=f"{product}-{cost_usd}", product=product, run="r", persona=None,
+            repo=product, work_item=None, model="m", cost=cost, outcome=None,
+            produced_at=None, ingested_at=dt.datetime(2026, 10, 15))
+
+    rollup = library_client.cost_rollup_by_project([
+        run("vivy", 1.5), run("vivy", 2.5), run("vivy", None), run("constance", 3.0),
+    ])
+    assert rollup["vivy"] == {"cost_usd": 4.0, "runs": 3}
+    assert rollup["constance"] == {"cost_usd": 3.0, "runs": 1}
+
+
 # --- the protocol header, the credential, the timeout ------------------------
 
 

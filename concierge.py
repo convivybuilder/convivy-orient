@@ -9,6 +9,16 @@ for). The server re-validates every doc_id against the live grant before applyin
 WIDENING is impossible in-loop: a request for something outside the grant is
 denied and logged (room_api._log_grant_widening_request), not granted live.
 
+**Widened for CQ·149, E22.** An action now carries `kind` (`doc` | `item` |
+`signal`, defaulting to `doc`) alongside `doc_id`, so a member may ask to add a
+Chart House work item or an Archives entry, not only a KB document. There is no
+catalog of items/signals here — the member's own request text is the only source
+of a work-item or Archives-entry id, unlike `doc_id`, which the model is also
+told to pick from the provided document catalog. Either way the id the model
+returns is untrusted: `room_api._apply_actions` re-validates it against the
+member's live, per-kind grant (CQ·147) before anything is applied, exactly as it
+already does for a `doc` action whose `doc_id` is not in the catalog.
+
 The Anthropic key lives in a gitignored concierge.json read per request — NEVER
 exported to the process env (ARCH-146). Absent/invalid config → the concierge is
 disabled and room_api returns 503. The one model call goes through _call_model,
@@ -37,6 +47,12 @@ TIMEOUT_S = 20.0
 # the live grant server-side before anything is applied.
 OPS = ("add", "remove", "reorder", "annotate", "set_landing_note")
 
+# What `doc_id` names (room_api._KINDS, CQ·147/CQ·149). Mirrored here rather than
+# imported — room_api imports this module, not the other way round — and kept in
+# sync by hand; a drift would show up immediately as a 400 on every plan this
+# module is able to produce.
+ENTRY_KINDS = ("doc", "item", "signal")
+
 # Strict structured-output schema (output_config.format). additionalProperties
 # false everywhere; the server enforces the shape so the plan always parses.
 PLAN_SCHEMA = {
@@ -51,6 +67,7 @@ PLAN_SCHEMA = {
                 "properties": {
                     "op": {"type": "string", "enum": list(OPS)},
                     "doc_id": {"type": "string"},
+                    "kind": {"type": "string", "enum": list(ENTRY_KINDS)},
                     "section": {"type": "string"},
                     "position": {"type": "integer"},
                     "text": {"type": "string"},
@@ -85,9 +102,14 @@ SYSTEM = (
     "- You may ONLY reference documents present in the provided catalog. The catalog "
     "is the complete set of documents this member is allowed to see; never invent a "
     "doc_id or reference a document not in it.\n"
-    "- Supported ops: add (doc_id, optional section/position), remove (doc_id), "
-    "reorder (doc_id, section, position), annotate (doc_id, text), set_landing_note "
-    "(text).\n"
+    "- An action also carries kind: 'doc' (default, a catalog document), 'item' (a "
+    "Chart House work item or epic) or 'signal' (an Archives entry). There is no "
+    "catalog for item/signal — only use one when the member's own request names its "
+    "id directly; never invent one. The server checks it against what the member may "
+    "actually see before anything is applied.\n"
+    "- Supported ops: add (doc_id, kind, optional section/position), remove (doc_id, "
+    "kind), reorder (doc_id, kind, section, position), annotate (doc_id, kind, text), "
+    "set_landing_note (text).\n"
     "- For an 'explain X' request, put the answer — grounded in the catalog snippets "
     "— in the reply field; do not fabricate. Optionally annotate a relevant doc.\n"
     "- If the member asks for a document NOT in the catalog, do NOT invent it: return "

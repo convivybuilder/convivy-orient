@@ -57,7 +57,7 @@ def _seed(*sigs):
 def test_multiple_comments_on_one_pr_render_as_one_group(db):
     _seed(_comment(actor="alice", body="FIRST-COMMENT"),
           _comment(actor="bob", body="SECOND-COMMENT"))
-    html = a.prs_live_html()
+    html = a.prs_live_html(frozenset(), True)
     assert html.count('class="pr-group"') == 1
     assert "FIRST-COMMENT" in html and "SECOND-COMMENT" in html
     assert "PR #42" in html
@@ -66,7 +66,7 @@ def test_multiple_comments_on_one_pr_render_as_one_group(db):
 def test_different_prs_render_as_separate_groups(db):
     _seed(_comment(refs={"pr": 42, "url": "https://github.com/convivy/vivy/pull/42#c1"}),
           _comment(refs={"pr": 43, "url": "https://github.com/convivy/vivy/pull/43#c1"}))
-    html = a.prs_live_html()
+    html = a.prs_live_html(frozenset(), True)
     assert html.count("pr-group") >= 2
     assert "PR #42" in html and "PR #43" in html
 
@@ -74,7 +74,7 @@ def test_different_prs_render_as_separate_groups(db):
 def test_description_attaches_to_its_pr_group(db):
     _seed(_comment(body="A-COMMENT"),
           _description(body="THE-DESCRIPTION-TEXT"))
-    html = a.prs_live_html()
+    html = a.prs_live_html(frozenset(), True)
     assert "THE-DESCRIPTION-TEXT" in html
     assert "A-COMMENT" in html
     # one group, not two — the description joined the comment's group rather
@@ -87,14 +87,14 @@ def test_pr_with_no_comments_yet_still_shows_its_description(db):
     the reverse — a merge record with no captured comments — must still
     render its own group rather than being dropped for lack of comments."""
     _seed(_description(body="DESCRIPTION-ONLY-NO-COMMENTS"))
-    html = a.prs_live_html()
+    html = a.prs_live_html(frozenset(), True)
     assert "DESCRIPTION-ONLY-NO-COMMENTS" in html
     assert "No captured comments" in html
 
 
 def test_unmerged_pr_shows_comments_with_no_description_block(db):
     _seed(_comment(body="OPEN-PR-COMMENT"))
-    html = a.prs_live_html()
+    html = a.prs_live_html(frozenset(), True)
     assert "OPEN-PR-COMMENT" in html
     assert 'class="pr-desc"' not in html
 
@@ -108,7 +108,7 @@ def test_comment_with_no_pr_reference_is_not_dropped(db):
     dropping it would be worse than the flat feed this page replaces."""
     _seed(_comment(body="GROUPED-COMMENT"),
           _comment(id=control_db.new_signal_id(), body="UNLINKED-COMMENT", refs={}))
-    html = a.prs_live_html()
+    html = a.prs_live_html(frozenset(), True)
     assert "GROUPED-COMMENT" in html
     assert "UNLINKED-COMMENT" in html
     assert "no resolvable PR reference" in html
@@ -121,7 +121,7 @@ def test_comment_with_non_integer_pr_ref_is_unlinked_not_dropped(db):
                    refs={"pr": "not-a-number", "url": "https://x/y"}),
           _comment(id=control_db.new_signal_id(), body="BOOL-PR-COMMENT",
                    refs={"pr": True, "url": "https://x/y"}))
-    html = a.prs_live_html()  # must not raise
+    html = a.prs_live_html(frozenset(), True)  # must not raise
     assert "STRING-PR-COMMENT" in html
     assert "BOOL-PR-COMMENT" in html
     # one shared "unlinked" section (the heading), not a section per row —
@@ -138,7 +138,7 @@ def test_unlinked_comments_sit_inside_the_filterable_groups_container(db):
     template, so a row appearing before it is inside the container; pin the
     nesting, not just the row's presence on the page."""
     _seed(_comment(id=control_db.new_signal_id(), body="UNLINKED-ROW", refs={}))
-    html = a.prs_live_html()
+    html = a.prs_live_html(frozenset(), True)
     groups_start = html.index('id="groups"')
     groups_inner_end = html.index('id="empty"')
     assert groups_start < html.index("UNLINKED-ROW") < groups_inner_end
@@ -150,7 +150,7 @@ def test_unlinked_comments_sit_inside_the_filterable_groups_container(db):
 def test_pr_groups_carry_their_product_for_client_side_filtering(db):
     _seed(_comment(product="vivy", refs={"pr": 1, "url": "https://x/1"}),
           _comment(product="constance", refs={"pr": 2, "url": "https://x/2"}))
-    html = a.prs_live_html()
+    html = a.prs_live_html(frozenset(), True)
     assert 'data-prod="vivy"' in html
     assert 'data-prod="constance"' in html
 
@@ -162,7 +162,7 @@ def test_pr_chip_counts_match_visible_groups_not_a_wider_total(db):
     _seed(_comment(product="vivy", refs={"pr": 1, "url": "https://x/1"}),
           _comment(product="vivy", refs={"pr": 2, "url": "https://x/2"}),
           _comment(product="constance", refs={"pr": 3, "url": "https://x/3"}))
-    html = a.prs_live_html()
+    html = a.prs_live_html(frozenset(), True)
     assert '<span class="n">2</span></button>' in html  # vivy: 2 PR groups
     assert 'data-prod="vivy"' in html and 'data-prod="constance"' in html
 
@@ -171,7 +171,7 @@ def test_changelogs_chip_filterable_by_product(db):
     _seed(_description(product="vivy", body="VIVY-CHANGELOG-ENTRY"),
           _description(id=control_db.new_signal_id(), product="constance",
                        body="CONSTANCE-CHANGELOG-ENTRY"))
-    html = a.changelogs_live_html()
+    html = a.changelogs_live_html(frozenset(), True)
     assert 'data-prod="vivy"' in html and 'data-prod="constance"' in html
     assert "VIVY-CHANGELOG-ENTRY" in html and "CONSTANCE-CHANGELOG-ENTRY" in html
 
@@ -181,16 +181,41 @@ def test_changelogs_only_changelog_kind_renders(db):
           dict(id=control_db.new_signal_id(), source="slack", kind="notification",
               actor="platform", ingested_by="agent", product="vivy",
               body="NOT-A-CHANGELOG", privacy_class="internal"))
-    html = a.changelogs_live_html()
+    html = a.changelogs_live_html(frozenset(), True)
     assert "KEEP-THIS-CHANGELOG" in html
     assert "NOT-A-CHANGELOG" not in html
+
+
+# --- scope (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M) -------------------------
+
+
+def test_prs_fan_out_is_restricted_to_the_viewers_scope(db):
+    """A scoped viewer's fan-out never even fetches an out-of-scope
+    product's PRs, let alone renders them."""
+    _seed(_comment(product="vivy", body="IN-SCOPE-COMMENT", refs={"pr": 1, "url": "https://x/1"}),
+          _comment(product="constance", body="OUT-OF-SCOPE-COMMENT",
+                  refs={"pr": 2, "url": "https://x/2"}))
+    html = a.prs_live_html(frozenset({"vivy"}), False)
+    assert "IN-SCOPE-COMMENT" in html
+    assert "OUT-OF-SCOPE-COMMENT" not in html
+    assert 'data-prod="constance"' not in html
+
+
+def test_changelogs_fan_out_is_restricted_to_the_viewers_scope(db):
+    _seed(_description(product="vivy", body="VIVY-CHANGELOG-ENTRY"),
+          _description(id=control_db.new_signal_id(), product="constance",
+                       body="CONSTANCE-CHANGELOG-ENTRY"))
+    html = a.changelogs_live_html(frozenset({"vivy"}), False)
+    assert "VIVY-CHANGELOG-ENTRY" in html
+    assert "CONSTANCE-CHANGELOG-ENTRY" not in html
+    assert 'data-prod="constance"' not in html
 
 
 # --- fan-out fairness across products --------------------------------------
 
 
 def test_a_busy_product_does_not_crowd_out_a_quiet_ones_pr(db, monkeypatch):
-    """The whole reason `_fan_out` asks the Library per-product rather than
+    """The whole reason `fan_out` asks the Library per-product rather than
     for one flat top-N: a busy product's rows must not push a quiet product's
     single PR out of a shared cap. `quiet` is seeded FIRST (oldest by the
     fake's own default sort, ingested_at) and `busy` gets 5 rows after it,
@@ -198,14 +223,14 @@ def test_a_busy_product_does_not_crowd_out_a_quiet_ones_pr(db, monkeypatch):
     entirely under a single flat `list_signals(kind=..., cap=2)` call.
     Verified against that flat-fetch simulation before trusting this test:
     it fails (quiet vanishes) under the old approach and passes under
-    `_fan_out`'s per-product fetch."""
+    `fan_out`'s per-product fetch."""
     monkeypatch.setattr(a, "_PR_CAP_PER_PRODUCT", 2)
     _seed(_comment(id=control_db.new_signal_id(), product="quiet",
                    refs={"pr": 1, "url": "https://x/quiet"}))
     for n in range(5):
         _seed(_comment(id=control_db.new_signal_id(), product="busy",
                        refs={"pr": n, "url": f"https://x/{n}"}))
-    html = a.prs_live_html()
+    html = a.prs_live_html(frozenset(), True)
     assert 'data-prod="quiet"' in html
     assert 'data-prod="busy"' in html
 
@@ -227,8 +252,8 @@ def test_alert_kind_has_no_dedicated_section_but_stays_filterable(db):
     assert rows[0].body == "ALERT-BODY"
     # archives_build's own pages never render this kind — confirms the
     # absence of a section, not merely the presence of the filter above.
-    assert "ALERT-BODY" not in a.prs_live_html()
-    assert "ALERT-BODY" not in a.changelogs_live_html()
+    assert "ALERT-BODY" not in a.prs_live_html(frozenset(), True)
+    assert "ALERT-BODY" not in a.changelogs_live_html(frozenset(), True)
 
 
 # --- XSS -------------------------------------------------------------------
@@ -236,14 +261,14 @@ def test_alert_kind_has_no_dedicated_section_but_stays_filterable(db):
 
 def test_pr_comment_body_is_xss_safe(db):
     _seed(_comment(body="<script>alert(1)</script> and <img src=x onerror=alert(2)>"))
-    html = a.prs_live_html()
+    html = a.prs_live_html(frozenset(), True)
     assert "<script>alert(1)</script>" not in html
     assert "<img src=x" not in html
 
 
 def test_changelog_body_is_xss_safe(db):
     _seed(_description(body="<script>alert(1)</script>"))
-    html = a.changelogs_live_html()
+    html = a.changelogs_live_html(frozenset(), True)
     assert "<script>alert(1)</script>" not in html
 
 
@@ -274,7 +299,7 @@ _REVIEW_STAMP = (
 def test_pr_comment_review_stamp_is_stripped(db):
     # _comment_html (archives_build.py), feeding /signals/prs.
     _seed(_comment(body=_REVIEW_STAMP + "LGTM, one small nit inline."))
-    html = a.prs_live_html()
+    html = a.prs_live_html(frozenset(), True)
     assert "LGTM, one small nit inline." in html
     assert "agentctl-review" not in html
     assert "reviewed-commit" not in html
@@ -284,7 +309,7 @@ def test_pr_description_review_stamp_is_stripped(db):
     # _pr_group_html's PR-description render (archives_build.py), same page.
     _seed(_comment(body="a comment"),
           _description(body=_REVIEW_STAMP + "Ships the retry logic."))
-    html = a.prs_live_html()
+    html = a.prs_live_html(frozenset(), True)
     assert "Ships the retry logic." in html
     assert "agentctl-review" not in html
 
@@ -292,7 +317,7 @@ def test_pr_description_review_stamp_is_stripped(db):
 def test_changelog_card_review_stamp_is_stripped(db):
     # _changelog_card (archives_build.py), feeding /signals/changelogs.
     _seed(_description(body=_REVIEW_STAMP + "Add feature X."))
-    html = a.changelogs_live_html()
+    html = a.changelogs_live_html(frozenset(), True)
     assert "Add feature X." in html
     assert "agentctl-review" not in html
 
@@ -301,10 +326,20 @@ def test_changelog_card_review_stamp_is_stripped(db):
 
 
 def test_routes_registered_full_tier():
+    """/archives/prs and /archives/changelogs left `_full_only_routes()` at
+    E19·4 (issue_01M35K5JQ7Z7MHYZGWRSB5F85M), alongside /archives itself,
+    because each now fans out only over the viewer's own project scope and
+    that dispatcher calls its renderer with no arguments — so this reads the
+    dispatch source directly instead of that table, the same way
+    test_chart_house_build.py pins /engineering/course."""
+    import inspect
     import server
-    routes = server._full_only_routes()
-    assert routes["/archives/prs"][1] is a.prs_live_html
-    assert routes["/archives/changelogs"][1] is a.changelogs_live_html
+    assert "/archives/prs" not in server._full_only_routes()
+    assert "/archives/changelogs" not in server._full_only_routes()
+    source = inspect.getsource(server.handle_get)
+    assert 'path in ("/archives", "/archives/prs", "/archives/changelogs")' in source
+    assert "archives_build.prs_live_html" in source
+    assert "archives_build.changelogs_live_html" in source
 
 
 def test_nav_places_prs_and_changelogs_in_archives():
@@ -321,8 +356,26 @@ def test_nav_places_prs_and_changelogs_in_archives():
 
 
 def test_prs_empty_state(db):
-    assert "No PRs captured yet" in a.prs_live_html()
+    assert "No PRs captured yet" in a.prs_live_html(frozenset(), True)
 
 
 def test_changelogs_empty_state(db):
-    assert "Nothing captured yet" in a.changelogs_live_html()
+    assert "Nothing captured yet" in a.changelogs_live_html(frozenset(), True)
+
+
+def test_build_static_seeds_an_empty_fallback_not_real_data(tmp_path, monkeypatch, db):
+    """build_static() used to call `prs_live_html()`/`changelogs_live_html()`
+    with no arguments at all — broken by E19·4's scope parameter, and before
+    that, the exact crews.html-shaped leak (issue_01M2KVHTVFF4MAQF94M2SP6TZ0):
+    a static fallback is served to ANY viewer's failed render, so real PR/
+    changelog content there would leak to a scoped viewer. Seeded data must
+    not appear in either written file."""
+    _seed(_comment(product="vivy", body="LEAKY-COMMENT", refs={"pr": 1, "url": "https://x/1"}))
+    monkeypatch.setattr(a, "SITE", tmp_path)
+    a.build_static()
+    prs_html = (tmp_path / "signals-prs.html").read_text(encoding="utf-8")
+    changelogs_html = (tmp_path / "signals-changelogs.html").read_text(encoding="utf-8")
+    assert "LEAKY-COMMENT" not in prs_html
+    assert "LEAKY-COMMENT" not in changelogs_html
+    assert "Live view unavailable" in prs_html
+    assert "Live view unavailable" in changelogs_html

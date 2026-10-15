@@ -25,6 +25,7 @@ from html import escape
 
 from markdown_render import md_to_html
 
+import archives_build
 import design_system as ds
 import library_client
 from url_safety import safe_http_url
@@ -144,16 +145,24 @@ def _page(*, cards_html: str, chips_html: str, empty_msg: str) -> str:
                          body=body, extra_css=_CSS)
 
 
-def changelog_live_html() -> str:
-    """/engineering/changelog — the most recent merges, read from memory signals.
+def changelog_live_html(scope: frozenset[str] = frozenset(), whole_fleet: bool = True) -> str:
+    """/engineering/changelog — the most recent merges, read from memory
+    signals, restricted to `scope` (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M):
+    a scoped viewer's fan-out (`archives_build.fan_out`, the same per-product
+    fetch `/archives/prs` and `/archives/changelogs` use) is restricted to
+    their own projects, so an out-of-scope product's entries are never even
+    fetched.
 
     `source IN ("co")` is a Library filter now, not a Python one: unfiltered,
     `kind == "changelog"` alone is 4,590 rows on the live database, 23 pages to
     find the ~handful of authored entries within it
     (issue_01KZW183XVJCKFGQT8HMXFJFTY)."""
-    rows = library_client.list_signals(
-        source=sorted(CHANGELOG_AUTHORED_SOURCES), kind=["changelog"],
-        order="produced_at", cap=_LIMIT)
+    products = None if whole_fleet else sorted(scope)
+    rows = archives_build.fan_out(
+        "changelog", cap_per_product=_LIMIT, source=sorted(CHANGELOG_AUTHORED_SOURCES),
+        products=products)
+    rows.sort(key=lambda s: s.produced_at or s.ingested_at, reverse=True)
+    rows = rows[:_LIMIT]
     counts: dict[str, int] = {}
     for sig in rows:
         counts[sig.stream or sig.product] = counts.get(sig.stream or sig.product, 0) + 1
@@ -166,15 +175,16 @@ def changelog_live_html() -> str:
 
 
 def build_static() -> None:
-    """Seed the empty-state fallback (served only if a live render throws)."""
+    """Seed the empty-state fallback (served only if a live render throws),
+    deliberately empty rather than calling the live renderer (E19·4,
+    issue_01M35K5JQ7Z7MHYZGWRSB5F85M) — this used to call
+    `changelog_live_html()` with no scope argument, the same zero-argument
+    leak 26bb079 found and fixed in `archives_build.build_static()`."""
     SITE.mkdir(parents=True, exist_ok=True)
-    try:
-        html = changelog_live_html()
-    except Exception:
-        html = _page(cards_html="", chips_html="",
-                     empty_msg="Live view unavailable — reload in a moment.")
+    html = _page(cards_html="", chips_html="",
+                 empty_msg="Live view unavailable — reload in a moment.")
     (SITE / "engineering-changelog.html").write_text(html, encoding="utf-8")
-    print("Wrote site/engineering-changelog.html")
+    print("Wrote site/engineering-changelog.html (static fallback)")
 
 
 _CSS = r"""

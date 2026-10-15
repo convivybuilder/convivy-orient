@@ -130,6 +130,19 @@ def test_nav_component_whoami_placeholder():
     assert "__WHOAMI__" in html
 
 
+def test_nav_component_scope_line_placeholder_full_tier_only():
+    """The scope chip (E19·5, issue_01M35K5PC5W3SS3495105WW7BF) is full-tier
+    only — server.py fills it per request in `_substitute_viewer_tokens` — and
+    the contractor tier, a separate security boundary (ARCH-228), carries
+    neither the chip nor its token at all."""
+    full = ds.nav_component("/", tier="full")
+    assert "__SCOPE_LINE__" in full
+    assert "scope-chip" in full
+    contractor = ds.nav_component("/", tier="contractor")
+    assert "__SCOPE_LINE__" not in contractor
+    assert "scope-chip" not in contractor
+
+
 def test_nav_component_hides_full_only_for_contractor():
     html = ds.nav_component("/", tier="contractor")
     assert "Dashboards" not in html

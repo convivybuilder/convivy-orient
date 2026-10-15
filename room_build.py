@@ -34,10 +34,30 @@ render at most nothing. Doc bodies render client-side through the vendored
 marked + DOMPurify pipeline (ARCH-244); the landing note and per-entry notes are
 member/agent-authored text, so they go through DOMPurify too.
 
+AN `item` OR `signal` ENTRY (CQ·147/148, E22) is resolved live on every render,
+the same way a `doc` entry is: `library_client.get_issue_item`/`get_signal` is
+called fresh each time, so a work item's state is always what the Library
+reports at THIS render, never a value cached from curation time. Either kind
+renders only when the viewer is full tier AND the record's product is in
+`products` (the viewer's own Library-resolved scope, `room_api._in_scope` —
+the same check `room_api._clean_entries` already applies at write time, not a
+second implementation of it). An entry outside that grant contributes nothing
+to the payload at all: not its title, not its id, not its body — the same
+wall `docs_by_id` already is for a `doc` entry. A contractor's grant has no
+item/signal half (room_api.py), so this loop never calls the Library for one
+at all. A work item renders its title, state, specification and latest
+activity (its most recent comment, if any); an Archives entry renders its
+body, source and date. Every piece of free text — a specification, a
+comment body, a signal body — goes through the same marked + DOMPurify path
+the notes do; a title/state/source/date is plain text, rendered the same way
+a doc title already is (`textContent`, never `innerHTML`).
+
 There is deliberately NO static fallback (contrast the ARCH-182 full-tier pages):
 a per-member static file would be a cross-member leak if fallback selection ever
 picked the wrong one, so a render failure returns a plain 500 (server.py), never
-another member's room.
+another member's room. `get_issue_item`/`get_signal` raise on any Library
+failure but a 404 (library_client.py), so a Library outage mid-render surfaces
+the same plain 500 rather than a room silently missing one member's work item.
 """
 from __future__ import annotations
 
@@ -50,12 +70,14 @@ from types import SimpleNamespace
 from sqlalchemy import select
 
 import design_system as ds
+import library_client
 import orient_time
 from access_identity import tier_for
 from build import DOMPURIFY_JS, MARKED_JS
 from control_db import session
 from kb_index import entitled_docs
 from models import ReadingRoom
+from room_api import _in_scope
 
 _PAGE_CSS = """
 .room-wrap { display:grid; grid-template-columns:300px 1fr; gap:2rem; align-items:start; }
@@ -121,6 +143,10 @@ _PAGE_CSS = """
 .doc-body th, .doc-body td { padding:8px 14px; border-bottom:1px solid var(--line);
                              vertical-align:top; }
 .doc-body tbody tr:last-child td { border-bottom:0; }
+.item-state { color:var(--ink-2); font-weight:600; margin:0 0 14px; }
+.item-activity { margin-top:24px; padding-top:16px; border-top:1px solid var(--line); }
+.item-activity-who { font-size:.82rem; color:var(--ink-3); margin:0 0 .4rem; }
+.signal-meta { color:var(--ink-3); font-size:.85rem; margin-top:16px; }
 @media (max-width:820px){ .room-wrap { grid-template-columns:1fr; } .room-side { position:static; max-height:none; } }
 """
 
@@ -136,8 +162,8 @@ def _load_room(email: str) -> tuple[SimpleNamespace | None, list[dict]]:
         if room is None:
             return None, None
         entries = [{
-            "doc_id": e.doc_id, "section": e.section or "", "position": e.position,
-            "note": e.note or "", "pinned": bool(e.pinned),
+            "kind": e.kind, "doc_id": e.doc_id, "section": e.section or "",
+            "position": e.position, "note": e.note or "", "pinned": bool(e.pinned),
         } for e in room.entries]
         # Copy the scalar fields out before the session closes — a plain carrier,
         # not a live ORM row.
@@ -203,6 +229,26 @@ def _in_brief_window(doc: dict, cutoff: str) -> bool:
     return date == "" or date >= cutoff
 
 
+def _latest_activity(item: library_client.IssueRecord) -> dict | None:
+    """The work item's most recent comment, for the room payload, or None when
+    it has none. `get_issue_item` fills `item.comments` in chronological order
+    (oldest first, the same order `issue_build._thread` relies on to keep "the
+    most recent of the rest" with a plain `[-limit:]` slice), so the last
+    element is the latest one."""
+    comments = list(getattr(item, "comments", None) or [])
+    if not comments:
+        return None
+    c = comments[-1]
+    return {"actor": c.actor, "body": c.body, "at": c.at.isoformat() if c.at else None}
+
+
+def _signal_label(sig: library_client.SignalRecord) -> str:
+    """A short nav-list label for an Archives entry — it carries no title of
+    its own (unlike a doc or a work item), so this names it by what it is
+    rather than leaving the button blank."""
+    return f"{sig.kind} ({sig.source})"
+
+
 def live_html(email: str, products: frozenset[str]) -> str:
     """Render the caller's Reading Room. `products` is the caller's own
     Library-resolved project scope (server.py resolves it once per request,
@@ -217,35 +263,86 @@ def live_html(email: str, products: frozenset[str]) -> str:
     # are ever loaded, so an entry outside the grant has no body to embed.
     docs_by_id = {d["id"]: d for d in entitled_docs(email, products)}
 
-    # Intersect curation with grant: an entry whose doc_id is not entitled is
-    # dropped here and never reaches the payload — the render can surface at most
-    # the member's own grant. Grouping and ordering happen below.
-    surviving = [e for e in entries if e["doc_id"] in docs_by_id]
-    curated_ids = {e["doc_id"] for e in surviving}
+    # Resolve every entry by kind, live, on every render — never cached from
+    # curation time, so a work item's state and an Archives entry's body are
+    # always what the Library answers for THIS render. A `doc` entry is
+    # intersected with the grant above, as always. An `item`/`signal` entry is
+    # read from the Library and kept only when the viewer is full tier AND the
+    # record's own product is in `products` (the viewer's Library-resolved
+    # scope) — `room_api._in_scope`, the same per-kind check room_api.py
+    # already applies at write time, reused rather than re-derived. The tier
+    # check is checked first so a contractor's render never calls the Library
+    # for either kind at all — their grant has no item/signal half. An entry
+    # that fails either check is simply dropped: it contributes nothing to
+    # `resolved`, so none of its title, id or body ever reaches the payload.
+    full = tier == "full"
+    resolved: list[tuple[dict, str, object]] = []
+    for e in entries:
+        kind = e["kind"]
+        if kind == "doc":
+            doc = docs_by_id.get(e["doc_id"])
+            if doc is not None:
+                resolved.append((e, "doc", doc))
+        elif kind == "item" and full:
+            item = library_client.get_issue_item(e["doc_id"])
+            if item is not None and _in_scope(item.product, products):
+                resolved.append((e, "item", item))
+        elif kind == "signal" and full:
+            sig = library_client.get_signal(e["doc_id"])
+            if sig is not None and _in_scope(sig.product, products):
+                resolved.append((e, "signal", sig))
+
+    # Only `doc` entries feed the Briefs rule below — an item/signal entry
+    # cannot be a brief and must not suppress one.
+    curated_ids = {e["doc_id"] for e, kind, _ in resolved if kind == "doc"}
 
     # Sections render in CURATION order — the order they first appear in the room's
     # entries (which arrive id-ordered, i.e. the seed/edit order) — NOT alphabetically,
     # so "Start here" leads and the curator controls the sequence. Within a section,
     # order by position (then doc_id) so a curator can reorder without touching others.
+    # A section mixes kinds freely: that's the DoD's "one section, each in its
+    # own form".
     section_order: list[str] = []
     by_section: dict[str, list] = {}
-    for e in surviving:
+    for e, kind, record in resolved:
         if e["section"] not in by_section:
             by_section[e["section"]] = []
             section_order.append(e["section"])
-        by_section[e["section"]].append(e)
+        by_section[e["section"]].append((e, kind, record))
 
     sections: list[dict] = []
     docs_payload: dict[str, dict] = {}
+    items_payload: dict[str, dict] = {}
+    signals_payload: dict[str, dict] = {}
     for name in section_order:
         out_entries = []
-        for e in sorted(by_section[name], key=lambda e: (e["position"], e["doc_id"])):
-            doc = docs_by_id[e["doc_id"]]
-            out_entries.append({
-                "docId": e["doc_id"], "title": doc["title"], "kind": doc["kind"],
-                "note": e["note"], "pinned": e["pinned"],
-            })
-            docs_payload[e["doc_id"]] = {"title": doc["title"], "body": doc["body"]}
+        for e, kind, record in sorted(by_section[name], key=lambda t: (t[0]["position"], t[0]["doc_id"])):
+            if kind == "doc":
+                out_entries.append({
+                    "docId": e["doc_id"], "title": record["title"], "kind": record["kind"],
+                    "entryKind": "doc", "note": e["note"], "pinned": e["pinned"],
+                })
+                docs_payload[e["doc_id"]] = {"title": record["title"], "body": record["body"]}
+            elif kind == "item":
+                out_entries.append({
+                    "docId": e["doc_id"], "title": record.title, "entryKind": "item",
+                    "note": e["note"], "pinned": e["pinned"],
+                })
+                items_payload[e["doc_id"]] = {
+                    "title": record.title, "state": record.state,
+                    "specification": record.specification or "",
+                    "latestActivity": _latest_activity(record),
+                }
+            else:  # signal
+                out_entries.append({
+                    "docId": e["doc_id"], "title": _signal_label(record), "entryKind": "signal",
+                    "note": e["note"], "pinned": e["pinned"],
+                })
+                when = record.produced_at or record.ingested_at
+                signals_payload[e["doc_id"]] = {
+                    "body": record.body, "source": record.source,
+                    "date": when.isoformat() if when else None,
+                }
         sections.append({"name": name, "entries": out_entries})
 
     # The standing Briefs section (ARCH-372). Drawn from the grant, so it cannot
@@ -276,7 +373,7 @@ def live_html(email: str, products: frozenset[str]) -> str:
         for doc in brief_docs:
             out_entries.append({
                 "docId": doc["id"], "title": doc["title"], "kind": doc["kind"],
-                "note": "", "pinned": False,
+                "entryKind": "doc", "note": "", "pinned": False,
             })
             docs_payload[doc["id"]] = {"title": doc["title"], "body": doc["body"]}
         briefs_section = {"name": "Briefs", "entries": out_entries, "standing": True}
@@ -300,6 +397,8 @@ def live_html(email: str, products: frozenset[str]) -> str:
         "landingNote": room.landing_note or "",
         "sections": sections,
         "docs": docs_payload,
+        "items": items_payload,
+        "signals": signals_payload,
     }, ensure_ascii=False).replace("</", "<\\/")
 
     title = escape(room.title or "Reading Room")
@@ -333,6 +432,48 @@ function md(src) {{ return DOMPurify.sanitize(marked.parse(src || "")); }}
   const side = document.getElementById("roomSide");
   const main = document.getElementById("roomMain");
   let firstBtn = null;
+  // Each kind renders in its own form (DoD): a doc shows its body; a work
+  // item its title, state, specification and latest activity; an Archives
+  // entry its body, source and date. Built with createElement/textContent
+  // rather than string interpolation, so a title or state cannot smuggle
+  // markup in — the same discipline the nav-list buttons above already use.
+  function renderEntry(en) {{
+    main.innerHTML = "";
+    const article = document.createElement("article");
+    article.className = "doc-body";
+    if (en.entryKind === "item") {{
+      const rec = ROOM.items[en.docId] || {{}};
+      const h = document.createElement("h2"); h.textContent = rec.title || ""; article.appendChild(h);
+      const state = document.createElement("p"); state.className = "item-state";
+      state.textContent = "State: " + (rec.state || "");
+      article.appendChild(state);
+      const spec = document.createElement("div");
+      spec.innerHTML = md(rec.specification || "");
+      article.appendChild(spec);
+      if (rec.latestActivity) {{
+        const act = document.createElement("div"); act.className = "item-activity";
+        const who = document.createElement("p"); who.className = "item-activity-who";
+        who.textContent = "Latest activity — " + rec.latestActivity.actor;
+        act.appendChild(who);
+        const activityBody = document.createElement("div");
+        activityBody.innerHTML = md(rec.latestActivity.body || "");
+        act.appendChild(activityBody);
+        article.appendChild(act);
+      }}
+    }} else if (en.entryKind === "signal") {{
+      const rec = ROOM.signals[en.docId] || {{}};
+      const body = document.createElement("div");
+      body.innerHTML = md(rec.body || "");
+      article.appendChild(body);
+      const meta = document.createElement("p"); meta.className = "signal-meta";
+      meta.textContent = (rec.source || "") + (rec.date ? " — " + rec.date : "");
+      article.appendChild(meta);
+    }} else {{
+      const doc = ROOM.docs[en.docId] || {{}};
+      article.innerHTML = md(doc.body);
+    }}
+    main.appendChild(article);
+  }}
   ROOM.sections.forEach(function(sec) {{
     const wrap = document.createElement("div");
     wrap.className = "room-section";
@@ -354,8 +495,7 @@ function md(src) {{ return DOMPurify.sanitize(marked.parse(src || "")); }}
       btn.addEventListener("click", function() {{
         document.querySelectorAll(".room-entry.on").forEach(function(b){{ b.classList.remove("on"); }});
         btn.classList.add("on");
-        const doc = ROOM.docs[en.docId] || {{}};
-        main.innerHTML = '<article class="doc-body">' + md(doc.body) + '</article>';
+        renderEntry(en);
         main.scrollIntoView({{block: "start", behavior: "smooth"}});
       }});
       wrap.appendChild(btn);

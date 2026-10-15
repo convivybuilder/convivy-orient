@@ -2,8 +2,8 @@
 
 `md-serial.js`, `render.js` and `editor.js` are byte-for-byte copies of
 `scripts/md-serial/` in the `convivy/knowledge` repository, at commit
-`d31622cbaeb4fb0e637b61beffbf05842b83e56d` (md-serial's own last change there is
-`867daf16`). md-serial is MIT-licensed and has no dependencies.
+`a2dfdd200fbf7ba2667a65e27e71f220b44ad107` (md-serial's own last change there is
+`ff373c3d`, merged by knowledge#895). md-serial is MIT-licensed and has no dependencies.
 
 Orient holds no clone of that repository, so the knowledge-base editor
 (`kb_editor.py`) loads these copies from `/editor/js/<name>`, a full-tier route in

@@ -67,7 +67,7 @@ def _no_real_agentctl(monkeypatch):
     fixed file by default; `_run` raises for anything that gets past it. The
     seam tests below restore the real `read_document` and fake `_run` instead."""
     monkeypatch.setattr(kb_commit, "read_document",
-                        lambda doc_id, *, actor: kb_commit.StoredDocument(
+                        lambda doc_id, *, holder: kb_commit.StoredDocument(
                             content=_STORED_FILE, content_sha="sha-stored"))
 
     def refuse(agentctl, args):
@@ -205,8 +205,8 @@ def test_checkout_succeeds_for_a_full_tier_kb_writer(client, monkeypatch):
 def test_checkout_returns_the_stored_file_and_its_sha(client, monkeypatch):
     seen = {}
 
-    def fake_read(doc_id, *, actor):
-        seen["args"] = (doc_id, actor)
+    def fake_read(doc_id, *, holder):
+        seen["args"] = (doc_id, holder)
         return kb_commit.StoredDocument(content=_STORED_FILE, content_sha="sha-at-open")
 
     monkeypatch.setattr(library_client, "checkout_reference_document",
@@ -235,7 +235,7 @@ def test_an_unreadable_document_fails_the_checkout_and_gives_the_lock_back(
     than left for its TTL."""
     checked_in = []
 
-    def unreadable(doc_id, *, actor):
+    def unreadable(doc_id, *, holder):
         raise exc
 
     monkeypatch.setattr(library_client, "checkout_reference_document",
@@ -251,7 +251,7 @@ def test_an_unreadable_document_fails_the_checkout_and_gives_the_lock_back(
 
 
 def test_a_failed_checkin_does_not_replace_the_read_failure(client, monkeypatch):
-    def unreadable(doc_id, *, actor):
+    def unreadable(doc_id, *, holder):
         raise kb_commit.CommitFailed("could not fetch origin/main")
 
     def checkin_down(doc_id, *, holder):
@@ -275,7 +275,7 @@ def test_a_held_document_is_not_read(client, monkeypatch):
 
     monkeypatch.setattr(library_client, "checkout_reference_document", fake_checkout)
     monkeypatch.setattr(kb_commit, "read_document",
-                        lambda doc_id, *, actor: read.append(doc_id))
+                        lambda doc_id, *, holder: read.append(doc_id))
     r = client.post(f"/api/kb/documents/{DOC}/checkout", headers=_human("mem@example.com"))
     assert r.status_code == 409
     assert read == []
@@ -428,7 +428,7 @@ def _ready_to_commit(monkeypatch, ident="mem@example.com"):
     monkeypatch.setattr(library_client, "check_reference_admission",
                         lambda fm, *, owner: library_client.AdmissionResult(may_land=True, errors=[]))
     monkeypatch.setattr(kb_commit, "commit_document",
-                        lambda doc_id, *, body, actor, base_sha, assertion: None)
+                        lambda doc_id, *, body, actor, holder, base_sha, assertion: None)
 
 
 def test_a_successful_save_reports_saved_and_checked_in(client, monkeypatch):
@@ -480,7 +480,7 @@ def test_a_502_save_writes_its_cause_to_stderr(client, monkeypatch, capsys):
     monkeypatch.setattr(library_client, "check_reference_admission",
                         lambda fm, *, owner: library_client.AdmissionResult(may_land=True, errors=[]))
 
-    def refused(doc_id, *, body, actor, base_sha, assertion):
+    def refused(doc_id, *, body, actor, holder, base_sha, assertion):
         raise kb_commit.CommitFailed(
             "kb apply: refused - target exists-6183\nsave failed in FORGED LINE")
 
@@ -522,7 +522,7 @@ def test_save_reports_a_failed_admission_and_does_not_attempt_commit(client, mon
 
     committed = []
     monkeypatch.setattr(kb_commit, "commit_document",
-                        lambda doc_id, *, body, actor, base_sha, assertion: committed.append(1))
+                        lambda doc_id, *, body, actor, holder, base_sha, assertion: committed.append(1))
 
     r = client.post(f"/api/kb/documents/{DOC}/save", headers=_human("mem@example.com"),
                     json={"content_sha": _OPEN_SHA, "body": _SOME_VALID_BODY})
@@ -554,7 +554,7 @@ def test_save_reports_each_commit_failure_as_its_own_outcome(client, monkeypatch
     monkeypatch.setattr(library_client, "checkin_reference_document",
                         lambda doc_id, *, holder: checkin_calls.append(1))
 
-    def raise_it(doc_id, *, body, actor, base_sha, assertion):
+    def raise_it(doc_id, *, body, actor, holder, base_sha, assertion):
         raise exc
 
     monkeypatch.setattr(kb_commit, "commit_document", raise_it)
@@ -574,7 +574,7 @@ def test_an_expired_access_session_tells_the_human_to_reload(client, monkeypatch
     monkeypatch.setattr(library_client, "check_reference_admission",
                         lambda fm, *, owner: library_client.AdmissionResult(may_land=True, errors=[]))
 
-    def expired(doc_id, *, body, actor, base_sha, assertion):
+    def expired(doc_id, *, body, actor, holder, base_sha, assertion):
         raise kb_commit.CommitAuthExpired("(expired)")
 
     monkeypatch.setattr(kb_commit, "commit_document", expired)
@@ -595,7 +595,7 @@ def test_a_save_forwards_the_requests_own_access_assertion(client, monkeypatch):
     monkeypatch.setattr(library_client, "checkin_reference_document",
                         lambda doc_id, **k: _checkout_row())
     monkeypatch.setattr(kb_commit, "commit_document",
-                        lambda doc_id, *, body, actor, base_sha, assertion:
+                        lambda doc_id, *, body, actor, holder, base_sha, assertion:
                         seen.update(assertion=assertion))
     headers = {**_human("mem@example.com"), access_identity.JWT_HEADER: "header.assertion.sig"}
     r = client.post(f"/api/kb/documents/{DOC}/save", headers=headers,
@@ -630,7 +630,7 @@ def test_monitor_mode_refuses_a_save_before_anything_runs(client, monkeypatch):
     monkeypatch.setattr(library_client, "check_reference_admission",
                         lambda fm, *, owner: touched.append("admission"))
     monkeypatch.setattr(kb_commit, "commit_document",
-                        lambda doc_id, *, body, actor, base_sha, assertion: touched.append("commit"))
+                        lambda doc_id, *, body, actor, holder, base_sha, assertion: touched.append("commit"))
     r = client.post(f"/api/kb/documents/{DOC}/save", headers=_human("mem@example.com"),
                     json={"content_sha": _OPEN_SHA, "body": _SOME_VALID_BODY})
     assert r.status_code == 503
@@ -657,7 +657,7 @@ def test_save_builds_admission_frontmatter_from_the_submitted_body(client, monke
 
     monkeypatch.setattr(library_client, "check_reference_admission", fake_admission)
     monkeypatch.setattr(kb_commit, "commit_document",
-                        lambda doc_id, *, body, actor, base_sha, assertion: None)
+                        lambda doc_id, *, body, actor, holder, base_sha, assertion: None)
     monkeypatch.setattr(library_client, "checkin_reference_document",
                         lambda doc_id, *, holder: _checkout_row())
 
@@ -694,7 +694,7 @@ def test_save_admission_sees_a_body_that_widens_its_own_audience(client, monkeyp
 
     monkeypatch.setattr(library_client, "check_reference_admission", fake_admission)
     monkeypatch.setattr(kb_commit, "commit_document",
-                        lambda doc_id, *, body, actor, base_sha, assertion: None)
+                        lambda doc_id, *, body, actor, holder, base_sha, assertion: None)
     monkeypatch.setattr(library_client, "checkin_reference_document",
                         lambda doc_id, *, holder: _checkout_row())
 
@@ -726,7 +726,7 @@ def test_save_fails_closed_when_the_body_has_no_frontmatter_block(client, monkey
                         lambda fm, *, owner: admission_calls.append(fm))
     committed = []
     monkeypatch.setattr(kb_commit, "commit_document",
-                        lambda doc_id, *, body, actor, base_sha, assertion: committed.append(1))
+                        lambda doc_id, *, body, actor, holder, base_sha, assertion: committed.append(1))
 
     r = client.post(f"/api/kb/documents/{DOC}/save", headers=_human("mem@example.com"),
                     json={"content_sha": _OPEN_SHA, "body": "just plain markdown, no frontmatter at all"})
@@ -748,7 +748,7 @@ def test_save_fails_closed_when_the_frontmatter_is_malformed(client, monkeypatch
                         lambda fm, *, owner: admission_calls.append(fm))
     committed = []
     monkeypatch.setattr(kb_commit, "commit_document",
-                        lambda doc_id, *, body, actor, base_sha, assertion: committed.append(1))
+                        lambda doc_id, *, body, actor, holder, base_sha, assertion: committed.append(1))
 
     r = client.post(f"/api/kb/documents/{DOC}/save", headers=_human("mem@example.com"),
                     json={"content_sha": _OPEN_SHA, "body": "---\njust a scalar, not a mapping\n---\n\ncontent\n"})
@@ -778,7 +778,7 @@ def test_save_admission_sees_a_crlf_body_that_widens_its_own_audience(client, mo
 
     monkeypatch.setattr(library_client, "check_reference_admission", fake_admission)
     monkeypatch.setattr(kb_commit, "commit_document",
-                        lambda doc_id, *, body, actor, base_sha, assertion: None)
+                        lambda doc_id, *, body, actor, holder, base_sha, assertion: None)
     monkeypatch.setattr(library_client, "checkin_reference_document",
                         lambda doc_id, *, holder: _checkout_row())
 
@@ -811,7 +811,7 @@ def test_save_admission_sees_a_mixed_line_ending_body(client, monkeypatch):
 
     monkeypatch.setattr(library_client, "check_reference_admission", fake_admission)
     monkeypatch.setattr(kb_commit, "commit_document",
-                        lambda doc_id, *, body, actor, base_sha, assertion: None)
+                        lambda doc_id, *, body, actor, holder, base_sha, assertion: None)
     monkeypatch.setattr(library_client, "checkin_reference_document",
                         lambda doc_id, *, holder: _checkout_row())
 
@@ -860,7 +860,7 @@ def test_save_fails_closed_when_a_field_has_the_wrong_type(client, monkeypatch, 
                         lambda fm, *, owner: admission_calls.append(fm))
     committed = []
     monkeypatch.setattr(kb_commit, "commit_document",
-                        lambda doc_id, *, body, actor, base_sha, assertion: committed.append(1))
+                        lambda doc_id, *, body, actor, holder, base_sha, assertion: committed.append(1))
 
     fm = dict(_WELL_SHAPED_FM)
     fm[field] = bad_value
@@ -887,7 +887,7 @@ def test_save_fails_closed_when_a_list_field_contains_a_non_string_element(
                         lambda fm, *, owner: admission_calls.append(fm))
     committed = []
     monkeypatch.setattr(kb_commit, "commit_document",
-                        lambda doc_id, *, body, actor, base_sha, assertion: committed.append(1))
+                        lambda doc_id, *, body, actor, holder, base_sha, assertion: committed.append(1))
 
     fm = dict(_WELL_SHAPED_FM)
     fm[field] = ["team", 5]
@@ -915,7 +915,7 @@ def test_save_admission_sees_well_shaped_values_unchanged(client, monkeypatch):
 
     monkeypatch.setattr(library_client, "check_reference_admission", fake_admission)
     monkeypatch.setattr(kb_commit, "commit_document",
-                        lambda doc_id, *, body, actor, base_sha, assertion: None)
+                        lambda doc_id, *, body, actor, holder, base_sha, assertion: None)
     monkeypatch.setattr(library_client, "checkin_reference_document",
                         lambda doc_id, *, holder: _checkout_row())
 
@@ -943,7 +943,7 @@ def test_save_forwards_an_explicitly_empty_frontmatter_mapping_unchanged(client,
 
     monkeypatch.setattr(library_client, "check_reference_admission", fake_admission)
     monkeypatch.setattr(kb_commit, "commit_document",
-                        lambda doc_id, *, body, actor, base_sha, assertion: None)
+                        lambda doc_id, *, body, actor, holder, base_sha, assertion: None)
     monkeypatch.setattr(library_client, "checkin_reference_document",
                         lambda doc_id, *, holder: _checkout_row())
 
@@ -1224,7 +1224,7 @@ def test_a_document_with_an_unquoted_date_saves_and_is_committed_byte_identical(
                         lambda doc_id: _checkout_row(holder="mem@example.com"))
     _json_admission(monkeypatch, sent)
     monkeypatch.setattr(kb_commit, "commit_document",
-                        lambda doc_id, *, body, actor, base_sha, assertion: committed.append(body))
+                        lambda doc_id, *, body, actor, holder, base_sha, assertion: committed.append(body))
     monkeypatch.setattr(library_client, "checkin_reference_document",
                         lambda doc_id, **k: _checkout_row())
 
@@ -1254,8 +1254,10 @@ def test_a_save_names_the_checkout_holder_as_the_admission_owner(client, monkeyp
     monkeypatch.setattr(library_client, "get_reference_checkout",
                         lambda doc_id: _checkout_row(holder="mem@example.com"))
     monkeypatch.setattr(library_client, "_request", fake_request)
+    holders = []
     monkeypatch.setattr(kb_commit, "commit_document",
-                        lambda doc_id, *, body, actor, base_sha, assertion: None)
+                        lambda doc_id, *, body, actor, holder, base_sha, assertion:
+                        holders.append(holder))
     monkeypatch.setattr(library_client, "checkin_reference_document",
                         lambda doc_id, **k: _checkout_row())
 
@@ -1266,6 +1268,9 @@ def test_a_save_names_the_checkout_holder_as_the_admission_owner(client, monkeyp
     assert r.status_code == 200, r.text
     assert len(bodies) == 1
     assert bodies[0]["owner"] == "mem@example.com"
+    # agentctl's lease is taken under the same holder the Library recorded,
+    # unchanged (agent-platform#889), so both locks name one person.
+    assert holders == ["mem@example.com"]
     assert bodies[0]["frontmatter"]["id"] == "proj/kind/doc-1"
 
 
@@ -1281,7 +1286,7 @@ def test_a_save_whose_frontmatter_names_another_document_is_refused(client, monk
     monkeypatch.setattr(library_client, "check_reference_admission",
                         lambda fm, *, owner: calls.append("admission"))
     monkeypatch.setattr(kb_commit, "commit_document",
-                        lambda doc_id, *, body, actor, base_sha, assertion: calls.append("commit"))
+                        lambda doc_id, *, body, actor, holder, base_sha, assertion: calls.append("commit"))
 
     other = _DATED_FILE.replace("id: proj/kind/doc-1", "id: proj/kind/doc-2")
     r = client.post(f"/api/kb/documents/{DOC}/save", headers=_human("mem@example.com"),
@@ -1343,7 +1348,7 @@ def test_a_last_reviewed_that_is_not_a_date_or_string_is_a_422_naming_the_field(
                         lambda doc_id: _checkout_row(holder="mem@example.com"))
     monkeypatch.setattr(library_client, "_request", lambda *a, **k: reached.append("admission"))
     monkeypatch.setattr(kb_commit, "commit_document",
-                        lambda doc_id, *, body, actor, base_sha, assertion: reached.append("commit"))
+                        lambda doc_id, *, body, actor, holder, base_sha, assertion: reached.append("commit"))
     body = f"---\nid: {DOC}\nlast_reviewed: {raw}\n---\n\nx\n"
 
     r = client.post(f"/api/kb/documents/{DOC}/save", headers=_human("mem@example.com"),
@@ -1394,7 +1399,7 @@ def test_a_frontmatter_alias_is_a_422_naming_aliases_and_reaches_nothing(
                         lambda doc_id: _checkout_row(holder="mem@example.com"))
     monkeypatch.setattr(library_client, "_request", lambda *a, **k: reached.append("admission"))
     monkeypatch.setattr(kb_commit, "commit_document",
-                        lambda doc_id, *, body, actor, base_sha, assertion: reached.append("commit"))
+                        lambda doc_id, *, body, actor, holder, base_sha, assertion: reached.append("commit"))
     body = f"---\nid: {DOC}\n{frontmatter}---\n\nx\n"
 
     r = client.post(f"/api/kb/documents/{DOC}/save", headers=_human("mem@example.com"),
@@ -1493,7 +1498,7 @@ def test_a_checkout_the_member_already_holds_is_adopted_and_opens_the_editor(
                         lambda doc_id, *, holder: beats.append((doc_id, holder))
                         or _checkout_row(holder=holder))
     monkeypatch.setattr(kb_commit, "read_document",
-                        lambda doc_id, *, actor: reads.append((doc_id, actor))
+                        lambda doc_id, *, holder: reads.append((doc_id, holder))
                         or kb_commit.StoredDocument(content=_STORED_FILE,
                                                     content_sha="sha-at-open"))
 
@@ -1514,7 +1519,7 @@ def test_a_checkout_held_by_someone_else_is_still_read_only(client, monkeypatch)
     monkeypatch.setattr(library_client, "heartbeat_reference_checkout",
                         lambda doc_id, *, holder: beats.append(holder))
     monkeypatch.setattr(kb_commit, "read_document",
-                        lambda doc_id, *, actor: reads.append(doc_id))
+                        lambda doc_id, *, holder: reads.append(doc_id))
 
     r = client.post(f"/api/kb/documents/{DOC}/checkout", headers=_human("mem@example.com"))
 
@@ -1550,7 +1555,7 @@ def test_a_lock_that_cannot_be_refreshed_is_not_reported_as_opened(client, monke
     monkeypatch.setattr(library_client, "checkin_reference_document",
                         lambda doc_id, *, holder: checkins.append(holder))
     monkeypatch.setattr(kb_commit, "read_document",
-                        lambda doc_id, *, actor: reads.append(doc_id))
+                        lambda doc_id, *, holder: reads.append(doc_id))
 
     r = client.post(f"/api/kb/documents/{DOC}/checkout", headers=_human("mem@example.com"))
 
@@ -1587,7 +1592,7 @@ def test_an_adopted_lock_is_left_held_when_the_file_cannot_be_read(client, monke
     monkeypatch.setattr(library_client, "checkin_reference_document",
                         lambda doc_id, *, holder: checkins.append(holder))
 
-    def unreadable(doc_id, *, actor):
+    def unreadable(doc_id, *, holder):
         raise kb_commit.CommitFailed("could not fetch origin/main")
 
     monkeypatch.setattr(kb_commit, "read_document", unreadable)

@@ -1159,6 +1159,134 @@ def get_signal(signal_id: str) -> SignalRecord | None:
 
 
 @dataclass
+class FinishedRunCost:
+    """One finished run's `meta.cost` (CQ·154, issue_01M4ZBBQK0KFH9YQ16MNK75HJT).
+    `usd` is normalized to a float or `None`; `tokens` and `by_model` are
+    carried through raw rather than typed further — this read's only
+    consumer is `cost_rollup_by_project`, which needs `usd` alone, and typing
+    a shape nothing here uses would be a guess at a wire contract this module
+    hasn't actually been asked to serve yet."""
+
+    usd: float | None
+    tokens: object
+    by_model: object
+
+
+@dataclass
+class FinishedRun:
+    """One finished dispatched run, read from a `model_resolution` signal
+    (CQ·154): the Library's record of a run `agentctl` dispatched, carrying
+    the fields the crew view, Home and the dashboards' cost figures need.
+    `product` is the signal's own `product` field — already the run's
+    canonical project, unlike the raw `repo` string `dashboard_build.
+    _canon_product` has to fold for the legacy scorecard ledger.
+
+    No `persona`/`work_item`/`outcome` reader lives in this repo yet — CQ·153
+    (crew attribution, the run list, session activity) still reads run
+    directories for those, waiting on the Bosun's record to carry `crew`,
+    `purpose` and `duration`. They're read here because the signal already
+    carries them and a partial record would be a second thing to remember to
+    widen later."""
+
+    signal_id: str
+    product: str
+    run: str | None
+    persona: str | None
+    repo: str | None
+    work_item: str | None
+    model: str | None
+    cost: FinishedRunCost | None
+    outcome: str | None
+    produced_at: dt.datetime | None
+    ingested_at: dt.datetime
+
+
+def _finished_run(sig: SignalRecord) -> FinishedRun:
+    raw_cost = sig.meta.get("cost")
+    cost = None
+    if isinstance(raw_cost, dict):
+        usd = raw_cost.get("usd")
+        cost = FinishedRunCost(
+            usd=usd if isinstance(usd, (int, float)) else None,
+            tokens=raw_cost.get("tokens"), by_model=raw_cost.get("by_model"))
+    return FinishedRun(
+        signal_id=sig.id, product=sig.product, run=sig.meta.get("run"),
+        persona=sig.meta.get("persona"), repo=sig.meta.get("repo"),
+        work_item=sig.meta.get("work_item"), model=sig.meta.get("model"),
+        cost=cost, outcome=sig.meta.get("outcome"),
+        produced_at=sig.produced_at, ingested_at=sig.ingested_at)
+
+
+def list_finished_runs(since: dt.datetime, until: dt.datetime | None = None) -> list[FinishedRun]:
+    """Every `model_resolution` signal produced in `[since, until]`, `until`
+    defaulting to now (CQ·154) — the typed read every per-project cost figure
+    on the crew view, Home and the dashboards shares, so they read one
+    record of what ran and cannot disagree about it.
+
+    **Pages newest-first and stops at the window's start, never walking the
+    whole table.** `GET /signals`'s default order (`ingested_at`) is the one
+    order the Library will keyset-walk by cursor (`_page_signals`'s own
+    docstring), and it stops on that same key: the first row ingested
+    before `since` ends the walk. That is exact, because a record is never
+    ingested before it is produced, so every row behind it was produced
+    before `since` too. Window membership is decided by `produced_at`
+    (`ingested_at` for a row missing it), so a row ingested inside the window
+    but produced before it is skipped without ending the walk.
+
+    **The offset fallback counts every row read, not every row kept.** A row
+    newer than `until` is read but dropped, so the counter driving the
+    offset-fallback page (`_page_signals`'s own `len(rows)` trick) has to be
+    rows SEEN, independent of `out` — using `len(out)` here would re-read a
+    page already seen once a single row got filtered out of it.
+    """
+    if until is None:
+        until = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+    out: list[FinishedRun] = []
+    seen = 0
+    cursor = None
+    while True:
+        params: dict = {"kind": ["model_resolution"], "limit": MAX_PAGE}
+        if cursor is None:
+            params["offset"] = seen
+        else:
+            params["cursor"] = cursor
+        page = _request("/signals", params)
+        page_rows = page["signals"]
+        seen += len(page_rows)
+        reached_since = False
+        for raw in page_rows:
+            sig = _signal_record(raw)
+            if sig.ingested_at < since:
+                reached_since = True
+                break
+            ts = sig.produced_at or sig.ingested_at
+            if since <= ts <= until:
+                out.append(_finished_run(sig))
+        if reached_since or not page["truncated"]:
+            break
+        cursor = page.get("next_cursor")
+        if not isinstance(cursor, str) or not cursor:
+            cursor = None
+    return out
+
+
+def cost_rollup_by_project(runs: list[FinishedRun]) -> dict[str, dict]:
+    """{product: {"cost_usd": float, "runs": int}}, summing `meta.cost.usd`
+    over `runs` (CQ·154) — the one place that sum happens, read by the crew
+    view, Home and the dashboards alike so they cannot disagree about it. A
+    run whose cost is unknown still counts toward `runs`, matching the
+    `cost.json`-absent-is-meaningful convention `crews_build` already applies
+    to an in-flight run's per-row cost cell."""
+    out: dict[str, dict] = {}
+    for r in runs:
+        row = out.setdefault(r.product, {"cost_usd": 0.0, "runs": 0})
+        if r.cost is not None and isinstance(r.cost.usd, (int, float)):
+            row["cost_usd"] += r.cost.usd
+        row["runs"] += 1
+    return out
+
+
+@dataclass
 class SignalFacets:
     """Aggregates over a filter's WHOLE matching set, never a page of it —
     `GET /signals/facets`'s own shape."""

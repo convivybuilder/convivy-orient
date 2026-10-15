@@ -180,6 +180,18 @@ def test_a_missing_item_is_404(client, written, monkeypatch):
     assert not written
 
 
+def test_an_out_of_scope_item_and_a_missing_one_answer_byte_identically(client, written, monkeypatch):
+    """E19·2 (issue_01M35K5AB4PRTJ71DMQW7Q4D3B): an item outside the caller's
+    scope must read exactly like one that does not exist, never a distinct
+    refusal that would confirm the item is there."""
+    out_of_scope = _post(client, _human("scoped@example.com"))
+    monkeypatch.setattr(library_client, "get_issue_item", lambda _id: None)
+    missing = _post(client, _human("scoped@example.com"))
+    assert out_of_scope.status_code == missing.status_code == 404
+    assert out_of_scope.content == missing.content
+    assert not written
+
+
 @pytest.mark.parametrize("state,expired", [("claimed", False), ("pr-open", False), ("fixed", False)])
 def test_an_item_that_is_not_queued_is_refused(client, written, monkeypatch, state, expired):
     """A run already under way keeps its model, so a choice set on an item

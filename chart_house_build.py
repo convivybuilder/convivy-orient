@@ -41,15 +41,16 @@ Reads five sources:
   each render rather than hardcoded — a project that gains a bead is picked
   up on the next render with no code change. Uncaught on failure, for the
   same reason the Course read is.
-- Cost comes from `dashboard_build.normalize()`, the same per-run fact rows
-  Spending/Cost-Performance already read from local `~/Convivy/agent-runs`
-  ledgers — summed per product over a trailing 30 days. No network calls;
-  local file reads, so this one still can't take the page down.
-  Cost attribution is broken upstream (issue_01M15C50ESYBPTDWV5FHZZXVH5):
-  most ledger rows currently carry no product, so `_cost_for` returning
-  `None` (not `$0.00`) for a project is the expected, common case, and the
-  page must never render that `None` as a zero-dollar figure — a real zero
-  and "the ledger cannot say" would otherwise look identical.
+- Cost comes from `library_client.cost_rollup_by_project`, over
+  `library_client.list_finished_runs` for the trailing 30 days (CQ·154,
+  issue_01M4ZBBQK0KFH9YQ16MNK75HJT) — the Library's own record of every
+  dispatched run, summed per product. Shared with `crews_build`'s per-crew
+  cost and Home's spend figure, so the three cannot disagree. Uncaught on
+  failure, like every other Library read on this page (module docstring).
+  `_cost_for` returning `None` (not `$0.00`) for a project with no finished
+  run in the window is the expected, common case, and the page must never
+  render that `None` as a zero-dollar figure — a real zero and "nothing ran"
+  would otherwise look identical.
 - The open-PR queue, from `merge_queue_build.cached_open_prs()` — the
   read-only cache accessor, never the fetching `_fetch_open_prs()`, so this
   page never shells out to `gh` on its own account; it rides whatever is
@@ -72,7 +73,6 @@ import build
 # A terminal epic is not awaiting anything, whatever its `maturity` still
 # says — the same state-then-maturity priority `_step_class` applies.
 from control_db import ISSUE_TERMINAL
-import dashboard_build
 import design_system as ds
 import issue_build
 import library_client
@@ -96,53 +96,41 @@ _MERGE_SCAN_CAP = 2000
 
 
 def _cost_rollup() -> dict[str, dict]:
-    """{product: {"cost_usd": float, "runs": int}} over the trailing WINDOW_DAYS,
-    from the same fact rows Spending/Cost-Performance read — local file reads,
-    no network."""
-    cutoff = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=WINDOW_DAYS)).date().isoformat()
-    out: dict[str, dict] = {}
-    for f in dashboard_build.normalize():
-        if (f.get("date") or "") < cutoff:
-            continue
-        product = f.get("product") or "—"
-        row = out.setdefault(product, {"cost_usd": 0.0, "runs": 0})
-        cost = f.get("cost_usd")
-        if isinstance(cost, (int, float)):
-            row["cost_usd"] += cost
-        row["runs"] += 1
-    return out
+    """{product: {"cost_usd": float, "runs": int}} over the trailing
+    WINDOW_DAYS, from the Library's finished-run records (CQ·154,
+    issue_01M4ZBBQK0KFH9YQ16MNK75HJT) — the same rollup `crews_build`'s
+    per-crew cost and Home's spend figure read, so this page cannot disagree
+    with either."""
+    since = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None) - dt.timedelta(days=WINDOW_DAYS)
+    return library_client.cost_rollup_by_project(library_client.list_finished_runs(since))
 
 
 # Known cases where a Course's `product` key doesn't match the cost ledger's
-# canonicalized product name 1:1 (review finding, PR #190). Two distinct
-# causes, both hand-maintained here the same way `dashboard_build._canon_product`
-# itself hand-maintains `_NYH_DISPLAY` — "an explicit table rather than a
-# prefix match... a new building should appear as itself or not at all":
-#   - "selector" spans two real GitHub repos (convivy/selector and
-#     convivy/selector-backend, confirmed live 2026-08-21); _canon_product
-#     doesn't fold the second into the first, so its runs report under
-#     "selector-backend" and would otherwise never match "selector".
-#   - "nyh-studio" isn't a live Course product today, but the alias is kept
-#     for the same reason it was added: _canon_product deliberately SPLITS
-#     an umbrella name into per-property buckets, summed back here since this
-#     page shows one row per product, not per property.
-# A product absent from this table that turns out to need an alias just shows
-# no cost, same honest degrade as before this table existed — never a crash.
+# canonicalized product name 1:1 (review finding, PR #190), from the era when
+# `_cost_rollup` read `dashboard_build.normalize()`'s display-folded names
+# ("Hollis", the per-property NYH split) rather than a signal's own `product`.
+# The Library's `product` tag is already the run's canonical project (CQ·154,
+# issue_01M4ZBBQK0KFH9YQ16MNK75HJT) — not proven to still need any of these —
+# so `_cost_for` below always tries the literal name FIRST regardless of this
+# table, and this is now a set of EXTRA candidates for whatever of the old
+# display names might still show up, kept rather than deleted on an
+# unconfirmed guess about which, if any, no longer occur.
 _COST_ALIASES = {
     "hollis": ("Hollis",),
-    "selector": ("selector", "selector-backend"),
-    "nyh-studio": ("NYH Arch Tools", "East Texas Circle", "Park Villa", "nyh-studio"),
+    "selector": ("selector-backend",),
+    "nyh-studio": ("NYH Arch Tools", "East Texas Circle", "Park Villa"),
 }
 
 
 def _cost_for(name: str, rollup: dict) -> dict | None:
-    """A project's cost row, summed across every ledger product name it's
-    known to report under. None (not a zeroed row) when none of them appear
-    in the rollup, so the page can still say "no data" rather than a
-    misleading "$0.00" for a project that simply had no runs this window."""
+    """A project's cost row, summed across its own name plus every extra
+    ledger name it's known to have reported under (`_COST_ALIASES`). None
+    (not a zeroed row) when none of them appear in the rollup, so the page
+    can still say "no data" rather than a misleading "$0.00" for a project
+    that simply had no runs this window."""
     total = {"cost_usd": 0.0, "runs": 0}
     found = False
-    for n in _COST_ALIASES.get(name, (name,)):
+    for n in (name, *_COST_ALIASES.get(name, ())):
         row = rollup.get(n)
         if row:
             found = True
@@ -811,8 +799,13 @@ def _footnote_html(rows: list[dict]) -> str:
   </div>'''
 
 
-def live_html() -> str:
-    course_rows = _course_rows()
+def live_html(scope: frozenset[str] = issue_build._ALL_PRODUCTS) -> str:
+    """`scope` is the viewer's Library-resolved project scope (E19·2). The
+    Course rows and the epics awaiting approval are filtered to it before
+    anything is counted, so the tally, the signals, the cost comparison
+    ("more than the rest of the fleet combined") and the footnote describe
+    only the viewer's projects (review round 3 on PR #372)."""
+    course_rows = [r for r in _course_rows() if issue_build._in_scope(r["product"], scope)]
     bead_ids = _bead_ids()
     rollup = _cost_rollup()
     open_prs = merge_queue_build.cached_open_prs()
@@ -837,7 +830,8 @@ def live_html() -> str:
         r["dominant"] = bool(r["cost"]) and r["cost"]["cost_usd"] > (
             total_known_cost - r["cost"]["cost_usd"])
 
-    approvals_html = _approvals_html(_proposed_epics())
+    approvals_html = _approvals_html(
+        [e for e in _proposed_epics() if issue_build._in_scope(e.product, scope)])
     rows_html = "".join(_row_html(r) for r in rows) or ds.empty_state("No live Courses.")
     tally = (f'{len(rows)} project{"s" if len(rows) != 1 else ""} &middot; '
              f'{sum(r["total"] for r in rows)} steps charted &middot; '
@@ -1019,12 +1013,18 @@ def build_static() -> None:
     """Seed the static fallback (issue_01M2KVHTVFF4MAQF94M2SP6TZ0): /chart-house
     had no builder at all, the same gap /crews had — a live-render throw
     during a Library stall had nothing to fall back to and server.py returned
-    500 naming this file rather than a stale page. `live_html()` reads only
-    the Library and `merge_queue_build`'s in-memory cache (no `gh` calls), so
-    seeding is just calling it once at deploy time."""
+    500 naming this file rather than a stale page.
+
+    **Rendered for an empty scope, so it names no project.** server.py serves
+    this file to whichever viewer's live render failed, scoped or not, so a
+    snapshot of every project's Course, cost and pending epics would leak to a
+    scoped viewer (review round 5 on PR #372). It is deliberately empty, like
+    issue_build.main()'s fallbacks, and says the live view is unavailable."""
     OUT.mkdir(parents=True, exist_ok=True)
-    (OUT / "chart-house.html").write_text(live_html(), encoding="utf-8")
-    print("Wrote site/chart-house.html")
+    fallback = live_html(frozenset()).replace(
+        "<p>No live Courses.</p>", "<p>Live view unavailable — reload in a moment.</p>")
+    (OUT / "chart-house.html").write_text(fallback, encoding="utf-8")
+    print("Wrote site/chart-house.html (static fallback)")
 
 
 if __name__ == "__main__":

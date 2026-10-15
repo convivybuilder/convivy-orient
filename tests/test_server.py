@@ -22,6 +22,10 @@ import server as srv
 # THIS module, not srv — server.py only re-exports the callables its request
 # path uses.
 import access_identity as ident
+# The tailnet listener's identity source (CQ·150, E21) — same reason as
+# above: tailscale_whois resolves its own module globals (_request, _cache),
+# so a stub must target this module directly.
+import tailscale_whois
 
 # Throwaway 1024-bit RSA keypair (test-only; never a real signing key).
 N = 155618387791555344105267757618989010656302111508729641003043183980377213802200848908194388759449544112033081658622820404132486581962583919814951616322642147009506193688691752507590190471206838224368987828138305043145949320888659676409298834147118199951912009988124361150326270105447792291907437622267114791033
@@ -208,6 +212,320 @@ def test_full_emails_missing_file_grants_no_full_tier(tmp_path, monkeypatch):
     assert ident.tier_for("operator@example.com") == "contractor"
 
 
+# --- tailnet listener bind (CQ·150, E21) -------------------------------------
+
+
+def test_no_tailnet_listener_binds_loopback_only(tmp_path, monkeypatch):
+    monkeypatch.setattr(srv.tailnet_identity, "TAILNET_CONFIG", tmp_path / "does-not-exist.json")
+    assert srv._listener_binds() == [srv._LOOPBACK_BIND]
+
+
+def test_tailnet_listener_configured_adds_a_second_bind(tmp_path, monkeypatch):
+    f = tmp_path / "tailnet.json"
+    f.write_text(json.dumps({"enabled": True, "bind": "192.0.2.1", "port": 9100}))
+    monkeypatch.setattr(srv.tailnet_identity, "TAILNET_CONFIG", f)
+    assert srv._listener_binds() == [srv._LOOPBACK_BIND, ("192.0.2.1", 9100)]
+
+
+# --- tailnet listener identity (whois), end to end (CQ·150, E21) ------------
+#
+# The risk this guards: a tailnet request must be identified by whois alone
+# (never a header, Tailscale-User-Login included) and a loopback request
+# must never reach the daemon at all — the two listeners' identity sources
+# must stay as separate as the specification requires. httpx's ASGI
+# transport sets scope["server"] from each individual request's OWN url
+# (host, port), not from the TestClient's base_url (see
+# httpx._transports.asgi.ASGITransport.handle_async_request) — so a test
+# simulates a request landing on the tailnet socket by hitting an absolute
+# URL at TAILNET_BIND:TAILNET_PORT, and one landing on loopback with a plain
+# relative path, from the very same TestClient. No real second socket is
+# ever opened.
+
+TAILNET_BIND = "192.0.2.1"
+TAILNET_PORT = 8099
+
+
+def _tailnet_url(path: str) -> str:
+    return f"http://{TAILNET_BIND}:{TAILNET_PORT}{path}"
+
+
+def _stub_whois(monkeypatch, login: str | None) -> None:
+    """Stub the daemon's whois answer and reset the cache, so the next call
+    for any peer address re-dials the (stubbed) daemon rather than serving
+    a previous test's cached answer."""
+    body = None if login is None else json.dumps({"UserProfile": {"LoginName": login}}).encode()
+    monkeypatch.setattr(tailscale_whois, "_request", lambda path, **kw: body)
+    monkeypatch.setattr(tailscale_whois, "_cache", {})
+
+
+@pytest.fixture
+def tailnet_live_server(tmp_path, monkeypatch):
+    """Like `live_server`, with a tailnet listener additionally configured
+    at TAILNET_BIND:TAILNET_PORT. Home is the only page these tests need —
+    `home_build.live_html` is stubbed the same way `live_server` stubs it."""
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "home.full.html").write_text("HOME-FULL-STATIC __WHOAMI__")
+    (site / "home.contractor.html").write_text("HOME-CONTRACTOR-STATIC __WHOAMI__")
+    monkeypatch.setattr(
+        srv.home_build, "live_html",
+        lambda tier, label="", email=None, *, scope, whole_fleet:
+            f"HOME-{tier.upper()}-LIVE __WHOAMI__")
+    monkeypatch.setattr(srv.library_client, "person_scope", lambda email: frozenset({"*"}))
+    tiers = tmp_path / "tiers.json"
+    tiers.write_text(json.dumps({"full": ["person-a@example.com"]}))
+    jwtc = tmp_path / "jwt.json"
+    jwtc.write_text(json.dumps({"enforce": False}))  # monitor: the loopback side of these tests
+    tailnetc = tmp_path / "tailnet.json"
+    tailnetc.write_text(json.dumps(
+        {"enabled": True, "bind": TAILNET_BIND, "port": TAILNET_PORT}))
+    monkeypatch.setattr(srv, "SITE", site)
+    monkeypatch.setattr(ident, "TIERS", tiers)
+    monkeypatch.setattr(ident, "JWT_CONFIG", jwtc)
+    monkeypatch.setattr(srv.tailnet_identity, "TAILNET_CONFIG", tailnetc)
+    monkeypatch.setattr(srv, "ACCESS_LOG", tmp_path / "access.log")
+    monkeypatch.setattr(tailscale_whois, "_cache", {})
+    # The sockets `_serve` would have bound: the TestClient's own base URL
+    # stands in for loopback.
+    monkeypatch.setattr(srv.tailnet_identity, "_bound", {
+        ("testserver", 80): srv.tailnet_identity.LOOPBACK,
+        (TAILNET_BIND, TAILNET_PORT): srv.tailnet_identity.TAILNET,
+    })
+    with TestClient(srv.app, client=("192.0.2.9", 54321), follow_redirects=False) as client:
+        yield client
+
+
+def test_tailnet_whois_three_branches(tailnet_live_server, monkeypatch):
+    """One test, three branches, against a stubbed daemon (the work item's
+    own framing): a full-tier login renders the full-tier Home, a
+    contractor login renders the contractor Home, and a peer whois can't
+    name is refused with the status an unidentified request gets."""
+    _stub_whois(monkeypatch, "person-a@example.com")
+    r = tailnet_live_server.get(_tailnet_url("/"))
+    assert r.status_code == 200
+    assert "HOME-FULL-LIVE" in r.text
+
+    _stub_whois(monkeypatch, "teammate@example.com")
+    r = tailnet_live_server.get(_tailnet_url("/"))
+    assert r.status_code == 200
+    assert "HOME-CONTRACTOR-LIVE" in r.text
+
+    _stub_whois(monkeypatch, None)
+    r = tailnet_live_server.get(_tailnet_url("/"))
+    assert r.status_code == 403
+
+
+def test_tailnet_login_is_lowercased_like_the_access_email(tailnet_live_server, monkeypatch):
+    """tiers.json is compared lowercased, so a whois login in another case
+    must still get the full tier, as the same email does on loopback."""
+    _stub_whois(monkeypatch, "Person-A@Example.com")
+    r = tailnet_live_server.get(_tailnet_url("/"))
+    assert r.status_code == 200
+    assert "HOME-FULL-LIVE" in r.text
+
+
+def test_tailnet_identity_ignores_headers_naming_someone_else(tailnet_live_server, monkeypatch):
+    """A Tailscale-User-Login header and a Cloudflare email header each
+    naming a different person must not move the identity off the whois
+    login — this listener reads no identity header at all."""
+    _stub_whois(monkeypatch, "person-a@example.com")
+    r = tailnet_live_server.get(_tailnet_url("/"), headers={
+        "Tailscale-User-Login": "impostor@example.com",
+        srv.EMAIL_HEADER: "someone-else@example.com",
+    })
+    assert r.status_code == 200
+    assert "HOME-FULL-LIVE" in r.text
+
+
+def test_two_peer_addresses_under_one_login_get_the_same_identity_and_scope(
+        tailnet_live_server, monkeypatch):
+    """Identity is keyed on the tailnet login, never the node (E21's own
+    specification, CQ·151 clause 1): two different peer addresses whois
+    reports under the same login — a second device, a replaced machine — are
+    one identity with one project scope, not two. `tailscale_whois._cache` is
+    keyed by host alone, so two distinct peer hosts each call the stubbed
+    daemon fresh rather than one serving the other's cached answer."""
+    calls = []
+
+    def recording_scope(email):
+        calls.append(email)
+        return frozenset({"alpha", "beta"})
+
+    monkeypatch.setattr(srv.library_client, "person_scope", recording_scope)
+    _stub_whois(monkeypatch, "person-a@example.com")
+
+    r1 = tailnet_live_server.get(_tailnet_url("/"))
+    assert r1.status_code == 200 and "HOME-FULL-LIVE" in r1.text
+
+    with TestClient(srv.app, client=("192.0.2.42", 9999), follow_redirects=False) as peer_two:
+        r2 = peer_two.get(_tailnet_url("/"))
+    assert r2.status_code == 200 and "HOME-FULL-LIVE" in r2.text
+
+    # Same login both times (one identity), and `person_scope` was asked for
+    # that one login twice rather than skipped the second time (one scope).
+    assert calls == ["person-a@example.com", "person-a@example.com"]
+
+
+def test_tailnet_identity_scope_comes_from_person_scope_called_with_its_login(
+        tailnet_live_server, monkeypatch):
+    """A tailnet identity's project scope is resolved the same way a
+    Cloudflare Access identity's is (E19·1, CQ·151 clause 2):
+    `library_client.person_scope`, called with the whois login — never
+    skipped, never read from a local table. Mirrors
+    test_an_administrators_resolved_scope_is_whatever_the_library_returns_
+    for_them's own proof on the Cloudflare Access side."""
+    calls = []
+
+    def recording_scope(email):
+        calls.append(email)
+        return frozenset({"vivy"})
+
+    monkeypatch.setattr(srv.library_client, "person_scope", recording_scope)
+    _stub_whois(monkeypatch, "teammate@example.com")
+    r = tailnet_live_server.get(_tailnet_url("/"))
+    assert r.status_code == 200
+    assert calls == ["teammate@example.com"]  # resolved, with the whois login
+
+
+def test_loopback_request_never_calls_whois(tailnet_live_server, monkeypatch):
+    """A loopback request with a valid Access token must be identified by
+    the token alone, even with a tailnet listener configured — whois is
+    never dialed for it. The stub fails the test if it is called."""
+    def _boom(host, port):
+        raise AssertionError("whois must not be called for a loopback request")
+    monkeypatch.setattr(tailscale_whois, "whois", _boom)
+    r = tailnet_live_server.get("/", headers={srv.EMAIL_HEADER: "person-a@example.com"})
+    assert r.status_code == 200
+    assert "HOME-FULL-LIVE" in r.text
+
+
+def test_daemon_unreachable_refuses_tailnet_but_loopback_still_works(
+        tailnet_live_server, monkeypatch):
+    # `_request` returning None is exactly how a dead/unreachable daemon
+    # surfaces after its own OSError catch (tailscale_whois._request).
+    _stub_whois(monkeypatch, None)
+    tailnet_resp = tailnet_live_server.get(_tailnet_url("/"))
+    assert tailnet_resp.status_code == 403
+
+    loopback_resp = tailnet_live_server.get("/", headers={srv.EMAIL_HEADER: "person-a@example.com"})
+    assert loopback_resp.status_code == 200
+    assert "HOME-FULL-LIVE" in loopback_resp.text
+
+
+def test_a_socket_never_bound_is_refused(tailnet_live_server, monkeypatch):
+    """A request landing on a local address `_serve` did not bind takes
+    neither identity path: it is refused before any header is read."""
+    _stub_whois(monkeypatch, "person-a@example.com")
+    r = tailnet_live_server.get("http://192.0.2.77:8099/",
+                                headers={srv.EMAIL_HEADER: "person-a@example.com"})
+    assert r.status_code == 403
+
+
+def test_tailnet_socket_stays_tailnet_after_config_is_disabled(
+        tailnet_live_server, tmp_path, monkeypatch):
+    """Turning tailnet.json off without a restart leaves the tailnet socket
+    open, so it must keep the whois path: a forged Cloudflare email header
+    on it must not be trusted (security review, PR #381)."""
+    (tmp_path / "tailnet.json").write_text(json.dumps({"enabled": False}))
+    _stub_whois(monkeypatch, None)
+    r = tailnet_live_server.get(_tailnet_url("/"),
+                                headers={srv.EMAIL_HEADER: "person-a@example.com"})
+    assert r.status_code == 403
+
+
+def _api_request(server, headers):
+    from starlette.requests import Request
+    return Request({
+        "type": "http", "method": "POST", "path": "/api/x", "query_string": b"",
+        "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()],
+        "server": server, "client": ("192.0.2.9", 54321),
+    })
+
+
+def test_write_api_identity_on_tailnet_is_whois_never_the_header(
+        tailnet_live_server, monkeypatch):
+    """Every write router authenticates a human through
+    `api_common.resolve_identity`. On the tailnet listener that must be the
+    whois login, and a forged Cloudflare email header must name nobody
+    (security review, PR #381)."""
+    import api_common
+    forged = {srv.EMAIL_HEADER: "someone-else@example.com"}
+    tailnet = (TAILNET_BIND, TAILNET_PORT)
+
+    _stub_whois(monkeypatch, "person-a@example.com")
+    ident_ = api_common.resolve_identity(_api_request(tailnet, forged))
+    assert ident_ is not None and ident_.actor == "person-a@example.com"
+
+    _stub_whois(monkeypatch, None)
+    assert api_common.resolve_identity(_api_request(tailnet, forged)) is None
+
+    # Loopback in monitor mode still trusts the header, as before CQ·150.
+    ident_ = api_common.resolve_identity(_api_request(("testserver", 80), forged))
+    assert ident_ is not None and ident_.actor == "someone-else@example.com"
+
+    assert api_common.resolve_identity(_api_request(("192.0.2.77", 8099), forged)) is None
+
+
+_SERVE_SCRIPT = """
+import asyncio, json, os, sys
+sys.path.insert(0, os.getcwd())
+import server, tailnet_identity
+from pathlib import Path
+server._LOOPBACK_BIND = ("127.0.0.1", int(sys.argv[1]))
+cfg = Path(sys.argv[3])
+cfg.write_text(json.dumps({"enabled": True, "bind": "127.0.0.1", "port": int(sys.argv[2])}))
+tailnet_identity.TAILNET_CONFIG = cfg
+asyncio.run(server._serve())
+"""
+
+
+def _free_port() -> int:
+    import socket
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _accepts(port: int) -> bool:
+    import socket
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+            return True
+    except OSError:
+        return False
+
+
+def test_sigterm_stops_every_listener(tmp_path):
+    """With a tailnet listener configured, SIGTERM stops the whole process,
+    both listeners included, so a launchd restart does not hang. Review on
+    PR #381 asked whether the second server's signal handler starves the
+    first; uvicorn re-raises the signal to the handler it replaced."""
+    import signal
+    import subprocess
+    import sys as _sys
+    from pathlib import Path
+    loop_port, tail_port = _free_port(), _free_port()
+    proc = subprocess.Popen(
+        [_sys.executable, "-c", _SERVE_SCRIPT, str(loop_port), str(tail_port),
+         str(tmp_path / "tailnet.json")],
+        cwd=Path(srv.__file__).parent,
+        env={k: v for k, v in __import__("os").environ.items() if k != srv._WARM_ENV},
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    try:
+        deadline = time.monotonic() + 30
+        while not (_accepts(loop_port) and _accepts(tail_port)):
+            assert proc.poll() is None, proc.stderr.read().decode()
+            assert time.monotonic() < deadline, "listeners never came up"
+            time.sleep(0.1)
+        proc.send_signal(signal.SIGTERM)
+        assert proc.wait(timeout=15) is not None
+        assert not _accepts(loop_port) and not _accepts(tail_port)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+
 # --- /dashboard tier gate (in-process integration) ---------------------------
 
 
@@ -248,23 +566,56 @@ def live_server(tmp_path, monkeypatch):
         # the waiting-strip alert count to the viewer). A stub that omits it raises
         # TypeError, which the route swallows into its static fallback — so the test
         # silently stops exercising the live path instead of failing loudly.
-        lambda tier, label="", email=None: f"HOME-{tier.upper()}-LIVE __WHOAMI__")
-    monkeypatch.setattr(srv.overview_build, "live_html", lambda: "OVERVIEW-LIVE")
-    monkeypatch.setattr(srv.dashboard_build, "spending_live_html", lambda: "SPENDING-LIVE")
-    monkeypatch.setattr(srv.dashboard_build, "cost_performance_live_html", lambda: "COSTPERF-LIVE")
-    monkeypatch.setattr(srv.velocity_build, "live_html", lambda: "VELOCITY-LIVE")
-    monkeypatch.setattr(srv.code_health_build, "live_html", lambda: "HEALTH-LIVE")
-    monkeypatch.setattr(srv.kb_build, "live_html", lambda: "KB-LIVE")
-    monkeypatch.setattr(srv.alerts_build, "live_html", lambda: "ALERTS-LIVE")
+        # `scope` and `whole_fleet` are required here for the same reason: they
+        # carry the viewer's scope to Home's alert counts (E19·3).
+        lambda tier, label="", email=None, *, scope, whole_fleet:
+            f"HOME-{tier.upper()}-LIVE __WHOAMI__")
+    # /overview, /cost-performance, /activity, /engineering/merge-queue,
+    # /engineering/changelog, /engineering/e2e, /products/release-notes,
+    # /security, /warrant and /kb now take the viewer's project scope too
+    # (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M) — stubbed here to accept and
+    # ignore it, like the other scoped routes this fixture already stubs.
+    monkeypatch.setattr(srv.overview_build, "live_html", lambda scope, whole_fleet: "OVERVIEW-LIVE")
+    # /spending, /velocity, /health, /alerts now take the viewer's project
+    # scope (E19·3, issue_01M35K5EAZD85FBYXEBQVRKVZV) — stubbed here to accept
+    # and ignore it, like the other routing/tier/role tests this fixture backs.
+    monkeypatch.setattr(srv.dashboard_build, "spending_live_html",
+                        lambda scope, whole_fleet: "SPENDING-LIVE")
+    monkeypatch.setattr(srv.dashboard_build, "cost_performance_live_html",
+                        lambda scope, whole_fleet: "COSTPERF-LIVE")
+    monkeypatch.setattr(srv.velocity_build, "live_html", lambda scope, whole_fleet: "VELOCITY-LIVE")
+    monkeypatch.setattr(srv.code_health_build, "live_html", lambda scope: "HEALTH-LIVE")
+    monkeypatch.setattr(srv.kb_build, "live_html", lambda scope, whole_fleet: "KB-LIVE")
+    monkeypatch.setattr(srv.alerts_build, "live_html", lambda scope, whole_fleet: "ALERTS-LIVE")
+    monkeypatch.setattr(srv.activity_build, "live_html", lambda scope, whole_fleet: "ACTIVITY-LIVE")
+    monkeypatch.setattr(srv.merge_queue_build, "live_html",
+                        lambda scope, whole_fleet: "MERGEQUEUE-LIVE")
+    monkeypatch.setattr(srv.changelog_build, "changelog_live_html",
+                        lambda scope, whole_fleet: "CHANGELOG-LIVE")
+    monkeypatch.setattr(srv.engineering_e2e_build, "live_html",
+                        lambda scope, whole_fleet: "E2E-LIVE")
+    monkeypatch.setattr(srv.release_notes_build, "live_html",
+                        lambda scope, whole_fleet: "RELEASENOTES-LIVE")
+    monkeypatch.setattr(srv.security_build, "live_html", lambda scope, whole_fleet: "SECURITY-LIVE")
+    monkeypatch.setattr(srv.warrant_build, "live_html", lambda scope, whole_fleet: "WARRANT-LIVE")
     # Engineering pages carry __WHOAMI__ in their header (unlike the dashboards), so
     # the live render must go through the same identity substitution (ARCH-194).
-    monkeypatch.setattr(srv.engineering_build, "live_html", lambda: "ENG-LIVE __WHOAMI__")
+    # /reference now takes the viewer's scope too (E19·4,
+    # issue_01M35K5JQ7Z7MHYZGWRSB5F85M) — stubbed to accept and ignore it.
+    monkeypatch.setattr(srv.engineering_build, "live_html",
+                        lambda scope, whole_fleet: "ENG-LIVE __WHOAMI__")
     monkeypatch.setattr(srv.engineering_build, "arch_log_html", lambda: "ARCHLOG-LIVE __WHOAMI__")
-    monkeypatch.setattr(srv.roster_build, "live_html", lambda: "ROSTER-LIVE __WHOAMI__")
+    # /engineering/roster now takes the viewer's scope too (E19·4,
+    # issue_01M35K5JQ7Z7MHYZGWRSB5F85M) — stubbed to accept and ignore it.
+    monkeypatch.setattr(srv.roster_build, "live_html",
+                        lambda scope, whole_fleet: "ROSTER-LIVE __WHOAMI__")
     # issue_01M2KVHTVFF4MAQF94M2SP6TZ0: /crews and /chart-house had no builder
     # at all, so a live-render throw had no fallback to serve and 500'd.
-    monkeypatch.setattr(srv.crews_build, "live_html", lambda: "CREWS-LIVE")
-    monkeypatch.setattr(srv.chart_house_build, "live_html", lambda: "CHARTHOUSE-LIVE")
+    # /crews now takes the viewer's scope too (E19·4,
+    # issue_01M35K5JQ7Z7MHYZGWRSB5F85M) — stubbed to accept and ignore it,
+    # like the other scoped routes this fixture already stubs.
+    monkeypatch.setattr(srv.crews_build, "live_html", lambda scope, whole_fleet: "CREWS-LIVE")
+    monkeypatch.setattr(srv.chart_house_build, "live_html", lambda scope: "CHARTHOUSE-LIVE")
     # (reports_live_html and notes_live_html are gone — Reports absorbed into
     # Notes and then Notes itself retired, the operator 2026-08-26. alerts_live_html is
     # gone too — /alerts is now a plain Dashboards page, stubbed above with
@@ -277,20 +628,26 @@ def live_server(tmp_path, monkeypatch):
     # (~/.knowledge-index/index.db) rather than the control DB, so leaving it
     # live would swap one machine-only dependency for another (this machine
     # has an index; a fresh CI checkout has none).
-    monkeypatch.setattr(srv.ops_reports_build, "briefings_live_html", lambda: "BRIEFINGS-LIVE")
+    monkeypatch.setattr(srv.ops_reports_build, "briefings_live_html",
+                        lambda scope, whole_fleet: "BRIEFINGS-LIVE")
     # The queue page is control-DB-backed like the builders above, and was the
     # only one this fixture had never stubbed — so it 500'd on a fresh DB. Nothing
     # noticed until test_moved_destinations_all_terminate started walking /bugs
     # through to its destination.
-    monkeypatch.setattr(srv.issue_build, "live_html", lambda: "ISSUES-LIVE")
+    monkeypatch.setattr(srv.issue_build, "live_html", lambda scope=None: "ISSUES-LIVE")
     # Same class of gap, same discovery mechanism: /signals and its two
     # Archives siblings (Library-backed, ARCH-349/archives_build.py) were
     # never stubbed either, so their /archives destinations 500'd the moment
     # issue_01M1A678RA8CVDNNMZC6777NNA's rename made
     # test_moved_destinations_all_terminate walk them for the first time.
-    monkeypatch.setattr(srv.signals_build, "live_html", lambda: "SIGNALS-LIVE")
-    monkeypatch.setattr(srv.archives_build, "prs_live_html", lambda: "PRS-LIVE")
-    monkeypatch.setattr(srv.archives_build, "changelogs_live_html", lambda: "CHANGELOGS-LIVE")
+    # /archives and its two siblings now take the viewer's scope too (E19·4,
+    # issue_01M35K5JQ7Z7MHYZGWRSB5F85M) — stubbed to accept and ignore it.
+    monkeypatch.setattr(srv.signals_build, "live_html",
+                        lambda scope, whole_fleet: "SIGNALS-LIVE")
+    monkeypatch.setattr(srv.archives_build, "prs_live_html",
+                        lambda scope, whole_fleet: "PRS-LIVE")
+    monkeypatch.setattr(srv.archives_build, "changelogs_live_html",
+                        lambda scope, whole_fleet: "CHANGELOGS-LIVE")
     # The viewer's project scope (E19·1, issue_01M35K54QHJYYPXWS28YWEHJP3),
     # resolved beside the identity gate on every request. Stubbed broad here
     # — "*", the administrator's own answer — since this fixture's tests
@@ -322,7 +679,7 @@ def test_one_signal_has_a_page_at_its_own_url(live_server, monkeypatch):
     so a long body had no reachable form on the site at all."""
     seen = {}
 
-    def _detail(signal_id, *, viewer_tier):
+    def _detail(signal_id, *, viewer_tier, scope, whole_fleet):
         seen["id"] = signal_id
         seen["tier"] = viewer_tier
         return f"SIGNAL-PAGE {signal_id} __WHOAMI__"
@@ -404,7 +761,7 @@ def test_a_known_project_has_a_page_at_its_own_url(live_server, monkeypatch):
     PRs and recent commits, all readable without waiting on the Library."""
     seen = {}
 
-    def _detail(name):
+    def _detail(name, scope, whole_fleet):
         seen["name"] = name
         return f"PROJECT-PAGE {name} __WHOAMI__"
 
@@ -417,7 +774,7 @@ def test_a_known_project_has_a_page_at_its_own_url(live_server, monkeypatch):
 
 
 def test_an_unknown_project_name_is_a_404_not_a_500(live_server, monkeypatch):
-    monkeypatch.setattr(srv.project_build, "detail_html", lambda name: None)
+    monkeypatch.setattr(srv.project_build, "detail_html", lambda name, scope, whole_fleet: None)
     code, _ = _get(live_server, "/projects/not-a-real-project", "operator@example.com")
     assert code == 404
 
@@ -425,7 +782,7 @@ def test_an_unknown_project_name_is_a_404_not_a_500(live_server, monkeypatch):
 def test_a_project_page_render_failure_is_a_500_not_a_stale_snapshot(live_server, monkeypatch):
     """A per-project page has no static fallback; serving some other snapshot
     would render one project's URL as a different project's state."""
-    def _boom(name):
+    def _boom(name, scope, whole_fleet):
         raise RuntimeError("gh down")
 
     monkeypatch.setattr(srv.project_build, "detail_html", _boom)
@@ -437,7 +794,7 @@ def test_a_project_page_leaks_nothing_to_a_contractor(live_server, monkeypatch):
     """Full-tier only, like /engineering/merge-queue — this shells out to `gh`."""
     called = []
     monkeypatch.setattr(srv.project_build, "detail_html",
-                        lambda name: called.append(name) or "PAGE")
+                        lambda name, scope, whole_fleet: called.append(name) or "PAGE")
     code, _ = _get(live_server, "/projects/vivy", "emily@example.com")
     assert code == 404
     assert called == []
@@ -454,7 +811,7 @@ def test_one_document_has_a_page_at_its_own_url(live_server, monkeypatch):
     read went through /reference's whole bundle instead."""
     seen = {}
 
-    def _detail(doc_id):
+    def _detail(doc_id, scope, whole_fleet):
         seen["id"] = doc_id
         return f"DOC-PAGE {doc_id} __WHOAMI__"
 
@@ -469,7 +826,8 @@ def test_one_document_has_a_page_at_its_own_url(live_server, monkeypatch):
 
 
 def test_an_unknown_document_id_is_a_404_not_a_500(live_server, monkeypatch):
-    monkeypatch.setattr(srv.reference_doc_build, "detail_html", lambda doc_id: None)
+    monkeypatch.setattr(srv.reference_doc_build, "detail_html",
+                        lambda doc_id, scope, whole_fleet: None)
     code, _ = _get(live_server, "/reference/doc/proj/kind/nope", "operator@example.com")
     assert code == 404
 
@@ -480,7 +838,7 @@ def test_a_document_page_builder_bug_is_a_500_not_a_stale_snapshot(live_server, 
     catches a Library failure internally and renders ds.error_state instead
     of raising, so this route's except-block is defense against a genuine
     bug rather than the expected degrade path."""
-    def _boom(doc_id):
+    def _boom(doc_id, scope, whole_fleet):
         raise RuntimeError("unexpected bug")
 
     monkeypatch.setattr(srv.reference_doc_build, "detail_html", _boom)
@@ -493,7 +851,7 @@ def test_a_document_page_leaks_nothing_to_a_contractor(live_server, monkeypatch)
     tier 404 cannot be told from a nonexistent id."""
     called = []
     monkeypatch.setattr(srv.reference_doc_build, "detail_html",
-                        lambda doc_id: called.append(doc_id) or "PAGE")
+                        lambda doc_id, scope, whole_fleet: called.append(doc_id) or "PAGE")
     code, _ = _get(live_server, "/reference/doc/proj/kind/doc-1", "emily@example.com")
     assert code == 404
     assert called == []
@@ -518,7 +876,7 @@ def test_signals_substitutes_can_capture_by_role(live_server, tmp_path, monkeypa
     }))
     monkeypatch.setattr(srv.authz, "ROLES", roles)
     monkeypatch.setattr(srv.signals_build, "live_html",
-                        lambda: 'SIGNALS-PAGE data-can-capture="__CAN_CAPTURE__"')
+                        lambda scope, whole_fleet: 'SIGNALS-PAGE data-can-capture="__CAN_CAPTURE__"')
     code, text = _get(live_server, "/archives", "k@example.com")
     assert code == 200 and 'data-can-capture="true"' in text
     code, text = _get(live_server, "/archives", "obs@example.com")
@@ -530,9 +888,11 @@ def test_health_substitutes_can_alerts_write_by_role(live_server, tmp_path, monk
     alert-threshold write form on /health, /spending and /kb the same way
     __CAN_POLICY_WRITE__ gates policy's: "true" for a role holding
     alerts_policy_write (admin-only), "false" for one that does not
-    (contractor). All three pages render through `_full_only_routes()`,
-    so this one substitution — proven here on /health — covers every one of
-    them; alerts_policy_api's own gate is the actual wall."""
+    (contractor). All three pages pass through `_substitute_viewer_tokens`,
+    /kb from `_full_only_routes()` and /health and /spending from the
+    scoped-dashboard block, so this one substitution — proven here on
+    /health — covers every one of them; alerts_policy_api's own gate is the
+    actual wall."""
     (tmp_path / "tiers.json").write_text(json.dumps(
         {"full": ["admin2@example.com", "contractor2@example.com"]}))
     roles = tmp_path / "roles.json"
@@ -542,7 +902,7 @@ def test_health_substitutes_can_alerts_write_by_role(live_server, tmp_path, monk
     }))
     monkeypatch.setattr(srv.authz, "ROLES", roles)
     monkeypatch.setattr(srv.code_health_build, "live_html",
-                        lambda: 'HEALTH-PAGE data-can-alerts-write="__CAN_ALERTS_WRITE__"')
+                        lambda scope: 'HEALTH-PAGE data-can-alerts-write="__CAN_ALERTS_WRITE__"')
     code, text = _get(live_server, "/health", "admin2@example.com")
     assert code == 200 and 'data-can-alerts-write="true"' in text
     code, text = _get(live_server, "/health", "contractor2@example.com")
@@ -611,11 +971,61 @@ def test_full_only_pages_render_live(live_server):
         assert code == 200 and marker in body, path
 
 
-def test_engineering_pages_render_live_and_substitute_whoami(live_server):
+def test_dashboards_gate_fleet_figures_on_scope_not_role(live_server, tmp_path, monkeypatch):
+    """/spending, /velocity, /health, /alerts (E19·3, issue_01M35K5EAZD85FBYXEBQVRKVZV)
+    each take the viewer's own Library-resolved scope, and, where a figure
+    can't be scoped at all, whether that scope covers every registry project.
+    The roles are inverted on purpose: the admin holds one project and the
+    member holds them all, so a role branch would fail both assertions."""
+    (tmp_path / "tiers.json").write_text(json.dumps(
+        {"full": ["member@example.com", "admin@example.com"]}))
+    roles = tmp_path / "roles.json"
+    roles.write_text(json.dumps({
+        "member@example.com": {"role": "member"},
+        "admin@example.com": {"role": "admin"},
+    }))
+    monkeypatch.setattr(srv.authz, "ROLES", roles)
+    registry = tmp_path / "projects.json"
+    registry.write_text(json.dumps({"_meta": {}, "_products": {}, "_scopes": {},
+                                    "alpha": {}, "beta": {}}))
+    monkeypatch.setattr(srv.crew_registry, "REGISTRY", registry)
+    scopes = {"admin@example.com": frozenset({"alpha"}),
+              "member@example.com": frozenset({"alpha", "beta"})}
+    monkeypatch.setattr(srv.library_client, "person_scope", lambda email: scopes[email])
+    seen = {}
+
+    def _record(key, marker):
+        def recorder(*args):
+            seen[key] = args
+            return marker
+        return recorder
+
+    monkeypatch.setattr(srv.dashboard_build, "spending_live_html", _record("spending", "S"))
+    monkeypatch.setattr(srv.velocity_build, "live_html", _record("velocity", "V"))
+    monkeypatch.setattr(srv.code_health_build, "live_html", _record("health", "H"))
+    monkeypatch.setattr(srv.alerts_build, "live_html", _record("alerts", "A"))
+
+    for path in ("/spending", "/velocity", "/health", "/alerts"):
+        _get(live_server, path, "admin@example.com")
+    assert seen["spending"] == (frozenset({"alpha"}), False)
+    assert seen["velocity"] == (frozenset({"alpha"}), False)
+    assert seen["health"] == (frozenset({"alpha"}),)
+    assert seen["alerts"] == (frozenset({"alpha"}), False)
+
+    for path in ("/spending", "/velocity", "/alerts"):
+        _get(live_server, path, "member@example.com")
+    assert seen["spending"] == (frozenset({"alpha", "beta"}), True)
+    assert seen["velocity"] == (frozenset({"alpha", "beta"}), True)
+    assert seen["alerts"] == (frozenset({"alpha", "beta"}), True)
+
+
+def test_engineering_pages_render_live_and_substitute_whoami(live_server, monkeypatch):
     # ARCH-194: the KB browse + ARCH log render live AND get the __WHOAMI__
     # identity substitution (regression — the full-only path used to skip it).
     # They live under /reference since the Memory IA move (ARCH-355) and the
-    # issue_01M1A678RA8CVDNNMZC6777NNA rename off /memory.
+    # issue_01M1A678RA8CVDNNMZC6777NNA rename off /memory. The ARCH log renders
+    # only for a whole-fleet scope (E19·4); its gate has its own test.
+    monkeypatch.setattr(srv.crew_registry, "covers_every_project", lambda scope: True)
     for path, marker in [("/reference", "ENG-LIVE"),
                          ("/reference/arch-log", "ARCHLOG-LIVE")]:
         code, body = _get(live_server, path, email="operator@example.com")
@@ -655,11 +1065,13 @@ def test_no_redirect_in_moved_is_a_loop():
         f"path is both a redirect source and destination (loop): {sorted(sources & destinations)}"
 
 
-def test_moved_destinations_all_terminate(live_server):
+def test_moved_destinations_all_terminate(live_server, monkeypatch):
     """The table-level check above cannot see a destination that is missing
     entirely. Walk every redirect for real and require a rendered page at the
     end — this is what would have caught the ARCH-357 orphaning, where a path
-    redirected somewhere that never rendered the content."""
+    redirected somewhere that never rendered the content. The viewer is
+    whole-fleet so the ARCH log, a redirect destination, renders (E19·4)."""
+    monkeypatch.setattr(srv.crew_registry, "covers_every_project", lambda scope: True)
     for old in srv._MOVED:
         r = live_server.get(old, headers={srv.EMAIL_HEADER: "operator@example.com"})
         assert r.status_code == 302, (old, r.status_code)
@@ -736,9 +1148,13 @@ def test_every_full_only_route_404s_for_contractor(live_server):
     where `/crews` began rendering one crew's activity to whoever can load the
     page — a disclosure the Library bounds on the assumption that this gate is
     the audience wall."""
-    routes = srv._full_only_routes()
-    assert routes, "no full-only routes — the map or its accessor moved"
-    for path in routes:
+    # E19·3 and E19·4 moved every page that needs the viewer's scope out of
+    # the map into SCOPED_DASHBOARDS, SCOPED_ROUTES and the ARCH log's own
+    # block, so the walk covers each source by name; each still needs the
+    # same refusal.
+    assert srv.SCOPED_DASHBOARDS and srv.SCOPED_ROUTES, "a scoped-route tuple moved"
+    for path in [*srv._full_only_routes(), *srv.SCOPED_DASHBOARDS, *srv.SCOPED_ROUTES,
+                 "/reference/arch-log"]:
         code, _ = _get(live_server, path, email="emily@example.com")
         assert code == 404, path
 
@@ -819,7 +1235,7 @@ def test_a_live_render_response_carries_no_render_header(live_server):
 
 
 def test_a_stale_fallback_is_logged_to_access_log(live_server, monkeypatch):
-    def boom():
+    def boom(scope, whole_fleet):
         raise RuntimeError("data file corrupt")
     monkeypatch.setattr(srv.dashboard_build, "cost_performance_live_html", boom)
     live_server.get("/cost-performance", headers={srv.EMAIL_HEADER: "operator@example.com"})
@@ -833,7 +1249,7 @@ def test_home_falls_back_with_the_render_header_too(live_server, monkeypatch):
     # the home route has its own fallback branch (per-tier static bundles),
     # separate from the generic _full_only_routes dispatcher above — pinned
     # independently rather than assumed to share the same fix.
-    def boom(tier, label="", email=None):
+    def boom(*_a, **_k):
         raise RuntimeError("home data broken")
     monkeypatch.setattr(srv.home_build, "live_html", boom)
     r = live_server.get("/", headers={srv.EMAIL_HEADER: "operator@example.com"})
@@ -843,11 +1259,11 @@ def test_home_falls_back_with_the_render_header_too(live_server, monkeypatch):
 
 
 def test_alerts_falls_back_with_the_render_header_too(live_server, monkeypatch):
-    # /alerts renders through the generic _full_only_routes dispatcher, like
-    # every other Dashboards page (it carries no per-viewer state, unlike the
-    # old /engineering/alerts) — pinned the same way spending/cost-performance
-    # are, above.
-    def boom():
+    # /alerts renders through its own explicit block now (E19·3,
+    # issue_01M35K5EAZD85FBYXEBQVRKVZV — it needs the viewer's scope, which
+    # the generic _full_only_routes dispatcher can't pass), but keeps the same
+    # live-render-with-static-fallback shape pinned here.
+    def boom(scope, whole_fleet):
         raise RuntimeError("alerts data broken")
     monkeypatch.setattr(srv.alerts_build, "live_html", boom)
     r = live_server.get("/alerts", headers={srv.EMAIL_HEADER: "operator@example.com"})
@@ -863,7 +1279,7 @@ def test_a_no_fallback_render_failure_is_logged_too(live_server, monkeypatch):
     """The pages with no static fallback already answered a visible 500 — this
     pins that the exception itself is now logged too, not just the fact of a
     failure. Blockers has no site/*.html fallback file at all."""
-    def boom():
+    def boom(scope=None):
         raise RuntimeError("issue store unreachable")
     monkeypatch.setattr(srv.issue_build, "live_html_blockers", boom)
     r = live_server.get("/engineering/blockers", headers={srv.EMAIL_HEADER: "operator@example.com"})
@@ -926,8 +1342,18 @@ def test_every_access_line_ends_with_the_servers_time_in_ms(live_server, monkeyp
 
 def test_activity_nodes_serves_one_tree_to_the_full_tier_only(live_server, tmp_path, monkeypatch):
     """issue_01M388E7WD8C83T5430YS88EJG: /activity fetches a session's tree
-    on expand. Full tier gets it; a contractor and an unknown id get 404."""
+    on expand. Full tier gets it; a contractor and an unknown id get 404.
+
+    The fixture's own `person_scope` stub answers "*" for every email — a
+    sentinel for "every project" that `crew_registry.covers_every_project`
+    cannot itself resolve against a real registry (E19·4,
+    issue_01M35K5JQ7Z7MHYZGWRSB5F85M: this is the first test in this file to
+    exercise a REAL, non-stubbed scope-sensitive builder end to end, rather
+    than a fixed-string stub that never looked at `whole_fleet`), so it is
+    patched directly here to make good on that sentinel's own intent.
+    """
     import activity_build
+    monkeypatch.setattr(srv.crew_registry, "covers_every_project", lambda scope: True)
     f = tmp_path / "sessions.json"
     f.write_text(json.dumps({"sessions": [{"session_id": "s-1", "nodes": [{"agent": "w"}]}]}))
     monkeypatch.setattr(activity_build, "ACTIVITY_FILE", f)
@@ -939,6 +1365,22 @@ def test_activity_nodes_serves_one_tree_to_the_full_tier_only(live_server, tmp_p
     assert "w" not in r.text
     r = live_server.get("/activity/nodes?id=nope", headers={srv.EMAIL_HEADER: "operator@example.com"})
     assert r.status_code == 404
+
+
+def test_activity_nodes_answers_an_empty_scope_like_a_contractor(live_server, tmp_path, monkeypatch):
+    """E19·5: /activity shows an empty-scope viewer the no-projects page, so
+    its JSON endpoint must not hand them a session's tree either. They get
+    the contractor's 404, body included."""
+    import activity_build
+    f = tmp_path / "sessions.json"
+    f.write_text(json.dumps({"sessions": [{"session_id": "s-1", "nodes": [{"agent": "w"}]}]}))
+    monkeypatch.setattr(activity_build, "ACTIVITY_FILE", f)
+    contractor = live_server.get("/activity/nodes?id=s-1", headers={srv.EMAIL_HEADER: "emily@example.com"})
+    monkeypatch.setattr(srv.library_client, "person_scope", lambda email: frozenset())
+    r = live_server.get("/activity/nodes?id=s-1", headers={srv.EMAIL_HEADER: "operator@example.com"})
+    assert r.status_code == 404
+    assert r.content == contractor.content
+    assert "nodes" not in r.text
 
 
 def test_a_page_route_is_logged_exactly_once(live_server):
@@ -971,7 +1413,7 @@ def test_crew_runs_page_renders_live_and_passes_query_params_through(live_server
     their own query-carrying dynamic pages."""
     seen = {}
 
-    def _runs_html(query):
+    def _runs_html(query, scope, whole_fleet):
         seen["query"] = query
         return "CREW-RUNS-LIVE __WHOAMI__"
 
@@ -991,7 +1433,7 @@ def test_crew_runs_page_404s_for_contractor(live_server):
 
 def test_crew_runs_page_render_failure_is_a_500_with_no_static_fallback(
         live_server, monkeypatch):
-    def boom(query):
+    def boom(query, scope, whole_fleet):
         raise RuntimeError("agent-runs corpus unreadable")
     monkeypatch.setattr(srv.crews_build, "runs_html", boom)
     r = live_server.get("/crews/runs", headers={srv.EMAIL_HEADER: "operator@example.com"})
@@ -1009,7 +1451,7 @@ def test_policy_page_renders_live_and_passes_query_params_through(live_server, m
     zero-argument call can't carry."""
     seen = {}
 
-    def _live_html(query):
+    def _live_html(query, scope, whole_fleet):
         seen["query"] = query
         return "POLICY-LIVE __WHOAMI__"
 
@@ -1033,7 +1475,7 @@ def test_policy_page_render_failure_is_a_500_with_no_static_fallback(
     one copy of a deny-list this page is built not to hold — and must be
     visibly different (a 500) from a successful render that found nothing
     explicitly denied."""
-    def boom(query):
+    def boom(query, scope, whole_fleet):
         raise RuntimeError("Library unreachable")
     monkeypatch.setattr(srv.policy_build, "live_html", boom)
     r = live_server.get("/engineering/policy?agent=scout&crew=vivy&model=claude-sonnet-5",
@@ -1128,7 +1570,7 @@ def test_overview_hidden_from_contractor(live_server):
 
 
 def test_home_falls_back_to_static_on_live_error(live_server, monkeypatch):
-    def boom(tier, label=""):
+    def boom(*_a, **_k):
         raise RuntimeError("home data broken")
     monkeypatch.setattr(srv.home_build, "live_html", boom)
     code, body = _get(live_server, "/", email="operator@example.com")
@@ -1171,6 +1613,212 @@ def test_an_administrators_resolved_scope_is_whatever_the_library_returns_for_th
     code, _ = _get(live_server, "/", email="operator@example.com")
     assert code == 200
     assert calls == ["operator@example.com"]  # resolved, not skipped, for the admin
+
+
+# --- the scope line and the empty-scope page ---------------------------------
+# (E19·5, issue_01M35K5PC5W3SS3495105WW7BF)
+
+
+def test_scope_line_shows_the_viewers_own_projects_sorted(live_server, tmp_path, monkeypatch):
+    """A scoped viewer's chrome names their own projects, sorted — not every
+    registry project, since their scope doesn't cover "gamma" too."""
+    registry = tmp_path / "projects.json"
+    registry.write_text(json.dumps({"alpha": {}, "beta": {}, "gamma": {}}))
+    monkeypatch.setattr(srv.crew_registry, "REGISTRY", registry)
+    monkeypatch.setattr(srv.library_client, "person_scope",
+                        lambda email: frozenset({"beta", "alpha"}))
+    monkeypatch.setattr(srv.chart_house_build, "live_html",
+                        lambda scope: "CHARTHOUSE __WHOAMI__ __SCOPE_LINE__")
+    code, text = _get(live_server, "/chart-house", "operator@example.com")
+    assert code == 200
+    assert "__SCOPE_LINE__" not in text
+    assert "alpha, beta" in text
+
+
+def test_scope_line_reads_all_projects_when_scope_covers_the_registry(
+        live_server, tmp_path, monkeypatch):
+    registry = tmp_path / "projects.json"
+    registry.write_text(json.dumps({"alpha": {}, "beta": {}}))
+    monkeypatch.setattr(srv.crew_registry, "REGISTRY", registry)
+    monkeypatch.setattr(srv.library_client, "person_scope",
+                        lambda email: frozenset({"alpha", "beta"}))
+    monkeypatch.setattr(srv.chart_house_build, "live_html",
+                        lambda scope: "CHARTHOUSE __WHOAMI__ __SCOPE_LINE__")
+    code, text = _get(live_server, "/chart-house", "operator@example.com")
+    assert code == 200
+    assert "All projects" in text
+
+
+def test_empty_scope_gets_the_dedicated_page_not_the_normal_render(
+        live_server, monkeypatch):
+    """A full-tier viewer with no Library-granted project gets the
+    "no projects yet" page in place of whatever the route renders —
+    distinct from a 404 and from the normal body, and never the global
+    view: here the registry would answer "All projects" for the stub below,
+    but the viewer never reaches it because the empty-scope page intercepts
+    first."""
+    monkeypatch.setattr(srv.library_client, "person_scope", lambda email: frozenset())
+    monkeypatch.setattr(srv.chart_house_build, "live_html",
+                        lambda scope: "CHARTHOUSE __WHOAMI__ __SCOPE_LINE__")
+    code, text = _get(live_server, "/chart-house", "operator@example.com")
+    assert code == 200
+    assert "CHARTHOUSE" not in text
+    assert "any projects yet" in text
+    assert "No projects" in text  # the chip, on the empty-scope page's own chrome
+
+
+def test_empty_scope_gets_the_dedicated_page_on_home_too(live_server, monkeypatch):
+    """Home has no `if tier != "full"` gate to share `_require_scoped_access`
+    with every other route, so it needed its own empty-scope check — pinned
+    separately for exactly that reason."""
+    monkeypatch.setattr(srv.library_client, "person_scope", lambda email: frozenset())
+    code, text = _get(live_server, "/", "operator@example.com")
+    assert code == 200
+    assert "HOME-FULL-LIVE" not in text
+    assert "any projects yet" in text
+
+
+def test_empty_scope_page_is_not_shown_to_a_contractor(live_server, monkeypatch):
+    """A contractor's scope is resolved too (every caller gets it, E19·1), but
+    the empty-scope page is a full-tier concept — a contractor with an empty
+    scope still gets the ordinary contractor Home, not this page."""
+    monkeypatch.setattr(srv.library_client, "person_scope", lambda email: frozenset())
+    code, text = _get(live_server, "/", "emily@example.com")
+    assert code == 200
+    assert "any projects yet" not in text
+    assert "HOME-CONTRACTOR-LIVE" in text
+
+
+# Every full-tier page route with no dynamic id in its path — the fixed set
+# this epic's scope line and empty-scope page must reach. Built from the two
+# canonical tables plus the explicit blocks server.py lifted out of them
+# (E19·2/E19·3/E19·4), so a route added to a table is walked automatically;
+# a route added only as its own explicit block (as every name in the list
+# below was) is not. `test_every_discovered_route_404s_for_a_contractor` in
+# tests/test_scope_route_walk.py walks discovered routes instead. The ARCH
+# log is left out: it renders only for a whole-fleet scope, so it gets its
+# own entry in the empty-scope walk below.
+_FULL_TIER_FIXED_PATHS = (
+    list(srv._full_only_routes()) + list(srv.SCOPED_DASHBOARDS) + list(srv.SCOPED_ROUTES) +
+    ["/", "/chart-house", "/engineering/issues", "/engineering/course",
+     "/engineering/blockers", "/engineering/corrections", "/crews/runs",
+     "/engineering/policy", srv.blog_posts_build.ROUTE,
+     "/crews", "/archives", "/archives/prs", "/archives/changelogs", "/reference",
+     "/engineering/roster"])
+
+
+def test_scope_line_is_filled_on_every_full_tier_route(live_server, tmp_path, monkeypatch):
+    """Walks every full-tier page route with no dynamic id and asserts the
+    scope line renders filled, not as the raw `__SCOPE_LINE__` token — so a
+    route added later to either table inherits the substitution by
+    construction rather than by remembering to wire it."""
+    registry = tmp_path / "projects.json"
+    registry.write_text(json.dumps({"alpha": {}, "beta": {}, "gamma": {}}))
+    monkeypatch.setattr(srv.crew_registry, "REGISTRY", registry)
+    monkeypatch.setattr(srv.library_client, "person_scope",
+                        lambda email: frozenset({"alpha", "beta"}))
+    stub = "PAGE __WHOAMI__ __SCOPE_LINE__"
+
+    def _stub(*_args, **_kwargs):
+        return stub
+
+    for module, attr in [
+        (srv.signals_build, "live_html"),
+        (srv.archives_build, "prs_live_html"),
+        (srv.archives_build, "changelogs_live_html"),
+        (srv.overview_build, "live_html"),
+        (srv.dashboard_build, "cost_performance_live_html"),
+        (srv.activity_build, "live_html"),
+        (srv.security_build, "live_html"),
+        (srv.warrant_build, "live_html"),
+        (srv.kb_build, "live_html"),
+        (srv.engineering_build, "live_html"),
+        (srv.engineering_build, "arch_log_html"),
+        (srv.ops_reports_build, "briefings_live_html"),
+        (srv.roster_build, "live_html"),
+        (srv.engineering_e2e_build, "live_html"),
+        (srv.changelog_build, "changelog_live_html"),
+        (srv.merge_queue_build, "live_html"),
+        (srv.release_notes_build, "live_html"),
+        (srv.crews_build, "live_html"),
+        (srv.dashboard_build, "spending_live_html"),
+        (srv.velocity_build, "live_html"),
+        (srv.code_health_build, "live_html"),
+        (srv.alerts_build, "live_html"),
+        (srv.chart_house_build, "live_html"),
+        (srv.issue_build, "live_html"),
+        (srv.issue_build, "live_html_course"),
+        (srv.issue_build, "live_html_blockers"),
+        (srv.issue_build, "live_html_corrections"),
+        (srv.crews_build, "runs_html"),
+        (srv.policy_build, "live_html"),
+        (srv.blog_posts_build, "live_html"),
+        (srv.home_build, "live_html"),
+    ]:
+        monkeypatch.setattr(module, attr, _stub)
+
+    for path in _FULL_TIER_FIXED_PATHS:
+        code, text = _get(live_server, path, "operator@example.com")
+        assert code == 200, path
+        assert "__SCOPE_LINE__" not in text, f"{path} left the scope token unsubstituted"
+        assert "alpha, beta" in text, f"{path} did not show the viewer's scope"
+
+
+def test_empty_scope_gets_the_dedicated_page_on_every_full_tier_route(live_server, monkeypatch):
+    """Every full-tier page with no dynamic id answers a viewer with no
+    projects with the empty-scope page, and never its own render. Each
+    builder raises if reached, so a route that skipped `_require_scoped_access`
+    fails here rather than rendering for nobody's scope."""
+    monkeypatch.setattr(srv.library_client, "person_scope", lambda email: frozenset())
+
+    def _must_not_render(*_args, **_kwargs):
+        raise AssertionError("an empty scope must not reach a page builder")
+
+    for module, attr in [
+        (srv.signals_build, "live_html"), (srv.archives_build, "prs_live_html"),
+        (srv.archives_build, "changelogs_live_html"), (srv.overview_build, "live_html"),
+        (srv.dashboard_build, "cost_performance_live_html"), (srv.activity_build, "live_html"),
+        (srv.security_build, "live_html"), (srv.warrant_build, "live_html"),
+        (srv.kb_build, "live_html"), (srv.engineering_build, "live_html"),
+        (srv.engineering_build, "arch_log_html"), (srv.ops_reports_build, "briefings_live_html"),
+        (srv.roster_build, "live_html"), (srv.engineering_e2e_build, "live_html"),
+        (srv.changelog_build, "changelog_live_html"), (srv.merge_queue_build, "live_html"),
+        (srv.release_notes_build, "live_html"), (srv.crews_build, "live_html"),
+        (srv.dashboard_build, "spending_live_html"), (srv.velocity_build, "live_html"),
+        (srv.code_health_build, "live_html"), (srv.alerts_build, "live_html"),
+        (srv.chart_house_build, "live_html"), (srv.issue_build, "live_html"),
+        (srv.issue_build, "live_html_course"), (srv.issue_build, "live_html_blockers"),
+        (srv.issue_build, "live_html_corrections"), (srv.crews_build, "runs_html"),
+        (srv.policy_build, "live_html"), (srv.blog_posts_build, "live_html"),
+    ]:
+        monkeypatch.setattr(module, attr, _must_not_render)
+
+    for path in [p for p in _FULL_TIER_FIXED_PATHS if p != "/"] + ["/reference/arch-log"]:
+        code, text = _get(live_server, path, "operator@example.com")
+        assert code == 200, path
+        assert "any projects yet" in text, f"{path} did not answer an empty scope with its page"
+
+
+def test_scope_line_is_filled_on_every_dynamic_id_page(live_server, monkeypatch):
+    """The four per-id pages (an issue, a signal, a KB document, a project —
+    "the item page" the spec calls out by name) sit outside both canonical
+    route tables, so the walk above can't reach them; pinned here instead."""
+    monkeypatch.setattr(srv.library_client, "person_scope",
+                        lambda email: frozenset({"alpha", "beta"}))
+    stub = "ITEM-PAGE __WHOAMI__ __SCOPE_LINE__"
+    monkeypatch.setattr(srv.issue_build, "detail_html", lambda item_id, scope: stub)
+    monkeypatch.setattr(srv.signals_build, "detail_html", lambda signal_id, **kw: stub)
+    monkeypatch.setattr(srv.reference_doc_build, "detail_html",
+                        lambda doc_id, scope, whole_fleet: stub)
+    monkeypatch.setattr(srv.project_build, "detail_html",
+                        lambda name, scope, whole_fleet: stub)
+
+    for path in ("/engineering/issues/issue_01ABC", "/archives/sig_01ABC",
+                 "/reference/doc/proj/kind/doc-1", "/projects/vivy"):
+        code, text = _get(live_server, path, "operator@example.com")
+        assert code == 200, path
+        assert "__SCOPE_LINE__" not in text, f"{path} left the scope token unsubstituted"
+        assert "alpha, beta" in text, f"{path} did not show the viewer's scope"
 
 
 def test_no_identity_refused(live_server):
@@ -1264,7 +1912,7 @@ def test_engineering_issues_substitutes_can_log_by_role(live_server, tmp_path, m
     }))
     monkeypatch.setattr(srv.authz, "ROLES", roles)
     monkeypatch.setattr(srv.issue_build, "live_html",
-                        lambda: 'ISSUES-PAGE data-can-log="__CAN_LOG_ISSUE__"')
+                        lambda scope=None: 'ISSUES-PAGE data-can-log="__CAN_LOG_ISSUE__"')
     code, text = _get(live_server, "/engineering/issues", "m@example.com")
     assert code == 200 and 'data-can-log="true"' in text
     code, text = _get(live_server, "/engineering/issues", "k@example.com")
@@ -1363,6 +2011,31 @@ def test_every_nav_href_resolves_to_a_real_route(live_server):
                 f"nav href {href} redirects to {target}, which resolves to no route")
 
 
+# Full-tier-only routes handled in their own explicit server.py block rather
+# than through `_full_only_routes()` (E19·3, issue_01M35K5EAZD85FBYXEBQVRKVZV:
+# each now needs the viewer's own scope, which that dispatcher's zero-argument
+# call can't pass) but still full-tier-only and still due the same nav-entry
+# and contractor-leak coverage every route in that dict gets below — a route
+# moving out of the dict must not silently lose this security check.
+_MOVED_OUT_OF_FULL_ONLY_ROUTES = {"/spending", "/velocity", "/health", "/alerts",
+                                  "/crews", "/archives", "/archives/prs",
+                                  "/archives/changelogs", "/reference",
+                                  "/engineering/roster",
+                                  # E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M:
+                                  "/overview", "/cost-performance", "/activity",
+                                  "/security", "/warrant", "/kb",
+                                  "/engineering/e2e", "/engineering/changelog",
+                                  "/engineering/merge-queue",
+                                  "/products/release-notes", "/reference/briefings",
+                                  # Pre-existing gap this set never closed (E19·2,
+                                  # issue_01M35K5AB4PRTJ71DMQW7Q4D3B, noted but not
+                                  # fixed in PR #375's own body): these four left
+                                  # `_full_only_routes()` for the same reason at
+                                  # E19·2, but were never added here.
+                                  "/engineering/issues", "/chart-house",
+                                  "/engineering/course", "/engineering/corrections"}
+
+
 def _overview_card_hrefs():
     """Every dashboard route linked from a card on the grouped Overview index
     (nav-reshape spec §4) — the second real click path a route can have,
@@ -1399,7 +2072,7 @@ def test_every_full_only_route_has_a_nav_entry():
     ARCH-NNN id and engineering_build serves deep links into it. It is meant
     to keep resolving without being clickable from anywhere in the nav.
     """
-    routed = set(srv._full_only_routes()) - {"/reference/arch-log"}
+    routed = (set(srv._full_only_routes()) | _MOVED_OUT_OF_FULL_ONLY_ROUTES) - {"/reference/arch-log"}
     navigable = set(_nav_hrefs()) | _overview_card_hrefs()
     orphaned = routed - navigable
     assert not orphaned, (
@@ -1437,7 +2110,7 @@ def test_no_full_only_route_ever_appears_in_a_contractor_nav():
     renders depends on which area _active_area resolves it to.
     """
     import design_system as ds
-    full_only = set(srv._full_only_routes())
+    full_only = set(srv._full_only_routes()) | _MOVED_OUT_OF_FULL_ONLY_ROUTES
     for current in _nav_hrefs() + ["/", "/room"]:
         html = ds.nav_component(current, "contractor")
         for route in sorted(full_only):
@@ -1483,7 +2156,7 @@ def test_one_issue_has_a_page_at_the_url_it_advertises(live_server, monkeypatch)
     got this page; issues did not."""
     seen = {}
 
-    def _detail(item_id):
+    def _detail(item_id, scope=None):
         seen["id"] = item_id
         return f"ISSUE-PAGE {item_id} __WHOAMI__"
 
@@ -1502,16 +2175,29 @@ def test_a_bare_trailing_slash_on_the_issue_queue_redirects(live_server):
 
 def test_an_unknown_issue_id_is_a_404_not_a_500(live_server, monkeypatch):
     """A mistyped URL must read as missing rather than as a broken page."""
-    monkeypatch.setattr(srv.issue_build, "detail_html", lambda item_id: None)
+    monkeypatch.setattr(srv.issue_build, "detail_html", lambda item_id, scope=None: None)
     code, _ = _get(live_server, "/engineering/issues/issue_nope", "operator@example.com")
     assert code == 404
+
+
+def test_an_out_of_scope_issue_is_indistinguishable_from_a_missing_one(live_server, monkeypatch):
+    """`detail_html` returns None for BOTH (E19·2,
+    issue_01M35K5AB4PRTJ71DMQW7Q4D3B), and the route must not tell them apart —
+    the same rule test_a_customer_class_signal_is_indistinguishable_from_a_missing_one
+    pins for /archives/<id>. A distinguishable response would still confirm the
+    out-of-scope id is real, even though the page itself never renders."""
+    monkeypatch.setattr(srv.issue_build, "detail_html", lambda item_id, scope=None: None)
+    out_of_scope, missing = _get(live_server, "/engineering/issues/issue_outscope", "operator@example.com"), \
+        _get(live_server, "/engineering/issues/issue_missing", "operator@example.com")
+    assert out_of_scope[0] == missing[0] == 404
+    assert out_of_scope[1] == missing[1]      # byte-identical, no oracle
 
 
 def test_an_issue_page_render_failure_is_a_500_not_a_stale_snapshot(live_server,
                                                                     monkeypatch):
     """A per-id page has no static fallback. Falling back to the queue's snapshot
     would show one issue's URL rendering a different issue."""
-    def _boom(item_id):
+    def _boom(item_id, scope=None):
         raise RuntimeError("db down")
 
     monkeypatch.setattr(srv.issue_build, "detail_html", _boom)
@@ -1608,7 +2294,7 @@ def test_reference_substitutes_can_kb_write_by_role(live_server, tmp_path, monke
     # over in tests/test_engineering_build.py. This half is about the server
     # filling whatever the page emitted.
     monkeypatch.setattr(srv.engineering_build, "live_html",
-                        lambda: '<html><script id="data" type="application/json">'
+                        lambda scope, whole_fleet: '<html><script id="data" type="application/json">'
                                 '{"canKbWrite": "__CAN_KB_WRITE__"}</script></html>')
     code, text = _get(live_server, "/reference", "m@example.com")
     assert code == 200 and '"canKbWrite": "true"' in text
@@ -1631,7 +2317,8 @@ def test_reference_doc_page_still_substitutes_can_kb_write(live_server, tmp_path
     monkeypatch.setattr(srv.authz, "ROLES", roles)
     monkeypatch.setattr(
         srv.reference_doc_build, "detail_html",
-        lambda doc_id: '<html><body data-can-kb-write="__CAN_KB_WRITE__">__WHOAMI__</body></html>')
+        lambda doc_id, scope, whole_fleet:
+            '<html><body data-can-kb-write="__CAN_KB_WRITE__">__WHOAMI__</body></html>')
     code, text = _get(live_server, "/reference/doc/proj%2Fkind%2Fdoc-1", "m@example.com")
     assert code == 200
     assert 'data-can-kb-write="true"' in text
@@ -1664,9 +2351,9 @@ def test_the_lifted_out_card_routes_fill_can_approve_epic(
     monkeypatch.setattr(srv.authz, "ROLES", roles)
     page = '<div data-can-approve="__CAN_APPROVE_EPIC__">__WHOAMI__</div>'
     if target == "detail_html":
-        monkeypatch.setattr(srv.issue_build, target, lambda _id: page)
+        monkeypatch.setattr(srv.issue_build, target, lambda _id, scope=None: page)
     else:
-        monkeypatch.setattr(srv.issue_build, target, lambda: page)
+        monkeypatch.setattr(srv.issue_build, target, lambda scope=None: page)
     code, text = _get(live_server, path, "m@example.com")
     assert code == 200, (path, code)
     assert 'data-can-approve="true"' in text, path
@@ -1684,7 +2371,7 @@ def test_an_item_page_fills_can_set_item_model_by_role(
     roles.write_text(json.dumps({"m@example.com": {"role": role, "products": ["*"]}}))
     monkeypatch.setattr(srv.authz, "ROLES", roles)
     monkeypatch.setattr(srv.issue_build, "detail_html",
-                        lambda _id: '<section data-can-set="__CAN_SET_ITEM_MODEL__"></section>')
+                        lambda _id, scope=None: '<section data-can-set="__CAN_SET_ITEM_MODEL__"></section>')
     code, text = _get(live_server, "/engineering/issues/issue_x", "m@example.com")
     assert code == 200, code
     assert f'data-can-set="{shown}"' in text
@@ -1709,7 +2396,8 @@ def test_spending_fills_can_set_ledger_caps_by_role(
     roles.write_text(json.dumps({"m@example.com": {"role": role, "products": ["*"]}}))
     monkeypatch.setattr(srv.authz, "ROLES", roles)
     monkeypatch.setattr(srv.dashboard_build, "spending_live_html",
-                        lambda: 'SPENDING-PAGE data-can-set-ledger-caps="__CAN_SET_LEDGER_CAPS__"')
+                        lambda scope, whole_fleet:
+                        'SPENDING-PAGE data-can-set-ledger-caps="__CAN_SET_LEDGER_CAPS__"')
     code, text = _get(live_server, "/spending", "m@example.com")
     assert code == 200, code
     assert f'data-can-set-ledger-caps="{shown}"' in text
@@ -1750,7 +2438,7 @@ def test_the_corrections_page_passes_sort_through_to_the_renderer(live_server, m
     code — a 200 is what both the working and the broken version return."""
     seen = {}
 
-    def _corrections(query=None):
+    def _corrections(query=None, scope=None):
         seen["query"] = query
         return "CORRECTIONS-LIVE __WHOAMI__ __CAN_LOG_ISSUE__"
 
@@ -1772,7 +2460,7 @@ def test_the_corrections_page_still_fills_its_viewer_tokens(live_server, monkeyp
     issue" form reads it as `data-can-log`, so an unfilled token breaks the form
     rather than merely looking wrong."""
     monkeypatch.setattr(srv.issue_build, "live_html_corrections",
-                        lambda query=None: "__WHOAMI__ can-log=__CAN_LOG_ISSUE__")
+                        lambda query=None, scope=None: "__WHOAMI__ can-log=__CAN_LOG_ISSUE__")
     r = live_server.get("/engineering/corrections",
                         headers={srv.EMAIL_HEADER: "operator@example.com"})
     assert "__CAN_LOG_ISSUE__" not in r.text
@@ -1786,7 +2474,7 @@ def test_a_grouped_corrections_render_never_falls_back_to_the_flat_build(live_se
     failure instead. A grouped render that throws is a visible 500."""
     (srv.SITE / "corrections.html").write_text("CORRECTIONS-STATIC-FALLBACK")
 
-    def boom(query=None):
+    def boom(query=None, scope=None):
         raise RuntimeError("corrections data broken")
 
     monkeypatch.setattr(srv.issue_build, "live_html_corrections", boom)
@@ -1811,7 +2499,7 @@ def test_a_severity_sorted_corrections_render_never_falls_back_to_the_flat_build
     working page to whoever followed the link."""
     (srv.SITE / "corrections.html").write_text("CORRECTIONS-STATIC-FALLBACK")
 
-    def boom(query=None):
+    def boom(query=None, scope=None):
         raise RuntimeError("corrections data broken")
 
     monkeypatch.setattr(srv.issue_build, "live_html_corrections", boom)
@@ -1828,7 +2516,7 @@ def test_an_unrecognised_sort_still_gets_the_fallback_on_render_failure(
     render failure degrades to the flat static fallback like it always has."""
     (srv.SITE / "corrections.html").write_text("CORRECTIONS-STATIC-FALLBACK")
 
-    def boom(query=None):
+    def boom(query=None, scope=None):
         raise RuntimeError("corrections data broken")
 
     monkeypatch.setattr(srv.issue_build, "live_html_corrections", boom)
@@ -1870,3 +2558,23 @@ def test_the_editor_route_serves_only_its_allow_list(live_server):
                  "/editor/js/test-helpers.js", "/editor/js/kb_editor.py"):
         code, _ = _get(live_server, path, "operator@example.com")
         assert code == 404, path
+
+
+def test_arch_log_renders_only_for_a_whole_fleet_scope(live_server, tmp_path, monkeypatch):
+    """E19·4: the ARCH log's entries name projects and carry no project field,
+    so it renders only for a viewer whose scope covers every registry project.
+    A partial scope gets the contractor's 404, body included."""
+    registry = tmp_path / "projects.json"
+    registry.write_text(json.dumps({"_meta": {}, "alpha": {}, "beta": {}}))
+    monkeypatch.setattr(srv.crew_registry, "REGISTRY", registry)
+    contractor = live_server.get("/reference/arch-log", headers={srv.EMAIL_HEADER: "emily@example.com"})
+    assert contractor.status_code == 404
+
+    monkeypatch.setattr(srv.library_client, "person_scope", lambda email: frozenset({"alpha"}))
+    r = live_server.get("/reference/arch-log", headers={srv.EMAIL_HEADER: "operator@example.com"})
+    assert r.status_code == 404
+    assert r.content == contractor.content
+
+    monkeypatch.setattr(srv.library_client, "person_scope", lambda email: frozenset({"alpha", "beta"}))
+    code, body = _get(live_server, "/reference/arch-log", email="operator@example.com")
+    assert code == 200 and "ARCHLOG-LIVE" in body

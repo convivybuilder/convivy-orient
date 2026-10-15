@@ -715,7 +715,7 @@ def test_the_ledger_groups_a_correction_under_corrections_not_its_queue_id(monke
     monkeypatch.setattr(library_client, "list_issue_items", lambda: items)
     monkeypatch.setattr(library_client, "corrections_queue_ids",
                         lambda ids: asked.append(set(ids)) or {i for i in ids if i == "cq_vivy"})
-    html = db._ledger_section()
+    html = db._ledger_section(frozenset({"vivy"}), False)
     epic_rows = dict(re.findall(r"<tr><td>([^<]+)</td><td class=\"num\">(\d+)</td>",
                                 html.split("<h4>Epic</h4>")[1].split("</table>")[0]))
     assert epic_rows == {"Corrections": "2", "epic_x": "1", "(none)": "1"}
@@ -743,7 +743,7 @@ def test_the_live_page_reads_the_ledger_and_the_static_build_does_not(tmp_path, 
         for i in ("issue_a", "issue_b")]
     monkeypatch.setattr(library_client, "list_issue_items", lambda: items)
     monkeypatch.setattr(library_client, "corrections_queue_ids", lambda ids: set())
-    live = db.spending_live_html()
+    live = db.spending_live_html(frozenset({"vivy", "selector"}), True)
     assert "Recorded LLM spend by project" in live and "epic_x" in live
 
     def refuse(**_k):
@@ -751,3 +751,87 @@ def test_the_live_page_reads_the_ledger_and_the_static_build_does_not(tmp_path, 
 
     monkeypatch.setattr(library_client, "list_ledger_entries", refuse)
     assert "Recorded LLM spend by project" not in db.spending_render()
+
+
+# --- /spending scoping (E19·3, issue_01M35K5EAZD85FBYXEBQVRKVZV) -----------
+
+
+def test_spending_ledger_section_scopes_to_the_viewers_projects(monkeypatch):
+    """Definition of done: a scoped viewer's per-project spend equals the same
+    total computed over their project alone, and the page names neither the
+    other project nor its total. A viewer whose scope covers both sees both."""
+    entries = [_le(1, product="alpha", usd=10.0), _le(2, product="beta", usd=5.0)]
+    monkeypatch.setattr(library_client, "list_ledger_entries", lambda **k: entries)
+    monkeypatch.setattr(library_client, "list_ledgers", lambda: [])
+    monkeypatch.setattr(library_client, "list_issue_items", lambda: [])
+    monkeypatch.setattr(library_client, "corrections_queue_ids", lambda ids: set())
+
+    scoped = db._ledger_section(frozenset({"alpha"}), False)
+    assert "alpha" in scoped and "$10.00" in scoped
+    assert "beta" not in scoped and "$5.00" not in scoped
+
+    both = db._ledger_section(frozenset({"alpha", "beta"}), True)
+    assert "alpha" in both and "$10.00" in both
+    assert "beta" in both and "$5.00" in both
+
+
+def test_spending_ledger_rows_with_no_product_reach_only_a_whole_fleet_viewer(monkeypatch):
+    """An entry with no product belongs to no project, so a scoped viewer
+    never sees it, and a viewer whose scope covers every registry project
+    does: most of the operator's recorded spend carries no product."""
+    entries = [_le(1, product="alpha", usd=10.0), _le(2, product=None, usd=7.0)]
+    monkeypatch.setattr(library_client, "list_ledger_entries", lambda **k: entries)
+    monkeypatch.setattr(library_client, "list_ledgers", lambda: [])
+    monkeypatch.setattr(library_client, "list_issue_items", lambda: [])
+    monkeypatch.setattr(library_client, "corrections_queue_ids", lambda ids: set())
+
+    scoped = db._ledger_section(frozenset({"alpha"}), False)
+    assert "$10.00" in scoped and "$7.00" not in scoped
+
+    whole = db._ledger_section(frozenset({"alpha"}), True)
+    assert "$10.00" in whole and "$7.00" in whole
+
+
+def test_spending_account_wide_panel_needs_a_whole_fleet_scope(tmp_path, monkeypatch):
+    """`cost_panel_html`'s "Spend — all sessions" total has NO per-project
+    dimension at all (agent-cost-report's ledger carries no `product` field),
+    so there is no row to scope it by — a scoped viewer never sees it, per
+    rule 1 (a fleet total must never reach a scoped viewer). A viewer whose
+    scope covers every registry project still does."""
+    monkeypatch.setattr(db, "COST_DIR", tmp_path)
+    (tmp_path / "latest.json").write_text(json.dumps({"generated_at": "2026-09-27T00:00:00Z", "total": 1.5}))
+    monkeypatch.setattr(db.alert_policy_store, "get", lambda _k: None)
+    monkeypatch.setattr(library_client, "list_ledger_entries", lambda **k: [])
+    monkeypatch.setattr(library_client, "list_ledgers", lambda: [])
+    monkeypatch.setattr(library_client, "list_issue_items", lambda: [])
+    monkeypatch.setattr(library_client, "corrections_queue_ids", lambda ids: set())
+
+    scoped = db.spending_live_html(frozenset({"alpha"}), False)
+    assert "Spend — all sessions" not in scoped
+
+    whole = db.spending_live_html(frozenset({"alpha"}), True)
+    assert "Spend — all sessions" in whole
+
+
+def test_build_writes_an_empty_static_fallback_naming_no_project(tmp_path, monkeypatch):
+    """server.py serves site/spending.html AND site/cost-performance.html
+    to ANY viewer whose live render throws, before scope is known to this
+    file at all — so both fallbacks `build()` writes must name no project,
+    even though a real ledger might hold two (E19·3/E19·4,
+    issue_01M35K5EAZD85FBYXEBQVRKVZV / issue_01M35K5JQ7Z7MHYZGWRSB5F85M).
+    `normalize` is stubbed to a real two-project fact list to prove `build()`
+    writes the empty shell directly rather than calling it at all — the same
+    zero-argument leak 26bb079 found and fixed in
+    `archives_build.build_static()`."""
+    monkeypatch.setattr(db, "OUT", tmp_path)
+    monkeypatch.setattr(db, "normalize", lambda repos=None: [
+        {"product": "alpha", "cost_usd": 1.0, "merged": True},
+        {"product": "beta", "cost_usd": 2.0, "merged": True},
+    ])
+
+    db.build()
+
+    for name in ("spending.html", "cost-performance.html"):
+        fallback = (tmp_path / name).read_text()
+        assert "alpha" not in fallback and "beta" not in fallback
+        assert "Live view unavailable" in fallback

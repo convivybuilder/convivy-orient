@@ -1,0 +1,6 @@
+{
+  "_comment": "Template for tailnet.json, which is gitignored: copy it into ORIENT_CONFIG_ROOT as tailnet.json to bind a second listener on the tailnet (CQ·150, E21). enabled: whether to bind it at all. bind: the tailnet address to listen on (e.g. this machine's 100.x.y.z Tailscale IP) - required for enabled to take effect. port: the port to listen on there; defaults to 8099 (the loopback listener's own port) if omitted. A request on this listener is identified by asking the local Tailscale daemon who owns the connecting peer (tailscale_whois.whois) - it carries no Cloudflare Access identity and none is read from it. With no tailnet.json, or enabled=false, or a blank bind, the server binds loopback only, exactly as before this file existed. Opening the second socket needs a process restart even though this file itself is re-read per request.",
+  "enabled": false,
+  "bind": "100.x.y.z",
+  "port": 8099
+}

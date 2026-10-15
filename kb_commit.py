@@ -22,8 +22,9 @@ takes a SECOND, unrelated lease in agentctl's own store. The Library's
 from `agentctl kb checkout` too (`read_document`), and the save posts it back
 as `base_sha`. Wiring the two together is filed as
 `issue_01M0YAS4S64P5TXN7S2C17GHF6` against agent-platform and is not this
-module's job — the same holder identity is used for both, so the two leases
-are at least legible as one act by one person.
+module's job. Both leases name the same holder: the string the Library's
+checkout recorded, handed to agentctl unchanged, so the two leases read as one
+act by one person.
 
 **This second lease IS released here, on every path, success or failure** —
 the opposite of the Library checkout above. It exists only to hold
@@ -70,15 +71,6 @@ import paths
 from logutil import clean_log_field
 
 _AGENTCTL_NAME = "agentctl"
-
-# `agent-platform`'s `kb_writes.py`: `HOLDER_RE = ^[A-Za-z0-9][A-Za-z0-9:._-]{0,63}$`.
-# A verified Cloudflare Access email — the only `actor` this module is ever
-# called with — fails it outright on the `@`; agentctl refuses the whole
-# `kb checkout`/`kb apply` call before the stale-base check, before policy,
-# before anything else. `_HOLDER_UNSAFE_RE` matches everything that regex
-# does not allow, so `_holder_for` can turn any `actor` into a value the gate
-# accepts without this module needing to track that regex's exact grammar.
-_HOLDER_UNSAFE_RE = re.compile(r"[^A-Za-z0-9:._-]")
 
 # `kb_writes.content_sha` is `sha256(...).hexdigest()`: 64 lowercase hex digits.
 # A save's `base_sha` is CLIENT-SUPPLIED and becomes an argv element of `kb
@@ -156,48 +148,6 @@ class CommitFailed(CommitError):
 
 def _subprocess_env() -> dict[str, str]:
     return {k: os.environ[k] for k in _ENV_ALLOWLIST if k in os.environ}
-
-
-def _holder_for(actor: str) -> str:
-    """`actor` (a verified Cloudflare Access email) reshaped into a value
-    agentctl's `HOLDER_RE` accepts, by replacing every disallowed character
-    with `_` and capping length at 64. `operator@example.com` becomes
-    `operator_example.com` — the `@` is the only character an email carries that
-    the regex disallows, `.` is already permitted.
-
-    **Collision-free for `tiers.json`'s current `full` list — not injective
-    in general, and that is a known, accepted gap, not an oversight**
-    (security review, PR #210 round 3). The substitution is NOT collision-
-    free for Cloudflare Access emails at large: `a_b@c.example` and `a@b_c.example`
-    both reduce to `a_b_c.example`, and the 64-character cap collapses any pair
-    that differs only past that point. `commit_document` is reachable only
-    through `save_document`'s gate, which requires `tier_for(actor) ==
-    "full"`, and on this deployment `tiers.json` is a small, static,
-    hand-edited allowlist (`operator@example.com`, `contributor@example.com` at the time
-    of this review) that does not collide under this substitution — confirmed
-    by direct inspection, not assumed. The agentctl-side lease this holder
-    names is taken and released within a single `commit_document` or
-    `read_document` call, not held for an editing session, so even a real
-    collision would only let two already-authenticated, same-tier `kb.write`
-    humans confuse each other's lease/release calls for the few seconds one
-    save takes; it cannot forge a write, since `kb apply`'s `--base-sha` gate
-    is keyed off content-sha, not the holder string. Making the substitution
-    injective (e.g. appending a hash suffix of `actor` before the cap) was
-    considered and rejected: it would buy protection against only one
-    realistic trigger — the operator hand-adding a third, colliding full-tier identity
-    to a file they edit and can see in full at edit time — at the permanent
-    cost of every lease-conflict message reading a hash suffix instead of a
-    name, for every future reader. If a third full-tier identity is ever added
-    that collides with an existing one under this substitution, that call
-    should be revisited.
-
-    The real `actor` still appears in the commit message (`commit_document`
-    below); only the `--holder` value is reshaped, since that is the one
-    agentctl itself parses as an identity token rather than free text."""
-    safe = _HOLDER_UNSAFE_RE.sub("_", actor)[:64]
-    if not safe or not safe[0].isalnum():
-        safe = ("h" + safe)[:64]
-    return safe
 
 
 def _sanitize(text: str) -> str:
@@ -315,9 +265,12 @@ class StoredDocument(NamedTuple):
     content_sha: str
 
 
-def read_document(doc_id: str, *, actor: str) -> StoredDocument:
+def read_document(doc_id: str, *, holder: str) -> StoredDocument:
     """The stored file for `doc_id`, frontmatter and body together, as
     `origin/main` holds it — what the editor opens on.
+
+    `holder` is the holder the Library's checkout recorded, passed to agentctl
+    as it is (see `commit_document`).
 
     The Library's `ReferenceDocument.body` has its frontmatter stripped, and
     `kb_write_api.save_document` refuses any body that does not open with a
@@ -331,7 +284,6 @@ def read_document(doc_id: str, *, actor: str) -> StoredDocument:
     exit code alone would hand the editor an empty document. Both raise
     `CommitFailed` here: an editor opened on nothing submits nothing, and the
     member would learn that only at save time."""
-    holder = _holder_for(actor)
     agentctl = paths.resolve_tool(_AGENTCTL_NAME) or _AGENTCTL_NAME
     checkout = _checkout(agentctl, doc_id, holder)
     try:
@@ -362,8 +314,8 @@ def read_document(doc_id: str, *, actor: str) -> StoredDocument:
         _release(agentctl, doc_id, holder)
 
 
-def commit_document(doc_id: str, *, body: str, actor: str, base_sha: str,
-                    assertion: str) -> None:
+def commit_document(doc_id: str, *, body: str, actor: str, holder: str,
+                    base_sha: str, assertion: str) -> None:
     """Commit `body` as `doc_id`'s new content, authored as `actor` — the
     verified Cloudflare Access identity, never a value taken from the
     request, matching the structural guarantee `blog_api.save_draft` gives
@@ -376,8 +328,15 @@ def commit_document(doc_id: str, *, body: str, actor: str, base_sha: str,
 
     `assertion` is the request's raw `Cf-Access-Jwt-Assertion`, handed to
     `kb apply` on stdin. agentctl verifies it and records the email it
-    verified as the commit's person, so `actor` names only the lease holder
-    and the message line, never who the commit is attributed to.
+    verified as the commit's person, so `actor` names only the message line,
+    never who the commit is attributed to.
+
+    `holder` is the holder the Library's checkout on `doc_id` recorded, and
+    agentctl's lease is taken under exactly that string, so the Library and
+    agentctl agree on who holds the document. It is never reshaped: agentctl
+    accepts any holder the Library's checkout can record (agent-platform#889).
+    It refuses one carrying a line break at `kb checkout`, with exit 1, which
+    this raises as `CommitFailed`.
 
     Two `agentctl` calls, sequential: `kb checkout` to take the agentctl-side
     lease, then `kb apply` to perform the sha-gated, policy-gated, validated
@@ -395,7 +354,6 @@ def commit_document(doc_id: str, *, body: str, actor: str, base_sha: str,
         # Callers validate first (`save_document` answers 400). This is the
         # last check before the value becomes an argv element.
         raise CommitFailed("the save carries no valid base content-sha")
-    holder = _holder_for(actor)
     # Resolved once and reused for every subprocess below (paths.resolve_tool's
     # own contract) — falls back to the bare name so a deployment where
     # agentctl resolves nowhere still fails the same way it always has

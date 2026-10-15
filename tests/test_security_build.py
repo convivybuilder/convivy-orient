@@ -170,3 +170,58 @@ def test_render_no_stalled_banner_for_a_fresh_report():
     report["generated_at"] = orient_time.now().isoformat()
     html = sb.render(report)
     assert 'class="stalled-banner"' not in html
+
+
+# --- scoping (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M) ----------------------
+
+
+def test_scoped_viewer_sees_only_their_own_repo_in_by_repo(monkeypatch):
+    """`by_repo` is filtered to scope; `vivy` (in scope) renders and
+    `constance` (out of scope) does not."""
+    import crew_registry
+    monkeypatch.setattr(crew_registry, "repos_in_scope", lambda scope: frozenset({"vivy"}))
+    html = sb.render(_report(), frozenset({"some-project"}), False)
+    assert "\">vivy<" in html
+    assert "\">constance<" not in html
+
+
+def test_scoped_viewer_never_sees_the_fleet_wide_overall_or_by_model(monkeypatch):
+    """`overall` and `by_model` carry no repo dimension to filter, so they
+    are withheld entirely from a scoped viewer rather than shown fleet-wide."""
+    import crew_registry
+    monkeypatch.setattr(crew_registry, "repos_in_scope", lambda scope: frozenset({"vivy"}))
+    html = sb.render(_report(), frozenset({"some-project"}), False)
+    assert "Blocking / KLOC" not in html         # the overall statcard label
+    assert "claude-sonnet-4-6" not in html       # a by_model key
+    assert "deepseek/deepseek-chat" not in html
+
+
+def test_whole_fleet_viewer_sees_everything_unfiltered(monkeypatch):
+    import crew_registry
+    monkeypatch.setattr(crew_registry, "repos_in_scope", lambda scope: frozenset({"vivy"}))
+    html = sb.render(_report(), frozenset(), True)
+    assert "\">vivy<" in html and "\">constance<" in html
+    assert "Blocking / KLOC" in html
+
+
+def test_scoped_viewer_with_no_in_scope_repo_data_gets_a_scoped_empty_state(monkeypatch):
+    import crew_registry
+    monkeypatch.setattr(crew_registry, "repos_in_scope", lambda scope: frozenset({"no-such-repo"}))
+    html = sb.render(_report(), frozenset({"some-project"}), False)
+    assert "No security-scorecard data yet for a project in your scope" in html
+    assert "\">vivy<" not in html and "\">constance<" not in html
+
+
+# --- main: the static fallback must never carry real security data --------
+
+
+def test_main_seeds_an_empty_fallback_not_real_data(tmp_path, monkeypatch):
+    """security.html is served to ANY viewer's failed render, scoped or not
+    (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M): a snapshot naming a real repo
+    would leak to a scoped viewer."""
+    monkeypatch.setattr(sb, "OUT", tmp_path)
+    monkeypatch.setattr(sb, "load", lambda: _report())
+    sb.main()
+    html = (tmp_path / "security.html").read_text(encoding="utf-8")
+    assert "\">vivy<" not in html and "\">constance<" not in html
+    assert "Live view unavailable" in html

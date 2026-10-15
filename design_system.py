@@ -1237,6 +1237,18 @@ COMPONENTS_CSS: str = r"""
   text-overflow:ellipsis;
   max-width:200px;
 }
+/* The scope chip (E19·5, issue_01M35K5PC5W3SS3495105WW7BF) — full tier only,
+   see nav_component. Same treatment as .whoami-chip; its own class because the
+   two truncate to different widths and a future rule may want to tell them
+   apart. */
+.scope-chip {
+  font-size:12px;
+  color:var(--ink-2);
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  max-width:160px;
+}
 /* "Convivy Builder · Orient" is wider than the old "Convivy". Below 900px
    the dot and the surface name drop, and min-width:0 on .atelier-nav-right
    lets the email chip shrink to its ellipsis rather than the menu button and
@@ -2194,6 +2206,15 @@ def nav_component(current: str, tier: str = "full", links=None) -> str:
             f'<a href="{escape(href)}"{aria}>{escape(label)}</a>'
         )
     links_html = "\n        ".join(items)
+    # The scope chip (E19·5, issue_01M35K5PC5W3SS3495105WW7BF): which projects
+    # the viewer's Library-resolved scope covers, filled server-side like
+    # __WHOAMI__ — see server.py's `_substitute_viewer_tokens`. Full tier
+    # only, matching the subnav gate below: the contractor bundle is a
+    # separate security boundary (ARCH-228) that this epic does not touch,
+    # and project scope is a full-tier concept the contractor tier has none
+    # of.
+    scope_chip = ('<span class="scope-chip small" title="Projects you can see">'
+                 '__SCOPE_LINE__</span>') if tier == "full" else ""
     primary_nav = f"""<nav class="atelier-nav" aria-label="Main navigation">
   <div class="atelier-nav-inner">
     <a class="brand-mark" href="/" aria-label="Convivy Builder home">
@@ -2207,6 +2228,7 @@ def nav_component(current: str, tier: str = "full", links=None) -> str:
     </div>
     <div class="atelier-nav-right">
       <button class="theme-toggle" id="themeToggle" aria-label="Toggle dark mode" aria-pressed="false">☾</button>
+      {scope_chip}
       <span class="whoami-chip small">__WHOAMI__</span>
       <button class="hamburger-btn" id="menuBtn"
               aria-label="Open menu" aria-controls="navLinks"

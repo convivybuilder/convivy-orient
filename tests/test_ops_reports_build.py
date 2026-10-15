@@ -66,6 +66,11 @@ def test_routes_registered_full_tier():
     # Alerts moved to /alerts under Dashboards (alerts_build.py) — no
     # /engineering/alerts route any more, served by redirect (test_server.py).
     assert "/engineering/alerts" not in routes
+    # /reference/briefings moved into server.SCOPED_ROUTES (E19·4,
+    # issue_01M35K5JQ7Z7MHYZGWRSB5F85M): it now filters to the viewer's
+    # scope, which this dispatcher's zero-argument call can't pass.
+    assert "/reference/briefings" not in routes
+    assert "/reference/briefings" in server.SCOPED_ROUTES
 
 
 def test_nav_places_briefings_in_archives():
@@ -308,6 +313,31 @@ def test_briefings_and_other_memories_are_product_filterable(tmp_path, monkeypat
     assert {e["project"] for e in payload["other"]} == {"vivy"}
 
 
+def test_scoped_viewer_sees_only_their_own_projects(tmp_path, monkeypatch, db):
+    """E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M: a brief or memory whose
+    project is outside the viewer's scope is dropped before the `projects`
+    pill list or either payload is built from it."""
+    _seed_kb(monkeypatch, [
+        _kb_row(id="platform/briefs/a-2026-08-01", project="platform", title="A"),
+        _kb_row(id="vivy/meeting-notes/c", kind="meeting-notes", project="vivy", title="C"),
+    ])
+    html = o.briefings_live_html(frozenset({"platform"}), False)
+    payload = _payload(html)
+    assert payload["projects"] == ["platform"]
+    assert {b["project"] for b in payload["briefs"]} == {"platform"}
+    assert payload["other"] == []
+
+
+def test_whole_fleet_viewer_sees_every_project(tmp_path, monkeypatch, db):
+    _seed_kb(monkeypatch, [
+        _kb_row(id="platform/briefs/a-2026-08-01", project="platform", title="A"),
+        _kb_row(id="vivy/meeting-notes/c", kind="meeting-notes", project="vivy", title="C"),
+    ])
+    html = o.briefings_live_html(frozenset(), True)
+    payload = _payload(html)
+    assert payload["projects"] == ["platform", "vivy"]
+
+
 def test_empty_states_use_the_shared_component(tmp_path, monkeypatch, db):
     """The per-list empty state is now rendered server-side through
     ds.empty_state() and shipped in the payload, not hand-rolled in
@@ -381,3 +411,19 @@ def test_null_and_malformed_audience_are_excluded_not_raised(tmp_path, monkeypat
     html = o.briefings_live_html()  # must not raise
     assert "BRIEF-NULL-AUD" not in html
     assert "BRIEF-MALFORMED-AUD" not in html
+
+
+# --- build_static: the static fallback must never carry real briefs -------
+
+
+def test_build_static_seeds_an_empty_fallback_not_real_data(tmp_path, monkeypatch, db):
+    """memory-briefings.html is served to ANY viewer's failed render,
+    scoped or not (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M): a snapshot
+    naming a real brief would leak to a scoped viewer. `build_static` never
+    calls the live renderer at all now — the same zero-argument leak 26bb079
+    found and fixed in `archives_build.build_static()`."""
+    _seed_kb(monkeypatch, [_kb_row(id="platform/briefs/x", title="REAL-BRIEF-TITLE")])
+    monkeypatch.setattr(o, "SITE", tmp_path)
+    o.build_static()
+    html = (tmp_path / "memory-briefings.html").read_text(encoding="utf-8")
+    assert "REAL-BRIEF-TITLE" not in html

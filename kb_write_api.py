@@ -231,7 +231,7 @@ async def checkout_document(doc_id: str, request: Request):
     # and `blog_api.publish_draft`; found by `security-reviewer` on PR #310.
     try:
         stored = await asyncio.to_thread(kb_commit.read_document, doc_id,
-                                         actor=ident.actor)
+                                         holder=checkout.holder)
     except Exception as e:
         # Every path that does not return `stored` gives back a lock taken
         # here: the two refusals below and anything unforeseen alike.
@@ -625,7 +625,8 @@ async def save_document(doc_id: str, request: Request):
         # `authz.Identity`, which nine routers share and none of the others
         # need. agentctl verifies it again and records the email it verified.
         await asyncio.to_thread(kb_commit.commit_document, doc_id, body=new_body,
-                                actor=ident.actor, base_sha=base_sha,
+                                actor=ident.actor, holder=held.holder,
+                                base_sha=base_sha,
                                 assertion=request.headers.get(JWT_HEADER) or "")
     except kb_commit.CommitStale as e:
         return _json(409, {"error": "the document changed on origin/main since you opened "

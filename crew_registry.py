@@ -52,3 +52,62 @@ def public_crews() -> list[str]:
         if isinstance(crew, str) and crew.strip():
             crews.add(crew.strip())
     return sorted(crews)
+
+
+def covers_every_project(scope: frozenset[str]) -> bool:
+    """Whether `scope` holds every project in the registry, `_`-prefixed keys
+    (`_meta`, `_products`, `_scopes`) excluded and private units included.
+
+    This gates the fleet-wide figures that carry no project of their own
+    (E19·3, issue_01M35K5EAZD85FBYXEBQVRKVZV): a viewer sees them only when
+    their Library scope already covers everything those figures sum over.
+    Scope decides it, never a role (E19). An unreadable registry answers
+    `False`, so a machine without the agent-platform checkout shows those
+    figures to nobody."""
+    try:
+        raw = json.loads(REGISTRY.read_text(encoding="utf-8"))
+    except OSError:
+        return False
+    projects = {slug for slug in raw if not slug.startswith("_")}
+    return bool(projects) and projects <= scope
+
+
+def repos_in_scope(scope: frozenset[str]) -> frozenset[str]:
+    """Every repo the registry lists under a project in `scope`.
+
+    A repo's name is not its project's slug: `agent-platform` belongs to
+    `bosun` and `knowledge` to `library`, so a per-repo row is filtered
+    against this set rather than against `scope` itself (E19·3,
+    issue_01M35K5EAZD85FBYXEBQVRKVZV). An unreadable registry answers the
+    empty set, so no repo row reaches anyone."""
+    try:
+        raw = json.loads(REGISTRY.read_text(encoding="utf-8"))
+    except OSError:
+        return frozenset()
+    return frozenset(
+        repo
+        for slug, unit in raw.items()
+        if not slug.startswith("_") and slug in scope
+        for repo in unit.get("repos") or ())
+
+
+def crews_in_scope(scope: frozenset[str]) -> frozenset[str]:
+    """Every crew key the registry lists under a project in `scope` — the
+    same `crew` field `public_crews()` collects, restricted the way
+    `repos_in_scope` restricts repos (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M).
+    A crew key is not its project's slug either (`agent-platform`'s crew is
+    `bosun`), so this is filtered the same way: by the project slugs in
+    `scope`, not by the crew keys themselves. A private unit's crew is
+    included, matching `repos_in_scope`'s own choice not to special-case
+    `private` — unlike `public_crews()`, which is a suggestion list over
+    every NON-private unit regardless of viewer. An unreadable registry
+    answers the empty set, so no crew name reaches anyone."""
+    try:
+        raw = json.loads(REGISTRY.read_text(encoding="utf-8"))
+    except OSError:
+        return frozenset()
+    return frozenset(
+        unit["crew"].strip()
+        for slug, unit in raw.items()
+        if not slug.startswith("_") and slug in scope
+        and isinstance(unit.get("crew"), str) and unit["crew"].strip())

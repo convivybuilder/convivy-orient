@@ -229,13 +229,17 @@ def _capture_form(known_products: list[str]) -> str:
   </div>'''
 
 
-def _page(cards_html: str, chips_html: str, total: int, embedded: int,
+def _page(cards_html: str, chips_html: str, total: int, embedded: int | None,
           by_source: list, known_products: list[str] | None = None) -> str:
     """Assemble the page through the shared Atelier shell (ARCH-355). __WHOAMI__
     is substituted by the server with the viewer's identity label, as on every
-    other full-tier page."""
+    other full-tier page.
+
+    `embedded` is `None` for a scoped viewer (E19·4,
+    issue_01M35K5JQ7Z7MHYZGWRSB5F85M): see `live_html`'s docstring for why a
+    scoped render has no embedded count to show."""
     src_bits = " · ".join(f"{escape(src)} {n:,}" for src, n in by_source) or "empty"
-    coverage = f"{embedded / total:.0%}" if total else "—"
+    coverage = f"{embedded / total:.0%}" if total and embedded is not None else "—"
     browse_block = cards_html or (
         '<div class="allclear">No signals captured yet. The GitHub poller will fill this in.</div>')
     kind_options = "".join(f'<option value="{escape(k, quote=True)}">{escape(k)}</option>'
@@ -303,7 +307,7 @@ def _page(cards_html: str, chips_html: str, total: int, embedded: int,
     )
 
 
-def live_html() -> str:
+def live_html(scope: frozenset[str], whole_fleet: bool) -> str:
     """Render the page from the Library (registered in server._full_only_routes;
     a render throw falls back to the static build).
 
@@ -316,21 +320,46 @@ def live_html() -> str:
     always matches what filtering to it shows — a whole-table count against a
     60-item view reads as items the filter then can't find.
 
+    `scope`/`whole_fleet` (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M): the
+    recent-60 window is filtered to `scope` before any card, count or chip is
+    built from it — the same "filter before grouping" rule `issue_build`
+    applies — so a scoped viewer with few recent signals among the global
+    top 60 simply sees fewer, never another project's.
+
     `total`/`embedded`/`by_source`/the product datalist come from
     `signal_facets`, an aggregate over the WHOLE matching set — paging 18,455
     signals to compute these by hand would cost 93 requests
-    (issue_01KZW183XVJCKFGQT8HMXFJFTY)."""
+    (issue_01KZW183XVJCKFGQT8HMXFJFTY) — but `signal_facets` takes no
+    multi-project filter (only `source`/`kind`), so a scoped viewer cannot be
+    served that whole-table aggregate without it naming every project's count
+    and the full product list regardless of scope. A scoped viewer instead
+    gets these derived from their own already-filtered `recent` window
+    (narrower and never a true total — `embedded` isn't even a field
+    `SignalRecord` carries, so it reads as unknown, "—", rather than a
+    fabricated number); only a `whole_fleet` viewer, whose scope already
+    covers what the Library's facets aggregate over, gets the real one."""
     now = utcnow()
-    recent = library_client.list_signals(cap=_BROWSE_LIMIT)
-    facets = library_client.signal_facets()
+    recent_all = library_client.list_signals(cap=_BROWSE_LIMIT)
+    recent = recent_all if whole_fleet else [s for s in recent_all if s.product in scope]
     counts: dict[str, int] = {}
     for sig in recent:
         counts[sig.product] = counts.get(sig.product, 0) + 1
     by_product = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
     cards = "".join(_card(sig, now) for sig in recent)
     chips = _chips(by_product, len(recent))
-    return _page(cards, chips, facets.total, facets.embedded, facets.by_source,
-                 facets.products)
+    if whole_fleet:
+        facets = library_client.signal_facets()
+        total, embedded, by_source, known_products = (
+            facets.total, facets.embedded, facets.by_source, facets.products)
+    else:
+        total = len(recent)
+        embedded = None
+        src_counts: dict[str, int] = {}
+        for sig in recent:
+            src_counts[sig.source] = src_counts.get(sig.source, 0) + 1
+        by_source = sorted(src_counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        known_products = sorted({sig.product for sig in recent})
+    return _page(cards, chips, total, embedded, by_source, known_products)
 
 
 def _detail_page(sig: library_client.SignalRecord, now) -> str:
@@ -394,7 +423,7 @@ def _detail_page(sig: library_client.SignalRecord, now) -> str:
     )
 
 
-def detail_html(signal_id: str, *, viewer_tier: str):
+def detail_html(signal_id: str, *, viewer_tier: str, scope: frozenset[str], whole_fleet: bool):
     """Render one signal's page, or None when it must not be served here.
 
     **`viewer_tier` is a required precondition, not a hint, and this function
@@ -424,6 +453,16 @@ def detail_html(signal_id: str, *, viewer_tier: str):
     Do NOT "fix" this by rendering whatever `get_signal` returns unconditionally.
     If a scoped non-admin full role is ever added to roles.json, revisit this and
     the browse page together.
+
+    **`scope`/`whole_fleet` are required for the same reason `viewer_tier`
+    is** (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M): a signal id can be
+    guessed or cited (it appears in documents, ADRs and messages — see
+    server.py's own `_SIGNAL_PREFIX` comment), so without this check a
+    viewer scoped to one project could read any other project's signal by
+    id. Returning None rather than a distinguishable "not in your scope"
+    answer is the same existence-oracle reasoning the tier/privacy checks
+    above already apply — a scoped-out signal reads exactly like a missing
+    one.
     """
     if viewer_tier != "full":
         raise ValueError(
@@ -432,6 +471,8 @@ def detail_html(signal_id: str, *, viewer_tier: str):
     now = utcnow()
     sig = library_client.get_signal(signal_id)
     if sig is None:
+        return None
+    if not whole_fleet and sig.product not in scope:
         return None
     return _detail_page(sig, now)
 

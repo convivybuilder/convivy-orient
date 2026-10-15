@@ -17,7 +17,7 @@ import home_build
 # reader who clicks a number should land where that number is, not on an index
 # that makes them hunt for it again.
 EXPECTED = {
-    "Today's LLM Spend": "/spending",
+    "Today's Agent-Run Spend": "/spending",
     "CI Health": "/health",
     "Waypoints Passed (7d)": "/velocity",
 }
@@ -49,11 +49,11 @@ def test_every_hero_stat_on_the_page_is_a_link_to_the_right_page(monkeypatch):
 
     monkeypatch.setattr(home_build, "_hero_stat", record)
     monkeypatch.setattr(home_build, "_today_spend",
-                        lambda: {"value": "$1.00", "delta": "today"})
+                        lambda whole_fleet: {"value": "$1.00", "delta": "today"})
     monkeypatch.setattr(home_build, "_ci_health",
-                        lambda: {"value": "99%", "delta": "7d"})
+                        lambda scope, whole_fleet: {"value": "99%", "delta": "7d"})
     monkeypatch.setattr(home_build, "_velocity_stat",
-                        lambda: {"value": "3 passed", "delta": "7d"})
+                        lambda scope, whole_fleet: {"value": "3 passed", "delta": "7d"})
 
     home_build._full_body()
 

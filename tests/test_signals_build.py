@@ -38,7 +38,7 @@ def _mk(**kw):
 
 
 def test_empty_db_renders_empty_state(db):
-    html = signals_build.live_html()
+    html = signals_build.live_html(frozenset(), True)
     assert "<h1>Archives</h1>" in html
     assert "Signal memory" not in html
     assert "No signals captured yet" in html
@@ -52,7 +52,7 @@ def test_breadcrumb_and_title_read_archives_not_signals(db):
     # the same nav/copy contradiction the rename PR exists to remove, just
     # moved one layer down (reviewer, convivy-orient#259 round 2). Nothing
     # asserted either string before this test.
-    html = signals_build.live_html()
+    html = signals_build.live_html(frozenset(), True)
     assert "team.convivy.com / archives" in html
     assert "<title>Archives · Orient · Convivy Builder</title>" in html
     assert "team.convivy.com / signals" not in html
@@ -62,7 +62,7 @@ def test_breadcrumb_and_title_read_archives_not_signals(db):
 def test_detail_breadcrumb_reads_archives(db):
     sig = _mk()
     library_fake.seed_signal(**sig)
-    html = signals_build.detail_html(sig["id"], viewer_tier="full")
+    html = signals_build.detail_html(sig["id"], viewer_tier="full", scope=frozenset(), whole_fleet=True)
     assert 'href="/archives">← archives</a>' in html
     assert "signals</a>" not in html
 
@@ -71,7 +71,7 @@ def test_browse_renders_recent_with_counts(db):
     library_fake.seed_signal(**_mk(body="FIRST-BODY", stream="vivy#12",
                                    embedded_at=dt.datetime(2026, 7, 16)))
     library_fake.seed_signal(**_mk(body="SECOND-BODY", product="constance", source="note"))
-    html = signals_build.live_html()
+    html = signals_build.live_html(frozenset(), True)
     assert "FIRST-BODY" in html and "SECOND-BODY" in html
     assert "vivy#12" in html
     assert '<span class="count">2</span>' in html
@@ -82,10 +82,53 @@ def test_browse_renders_recent_with_counts(db):
     assert "50% embedded" in html
 
 
+# --- scope (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M) -------------------------
+
+
+def test_browse_scoped_to_viewer_hides_other_projects(db):
+    library_fake.seed_signal(**_mk(body="IN-SCOPE-BODY", product="vivy"))
+    library_fake.seed_signal(**_mk(body="OUT-OF-SCOPE-BODY", product="constance"))
+    html = signals_build.live_html(frozenset({"vivy"}), False)
+    assert "IN-SCOPE-BODY" in html
+    assert "OUT-OF-SCOPE-BODY" not in html
+    assert ">constance<" not in html
+    assert 'data-prod="constance"' not in html
+
+
+def test_a_whole_fleet_viewer_sees_every_project(db):
+    library_fake.seed_signal(**_mk(body="VIVY-BODY", product="vivy"))
+    library_fake.seed_signal(**_mk(body="CONSTANCE-BODY", product="constance"))
+    html = signals_build.live_html(frozenset({"vivy"}), True)
+    assert "VIVY-BODY" in html
+    assert "CONSTANCE-BODY" in html
+
+
+def test_scoped_browse_reports_no_embedded_coverage(db):
+    """`signal_facets` takes no multi-project filter (only `source`/`kind`),
+    so a scoped viewer cannot be served its whole-table embedded-count
+    aggregate without it naming every project's rows regardless of scope —
+    this reads as unknown rather than a fabricated number."""
+    library_fake.seed_signal(**_mk(product="vivy", embedded_at=dt.datetime(2026, 7, 16)))
+    html = signals_build.live_html(frozenset({"vivy"}), False)
+    assert "— embedded" in html
+
+
+def test_main_seeds_an_empty_fallback_not_real_data(tmp_path, monkeypatch, db):
+    """signals.html is served to ANY viewer's failed render, scoped or not —
+    a snapshot naming a real signal would leak to a scoped viewer."""
+    library_fake.seed_signal(**_mk(product="vivy", body="LEAKY-SIGNAL-BODY"))
+    monkeypatch.setattr(signals_build, "SITE", tmp_path)
+    signals_build.main()
+    html = (tmp_path / "signals.html").read_text(encoding="utf-8")
+    assert "LEAKY-SIGNAL-BODY" not in html
+    assert 'data-prod="vivy"' not in html
+    assert "Live view unavailable" in html
+
+
 def test_untrusted_github_content_is_escaped(db):
     library_fake.seed_signal(**_mk(body="<script>alert(1)</script>", actor="<img src=x onerror=1>",
                                    stream="<svg onload=1>"))
-    html = signals_build.live_html()
+    html = signals_build.live_html(frozenset(), True)
     assert "<script>alert(1)</script>" not in html
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
     assert "<img src=x onerror=1>" not in html
@@ -96,7 +139,7 @@ def test_search_box_is_live_not_disabled(db):
     """Search moved off the disabled placeholder (issue_01M08YKNV185DFJ6832GV8ZY22's
     gap closes here): the input and button carry no `disabled` attribute, and
     the old "Orient needs its own per-viewer wall" copy is gone."""
-    html = signals_build.live_html()
+    html = signals_build.live_html(frozenset(), True)
     assert "offline while it moves to the Library" not in html
     assert "Search is disabled" not in html
     assert '<input type="search" id="q" placeholder="Search the Archives' in html
@@ -111,7 +154,7 @@ def test_no_awaiting_state_panel_remains(db):
     search is live, so there is nothing left to await. `class="awaiting-state`
     is the rendered component's own attribute (distinct from the shared
     `.awaiting-state{...}` CSS rule every page ships, used or not)."""
-    html = signals_build.live_html()
+    html = signals_build.live_html(frozenset(), True)
     assert 'class="awaiting-state' not in html
     assert "WAITING ON ORIENT" not in html
 
@@ -124,7 +167,7 @@ def test_js_wires_search_and_browse_to_the_live_api(db):
 
 
 def test_footnote_no_longer_claims_search_is_disabled(db):
-    html = signals_build.live_html()
+    html = signals_build.live_html(frozenset(), True)
     assert "Search is disabled" not in html
     # the footnote still explains what each affordance does, honestly
     assert "search finds the closest matches to a phrase, not a" in html
@@ -135,7 +178,7 @@ def test_footnote_no_longer_claims_search_is_disabled(db):
 
 
 def test_shape_browse_section_renders_known_kinds_and_a_free_text_field(db):
-    html = signals_build.live_html()
+    html = signals_build.live_html(frozenset(), True)
     assert 'id="shapeKindSelect"' in html
     for kind in signals_build._KNOWN_KINDS:
         assert f'<option value="{kind}">{kind}</option>' in html
@@ -147,7 +190,7 @@ def test_shape_browse_section_is_visibly_distinct_from_search(db):
     """The spec's hard rule: the two affordances must never blend into one
     control. Confirmed here by markup shape — browse-by-shape carries the
     kind picker, search carries no kind control at all (checked below)."""
-    html = signals_build.live_html()
+    html = signals_build.live_html(frozenset(), True)
     shape_idx = html.index('id="shapeForm"')
     search_idx = html.index('id="searchForm"')
     assert shape_idx != search_idx
@@ -164,7 +207,7 @@ def test_search_is_the_primary_control_ahead_of_both_browse_sections(db):
     That includes the product chips: a bare "search precedes the first card"
     assertion passed on the commit where search sat below the chips as the
     page's second row, so this checks search precedes the chips directly."""
-    html = signals_build.live_html()
+    html = signals_build.live_html(frozenset(), True)
     chips_idx = html.index('id="chips"')
     search_idx = html.index('id="searchForm"')
     shape_idx = html.index('id="shapeForm"')
@@ -183,7 +226,7 @@ def test_search_panel_offers_no_kind_control(db):
     (platform/contracts/library-protocol §3.2) — offering one here would be a
     control the reader cannot act on. Scoped to the search panel's own
     markup, not the whole page, since browse-by-shape legitimately has one."""
-    html = signals_build.live_html()
+    html = signals_build.live_html(frozenset(), True)
     panel_start = html.index('<div class="search-panel')
     panel_end = html.index('</div>', html.index('id="searchResults"'))
     panel_html = html[panel_start:panel_end]
@@ -218,7 +261,7 @@ def test_attribute_context_escaping(db):
     # A product with a quote must not break out of data-prod="..." (quote=True).
     evil = 'vivy" onmouseover="alert(1)'
     library_fake.seed_signal(**_mk(product=evil))
-    html = signals_build.live_html()
+    html = signals_build.live_html(frozenset(), True)
     assert 'onmouseover="alert(1)' not in html
     assert "&quot;" in html or "&#34;" in html
 
@@ -227,14 +270,14 @@ def test_url_ref_links_but_non_http_does_not(db):
     library_fake.seed_signal(**_mk(body="linked", refs={"pr": 9, "url": "https://github.com/convivy/vivy/pull/9"}))
     # a javascript: url must never become an href
     library_fake.seed_signal(**_mk(body="unlinked", refs={"url": "javascript:alert(1)"}))
-    html = signals_build.live_html()
+    html = signals_build.live_html(frozenset(), True)
     assert 'href="https://github.com/convivy/vivy/pull/9"' in html
     assert 'href="javascript:' not in html
 
 
 def test_long_body_is_clipped(db):
     library_fake.seed_signal(**_mk(body="x" * 2000))
-    html = signals_build.live_html()
+    html = signals_build.live_html(frozenset(), True)
     assert "x" * 601 not in html   # clipped to the excerpt length
     assert "…" in html
 
@@ -260,7 +303,7 @@ def test_review_stamp_is_stripped_and_the_prose_after_it_renders(db):
     # excerpt is mostly stamp and includes these header keys verbatim.
     body = _REVIEW_STAMP + "LGTM, one small nit inline on the retry logic."
     library_fake.seed_signal(**_mk(body=body))
-    html = signals_build.live_html()
+    html = signals_build.live_html(frozenset(), True)
     assert "LGTM, one small nit inline on the retry logic." in html
     assert "agentctl-review" not in html
     assert "reviewed-commit" not in html
@@ -270,7 +313,7 @@ def test_review_stamp_is_stripped_and_the_prose_after_it_renders(db):
 def test_stamp_only_body_shows_a_reason_not_a_blank_paragraph(db):
     sig = _mk(body=_REVIEW_STAMP, product="vivy", kind="pr_comment", stream="vivy#320")
     library_fake.seed_signal(**sig)
-    html = signals_build.live_html()
+    html = signals_build.live_html(frozenset(), True)
     assert "agentctl-review" not in html
     assert '<p class="body"></p>' not in html
     # the card is still a real signal — product, kind, stream, permalink render
@@ -287,7 +330,7 @@ def test_html_comment_later_in_a_body_is_preserved(db):
     # comment further in, must keep it (escaped like the rest of the body).
     body = "some real prose\n\n<!-- a genuine inline note -->\nmore prose after it"
     library_fake.seed_signal(**_mk(body=body))
-    html = signals_build.live_html()
+    html = signals_build.live_html(frozenset(), True)
     assert "a genuine inline note" in html
 
 
@@ -300,7 +343,7 @@ def test_detail_review_stamp_is_stripped_and_the_prose_after_it_renders(db):
     body = _REVIEW_STAMP + "LGTM, one small nit inline on the retry logic."
     sig = _mk(body=body)
     library_fake.seed_signal(**sig)
-    html = signals_build.detail_html(sig["id"], viewer_tier="full")
+    html = signals_build.detail_html(sig["id"], viewer_tier="full", scope=frozenset(), whole_fleet=True)
     assert "LGTM, one small nit inline on the retry logic." in html
     assert "agentctl-review" not in html
     assert "reviewed-commit" not in html
@@ -312,7 +355,7 @@ def test_detail_stamp_only_body_renders_the_no_body_placeholder(db):
     # existing no-body branch rather than showing raw comment text.
     sig = _mk(body=_REVIEW_STAMP)
     library_fake.seed_signal(**sig)
-    html = signals_build.detail_html(sig["id"], viewer_tier="full")
+    html = signals_build.detail_html(sig["id"], viewer_tier="full", scope=frozenset(), whole_fleet=True)
     assert "agentctl-review" not in html
     assert "This signal has no body." in html
 
@@ -320,7 +363,7 @@ def test_detail_stamp_only_body_renders_the_no_body_placeholder(db):
 def test_detail_body_with_no_stamp_renders_unchanged(db):
     sig = _mk(body="plain prose, no stamp at all")
     library_fake.seed_signal(**sig)
-    html = signals_build.detail_html(sig["id"], viewer_tier="full")
+    html = signals_build.detail_html(sig["id"], viewer_tier="full", scope=frozenset(), whole_fleet=True)
     assert "plain prose, no stamp at all" in html
 
 
@@ -331,7 +374,7 @@ def test_detail_html_comment_later_in_a_body_is_preserved(db):
     body = "some real prose\n\n<!-- a genuine inline note -->\nmore prose after it"
     sig = _mk(body=body)
     library_fake.seed_signal(**sig)
-    html = signals_build.detail_html(sig["id"], viewer_tier="full")
+    html = signals_build.detail_html(sig["id"], viewer_tier="full", scope=frozenset(), whole_fleet=True)
     assert "a genuine inline note" in html
 
 
@@ -344,7 +387,7 @@ def test_customer_rows_never_render_server_side(db):
     library_fake.seed_signal(**_mk(body="pilot feedback", privacy_class="customer", source="pilot_note",
                                    product="constance-pilots"))
     library_fake.seed_signal(**_mk(body="internal finding"))
-    html = signals_build.live_html()
+    html = signals_build.live_html(frozenset(), True)
     assert "pilot feedback" not in html
     assert "internal finding" in html
     assert '<span class="count">1</span>' in html      # total excludes customer rows
@@ -371,7 +414,7 @@ def test_a_credential_holding_signal_customer_would_leak_the_page(db, monkeypatc
     library_fake.seed_signal(**_mk(body="internal finding"))
     monkeypatch.setattr(library_fake, "FAKE_CAPABILITIES",
                         {"signal.read", "signal.customer"})
-    html = signals_build.live_html()
+    html = signals_build.live_html(frozenset(), True)
     assert "pilot feedback" in html, (
         "with signal.customer granted the customer row renders — if this assertion "
         "fails, something else is filtering and the wall test above proves nothing")
@@ -387,7 +430,7 @@ def test_chip_counts_match_the_rendered_view(db):
     for i in range(signals_build._BROWSE_LIMIT + 1):   # one more than fits
         library_fake.seed_signal(**_mk(body=f"old-{i}", ingested_at=old))
     library_fake.seed_signal(**_mk(body="newest", product="constance", ingested_at=new))
-    html = signals_build.live_html()
+    html = signals_build.live_html(frozenset(), True)
     # the view = 1 constance + (limit-1) vivy; each chip counts what it filters to
     assert f'data-prod="vivy" aria-pressed="false">vivy <span class="n">{signals_build._BROWSE_LIMIT - 1}</span>' in html
     assert 'data-prod="constance" aria-pressed="false">constance <span class="n">1</span>' in html
@@ -426,7 +469,7 @@ def test_capture_form_renders_with_role_gate_tokens(db):
     # S2: the log-a-signal form ships in the page with the server-substituted
     # gates intact — __CAN_CAPTURE__ on the panel (CSS-hidden for non-capture
     # roles; the POST authz gate is the wall) and __WHOAMI__ prefilling actor.
-    html = signals_build.live_html()
+    html = signals_build.live_html(frozenset(), True)
     assert 'data-can-capture="__CAN_CAPTURE__"' in html
     assert '.capture[data-can-capture="false"]{display:none;}' in html
     # PR #57 round-1 blocker: author display (.capture-form's flex) outranks the
@@ -451,7 +494,7 @@ def test_capture_datalist_lists_internal_products_only(db):
     library_fake.seed_signal(**_mk(body="recent", product="vivy"))
     library_fake.seed_signal(**_mk(body="quiet old product", product="hollis", ingested_at=old))
     library_fake.seed_signal(**_mk(body="pilot", product="constance-pilots", privacy_class="customer"))
-    html = signals_build.live_html()
+    html = signals_build.live_html(frozenset(), True)
     assert '<option value="vivy">' in html
     assert '<option value="hollis">' in html          # beyond any recency window
     assert "constance-pilots" not in html             # customer-only product hidden
@@ -460,7 +503,7 @@ def test_capture_datalist_lists_internal_products_only(db):
 def test_capture_datalist_escapes_product_values(db):
     # products are free text from the API; attribute context must escape quotes
     library_fake.seed_signal(**_mk(product='x"onmouseover="alert(1)'))
-    html = signals_build.live_html()
+    html = signals_build.live_html(frozenset(), True)
     assert '<option value="x&quot;onmouseover=&quot;alert(1)">' in html
     assert '<option value="x"onmouseover=' not in html
 
@@ -480,7 +523,7 @@ def test_nav_marks_current_page(db):
     # used to also carry Notes & wrap-ups, the ARCH log and Market — all three
     # trimmed off the strip (the operator, 2026-08-26; see test_ops_reports_build.py and
     # test_design_system.py), leaving Signals and Briefings.
-    html = signals_build.live_html()
+    html = signals_build.live_html(frozenset(), True)
     assert 'href="/archives" aria-current="page"' in html
     assert 'href="/reference/briefings"' in html
     assert 'href="/reference/arch-log"' not in html
@@ -500,7 +543,7 @@ def test_detail_renders_the_full_body_not_the_excerpt(db):
     sig = _mk(body=long_body)
     library_fake.seed_signal(**sig)
     sid = sig["id"]
-    html = signals_build.detail_html(sid, viewer_tier="full")
+    html = signals_build.detail_html(sid, viewer_tier="full", scope=frozenset(), whole_fleet=True)
     assert html is not None
     assert "x" * (signals_build._BODY_CLIP + 500) in html   # nothing clipped
     assert " …" not in html                                  # no excerpt ellipsis
@@ -508,7 +551,32 @@ def test_detail_renders_the_full_body_not_the_excerpt(db):
 
 
 def test_detail_returns_none_for_unknown_id(db):
-    assert signals_build.detail_html("sig_does_not_exist", viewer_tier="full") is None
+    assert signals_build.detail_html("sig_does_not_exist", viewer_tier="full", scope=frozenset(), whole_fleet=True) is None
+
+
+def test_detail_returns_none_for_a_signal_outside_the_viewers_scope(db):
+    """A signal id can be guessed or cited, so a scoped viewer not entitled
+    to its product must get the same answer a missing id gets — not a
+    distinguishable "not in your scope" response, which would confirm the id
+    exists (the same existence-oracle reasoning the tier/privacy checks
+    already apply)."""
+    sig = _mk(body="in-scope body", product="vivy")
+    library_fake.seed_signal(**sig)
+    sid = sig["id"]
+    assert signals_build.detail_html(
+        sid, viewer_tier="full", scope=frozenset({"other"}), whole_fleet=False) is None
+    assert signals_build.detail_html(
+        "sig_does_not_exist", viewer_tier="full", scope=frozenset({"other"}),
+        whole_fleet=False) is None  # same answer
+
+
+def test_detail_renders_for_a_viewer_whose_scope_holds_the_product(db):
+    sig = _mk(body="in-scope body", product="vivy")
+    library_fake.seed_signal(**sig)
+    html = signals_build.detail_html(
+        sig["id"], viewer_tier="full", scope=frozenset({"vivy"}), whole_fleet=False)
+    assert html is not None
+    assert "in-scope body" in html
 
 
 def test_detail_returns_none_for_customer_class(db):
@@ -519,8 +587,8 @@ def test_detail_returns_none_for_customer_class(db):
     sig = _mk(body="a customer call", privacy_class="customer")
     library_fake.seed_signal(**sig)
     sid = sig["id"]
-    assert signals_build.detail_html(sid, viewer_tier="full") is None
-    assert signals_build.detail_html("sig_does_not_exist", viewer_tier="full") is None  # same answer
+    assert signals_build.detail_html(sid, viewer_tier="full", scope=frozenset(), whole_fleet=True) is None
+    assert signals_build.detail_html("sig_does_not_exist", viewer_tier="full", scope=frozenset(), whole_fleet=True) is None  # same answer
 
 
 def test_detail_escapes_untrusted_fields(db):
@@ -528,7 +596,7 @@ def test_detail_escapes_untrusted_fields(db):
               body="plain")
     library_fake.seed_signal(**sig)
     sid = sig["id"]
-    html = signals_build.detail_html(sid, viewer_tier="full")
+    html = signals_build.detail_html(sid, viewer_tier="full", scope=frozenset(), whole_fleet=True)
     assert "<img src=x onerror=" not in html
     assert '&lt;img src=x' in html
 
@@ -537,7 +605,7 @@ def test_detail_body_renders_markdown_not_raw_symbols(db):
     sig = _mk(body="a **bold** finding")
     library_fake.seed_signal(**sig)
     sid = sig["id"]
-    html = signals_build.detail_html(sid, viewer_tier="full")
+    html = signals_build.detail_html(sid, viewer_tier="full", scope=frozenset(), whole_fleet=True)
     assert "<strong>bold</strong>" in html
     assert "**bold**" not in html
 
@@ -547,7 +615,7 @@ def test_detail_body_drops_raw_html_from_an_untrusted_body(db):
     sig = _mk(body="before\n\n<script>alert(1)</script>\n\nafter")
     library_fake.seed_signal(**sig)
     sid = sig["id"]
-    html = signals_build.detail_html(sid, viewer_tier="full")
+    html = signals_build.detail_html(sid, viewer_tier="full", scope=frozenset(), whole_fleet=True)
     assert "<script>alert(1)</script>" not in html
     # and the surrounding text SURVIVES — without this, a renderer that erased
     # the whole body would pass the assertion above while destroying the record
@@ -558,7 +626,7 @@ def test_browse_card_links_to_the_permalink(db):
     sig = _mk(body="short")
     library_fake.seed_signal(**sig)
     sid = sig["id"]
-    html = signals_build.live_html()
+    html = signals_build.live_html(frozenset(), True)
     assert f'href="/archives/{sid}"' in html
     assert sid in html   # the id is visible and copyable off the browse page
 
@@ -567,7 +635,7 @@ def test_browse_card_offers_the_full_read_only_when_clipped(db):
     short, long = _mk(body="short one"), _mk(body="y" * (signals_build._BODY_CLIP + 10))
     library_fake.seed_signal(**short)
     library_fake.seed_signal(**long)
-    html = signals_build.live_html()
+    html = signals_build.live_html(frozenset(), True)
     # one card was clipped, so exactly one "read the full signal" offer
     assert html.count("read the full signal") == 1
 
@@ -579,7 +647,7 @@ def test_detail_body_has_no_prewrap_from_the_browse_rule(db):
     sig = _mk(body="one\n\ntwo")
     library_fake.seed_signal(**sig)
     sid = sig["id"]
-    html = signals_build.detail_html(sid, viewer_tier="full")
+    html = signals_build.detail_html(sid, viewer_tier="full", scope=frozenset(), whole_fleet=True)
     # tolerant of whitespace/formatting in the CSS string — the invariant is that
     # a rule scoped to .ops-detail sets the body back to normal, not how it is typed
     assert re.search(r"\.ops-detail\s+\.body\s*\{[^}]*white-space\s*:\s*normal", html)
@@ -597,7 +665,7 @@ def test_detail_refuses_a_non_full_tier_caller(db):
     sid = sig["id"]
     for tier in ("contractor", "", None):
         with pytest.raises(ValueError, match="full-tier"):
-            signals_build.detail_html(sid, viewer_tier=tier)
+            signals_build.detail_html(sid, viewer_tier=tier, scope=frozenset(), whole_fleet=True)
 
 
 def test_detail_requires_the_tier_to_be_passed_at_all(db):

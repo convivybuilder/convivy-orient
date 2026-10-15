@@ -16,7 +16,7 @@ across every product" fetch has the same shape of problem one level up: if one
 repo merges or comments heavily in a short window, its rows fill the whole
 capped window and every other product's PRs/changelog entries silently vanish
 from the page — the product filter would then show a blank page for a product
-that has real data, just none recent enough to survive the cap. `_fan_out`
+that has real data, just none recent enough to survive the cap. `fan_out`
 avoids this by asking the Library for each known product's own top-N
 independently (`list_signals(product=...)`, the pre-filter
 `library_client.list_signals` gained for exactly this) and merging the
@@ -66,7 +66,7 @@ SITE = STATE_ROOT / "site"
 # plumbing this module has no use for.
 _GH_ORG = "convivy"
 
-# Per-product cap for the fan-out fetch (`_fan_out`). Not the page's total
+# Per-product cap for the fan-out fetch (`fan_out`). Not the page's total
 # render cap — the total is `cap_per_product * len(known products)`, which
 # self-limits to the real number of active repos rather than a fixed ceiling
 # that would need raising as the org grows.
@@ -77,13 +77,21 @@ _CHANGELOG_CAP_PER_PRODUCT = 150
 _BODY_CLIP = 1200
 
 
-def _fan_out(kind: str, *, cap_per_product: int, source=None) -> list[library_client.SignalRecord]:
-    """Every known product's own top-`cap_per_product` rows of `kind`
+def fan_out(kind: str, *, cap_per_product: int, source=None,
+            products: list[str] | None = None) -> list[library_client.SignalRecord]:
+    """Every product in `products`' own top-`cap_per_product` rows of `kind`
     (optionally further scoped by `source`), merged. Exact per product, unlike
-    a single flat `cap` across every product — see the module docstring."""
-    facets = library_client.signal_facets(kind=[kind])
+    a single flat `cap` across every product — see the module docstring.
+
+    `products=None` fans out over every product `signal_facets` reports — the
+    whole-fleet default. A scoped, non-whole-fleet caller (E19·4,
+    issue_01M35K5JQ7Z7MHYZGWRSB5F85M) passes its own viewer scope instead, so
+    an out-of-scope product is never even fetched, let alone rendered."""
+    if products is None:
+        facets = library_client.signal_facets(kind=[kind])
+        products = facets.products
     rows: list[library_client.SignalRecord] = []
-    for product in facets.products:
+    for product in products:
         rows.extend(library_client.list_signals(
             kind=[kind], product=product, source=source, cap=cap_per_product))
     return rows
@@ -240,14 +248,19 @@ def _chips(products: list[tuple[str, int]], total: int) -> str:
     return "".join(out)
 
 
-def prs_live_html() -> str:
+def prs_live_html(scope: frozenset[str], whole_fleet: bool) -> str:
     """/archives/prs — every captured PR comment, grouped by PR and product,
     with each PR's merge-time description attached where one exists.
-    Full-tier only, rendered live per request (ARCH-182)."""
+    Full-tier only, rendered live per request (ARCH-182).
+
+    `scope`/`whole_fleet` (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M): a scoped
+    viewer's fan-out is restricted to their own projects, so an out-of-scope
+    product's PRs are never fetched."""
     now = utcnow()
-    comments = _fan_out("pr_comment", cap_per_product=_PR_CAP_PER_PRODUCT)
-    descriptions = _fan_out("changelog", cap_per_product=_DESC_CAP_PER_PRODUCT,
-                            source=["github"])
+    products = None if whole_fleet else sorted(scope)
+    comments = fan_out("pr_comment", cap_per_product=_PR_CAP_PER_PRODUCT, products=products)
+    descriptions = fan_out("changelog", cap_per_product=_DESC_CAP_PER_PRODUCT,
+                            source=["github"], products=products)
     groups, unlinked = _group_prs(comments, descriptions)
 
     def _group_activity(g):
@@ -336,14 +349,18 @@ def _changelog_card(sig: library_client.SignalRecord) -> str:
     </article>'''
 
 
-def changelogs_live_html() -> str:
+def changelogs_live_html(scope: frozenset[str], whole_fleet: bool) -> str:
     """/archives/changelogs — every captured `changelog` signal (every source,
     unlike /engineering/changelog under Chart House, which shows only the
     co-authored entries) newest-first, filterable by product. This is the raw
     memory of what merged, not the curated announcement feed; the two pages
     read the same kind on purpose and differ only in which rows they keep.
-    Full-tier only, rendered live per request (ARCH-182)."""
-    rows = _fan_out("changelog", cap_per_product=_CHANGELOG_CAP_PER_PRODUCT)
+    Full-tier only, rendered live per request (ARCH-182).
+
+    `scope`/`whole_fleet` (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M): same
+    restricted fan-out as `prs_live_html`."""
+    products = None if whole_fleet else sorted(scope)
+    rows = fan_out("changelog", cap_per_product=_CHANGELOG_CAP_PER_PRODUCT, products=products)
     rows.sort(key=_sig_time, reverse=True)
     counts: dict[str, int] = {}
     for sig in rows:
@@ -494,17 +511,20 @@ def _fallback_page(title: str, current: str) -> str:
 
 def build_static() -> None:
     """Seed empty-state fallbacks for both pages (served only if a live render
-    throws)."""
+    throws).
+
+    **Always the empty shell, never `prs_live_html()`/`changelogs_live_html()`
+    of some scope** (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M): this file is
+    served to whichever viewer's live render failed, scoped or not, so a
+    snapshot naming every project's PRs or changelog entries would leak to a
+    scoped viewer — the same reasoning `chart_house_build.build_static` and
+    `issue_build.main` already apply to their own fallbacks."""
     SITE.mkdir(parents=True, exist_ok=True)
-    for name, fn, title in (
-        ("signals-prs.html", prs_live_html, "PRs"),
-        ("signals-changelogs.html", changelogs_live_html, "Changelogs"),
+    for name, title in (
+        ("signals-prs.html", "PRs"),
+        ("signals-changelogs.html", "Changelogs"),
     ):
-        try:
-            html = fn()
-        except Exception:
-            html = _fallback_page(title, "/archives")
-        (SITE / name).write_text(html, encoding="utf-8")
+        (SITE / name).write_text(_fallback_page(title, "/archives"), encoding="utf-8")
         print(f"Wrote site/{name}")
 
 

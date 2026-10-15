@@ -464,3 +464,63 @@ def test_load_audit_asks_the_library_for_the_kb_audit_stream(monkeypatch):
     monkeypatch.setattr(kb.library_client, "list_signals", fake_list_signals)
     assert kb.load_audit() == []
     assert seen == {"stream": ["kb-audit"]}
+
+
+# --- scoping (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M) ----------------------
+#
+# `live_html` filters the materializations rows to scope before `mat_stats`
+# ever sums them (tested at the `live_html` level, where that filter lives);
+# `render`'s own `whole_fleet` gate hides the three corpus-/repo-wide panels
+# it cannot filter at all (tested directly against `render`).
+
+
+def test_live_html_filters_materializations_to_scope(monkeypatch, tmp_path):
+    mat_log = tmp_path / "kb-materializations.jsonl"
+    mat_log.write_text("\n".join([
+        '{"project": "vivy", "profile": "daytime", "outcome": "ok", "agents": 1, '
+        '"skills": 1, "total_docs": 2, "ts": "t1"}',
+        '{"project": "constance", "profile": "daytime", "outcome": "ok", "agents": 1, '
+        '"skills": 1, "total_docs": 2, "ts": "t1"}',
+    ]) + "\n")
+    monkeypatch.setattr(kb, "MAT_LOG", mat_log)
+    monkeypatch.setattr(kb, "load_eval", lambda: None)
+    monkeypatch.setattr(kb, "load_query_stats", lambda: kb.query_stats([]))
+    monkeypatch.setattr(kb, "load_audit", lambda: [])
+    import alert_policy_store
+    monkeypatch.setattr(alert_policy_store, "get", lambda key: None)
+
+    html = kb.live_html(frozenset({"vivy"}), False)
+    assert "\">vivy/daytime<" in html
+    assert "\">constance/daytime<" not in html
+
+
+def test_render_whole_fleet_false_hides_eval_queries_and_audit():
+    html = kb.render(_sample_ev(), _sample_q(), _sample_m(), audit=[], whole_fleet=False)
+    assert "Fleet-wide; shown to a whole-fleet scope only." in html
+    # the golden-set eval panel's own pill (cases/k) must not leak through
+    assert "golden set ·" not in html
+    assert "No misses" not in html
+    # the materializations panel (already scoped by its caller) still renders
+    assert "vivy/daytime" in html
+
+
+def test_render_whole_fleet_true_shows_everything_the_old_default_did():
+    html = kb.render(_sample_ev(), _sample_q(), _sample_m(), audit=[])
+    assert "Fleet-wide; shown to a whole-fleet scope only." not in html
+    assert "golden set ·" in html
+
+
+# --- build: the static fallback must never carry real KB data --------------
+
+
+def test_build_seeds_an_empty_fallback_not_real_data(tmp_path, monkeypatch):
+    """kb.html is served to ANY viewer's failed render, scoped or not
+    (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M): a snapshot naming a real
+    project's individuation row would leak to a scoped viewer. `refresh_eval`
+    is stubbed to skip the real subprocess call it would otherwise make."""
+    monkeypatch.setattr(kb, "OUT", tmp_path)
+    monkeypatch.setattr(kb, "refresh_eval", lambda: False)
+    kb.build()
+    html = (tmp_path / "kb.html").read_text(encoding="utf-8")
+    assert "Live view unavailable" in html
+    assert '">vivy<' not in html

@@ -139,9 +139,15 @@ def test_static_fallback_is_empty_state(tmp_path, monkeypatch):
 
 
 def test_route_registered_full_tier():
+    """/engineering/e2e moved out of `_full_only_routes()` into
+    `server.SCOPED_ROUTES` (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M): that
+    dispatcher calls its renderer with no arguments, and this page now needs
+    the viewer's scope. `tests/test_server.py`'s
+    `_MOVED_OUT_OF_FULL_ONLY_ROUTES` carries the full-tier/nav/contractor-leak
+    coverage this move must not lose."""
     import server
-    routes = server._full_only_routes()
-    assert routes["/engineering/e2e"][1] is e2e.live_html
+    assert "/engineering/e2e" in server.SCOPED_ROUTES
+    assert "/engineering/e2e" not in server._full_only_routes()
 
 
 def test_nav_marks_current_page(db):

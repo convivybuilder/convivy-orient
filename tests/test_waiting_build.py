@@ -154,7 +154,7 @@ def test_unknown_counts_do_not_render_the_all_clear(monkeypatch):
     """The one failure that would make the strip untrustworthy: claiming
     "nothing is waiting on you" when we simply could not find out. An unknown
     count must never be treated as a zero."""
-    monkeypatch.setattr(W, "gather", lambda now=None, viewer=None: [
+    monkeypatch.setattr(W, "gather", lambda now=None, viewer=None, **_k: [
         {"label": "Decisions", "href": "/d", "count": 0, "sub": ""},
         {"label": "Issues", "href": "/i", "count": 0, "sub": ""},
         {"label": "Ready to merge", "href": "/m", "count": None, "sub": "tap to load"},
@@ -169,7 +169,7 @@ def test_unknown_counts_do_not_render_the_all_clear(monkeypatch):
 
 
 def test_all_zero_renders_the_all_clear(monkeypatch):
-    monkeypatch.setattr(W, "gather", lambda now=None, viewer=None: [
+    monkeypatch.setattr(W, "gather", lambda now=None, viewer=None, **_k: [
         {"label": x, "href": "/x", "count": 0, "sub": ""}
         for x in ("Decisions", "Issues", "Ready to merge", "Alerts")
     ])
@@ -181,7 +181,7 @@ def test_a_zero_tile_is_rendered_not_hidden(monkeypatch):
     """A zero tile is muted, not dropped. Hiding it would change the strip's
     shape under the operator, and "Decisions: 0" is information — it says the queue was
     checked and is empty, which an absent tile does not say."""
-    monkeypatch.setattr(W, "gather", lambda now=None, viewer=None: [
+    monkeypatch.setattr(W, "gather", lambda now=None, viewer=None, **_k: [
         {"label": "Decisions", "href": "/d", "count": 0, "sub": ""},
         {"label": "Issues", "href": "/i", "count": 3, "sub": "oldest 2d"},
         {"label": "Ready to merge", "href": "/m", "count": 0, "sub": ""},
@@ -278,13 +278,13 @@ def _tiles(alerts_count, alerts_sub="unacknowledged", urgent=True):
 
 
 def test_a_non_zero_alerts_tile_goes_hot(monkeypatch):
-    monkeypatch.setattr(W, "gather", lambda now=None, viewer=None: _tiles(14))
+    monkeypatch.setattr(W, "gather", lambda now=None, viewer=None, **_k: _tiles(14))
     html = W.strip_html()
     assert "wtile hot" in html
 
 
 def test_a_zero_alerts_tile_does_not_go_hot(monkeypatch):
-    monkeypatch.setattr(W, "gather", lambda now=None, viewer=None: _tiles(0, ""))
+    monkeypatch.setattr(W, "gather", lambda now=None, viewer=None, **_k: _tiles(0, ""))
     html = W.strip_html()
     assert "hot" not in html
 
@@ -294,7 +294,7 @@ def test_an_unknown_alerts_count_does_not_go_hot(monkeypatch):
     not read the queue" is not "you have alerts". Crying wolf on missing data is
     how the strip stops being believed."""
     monkeypatch.setattr(W, "gather",
-                        lambda now=None, viewer=None: _tiles(None, "unavailable"))
+                        lambda now=None, viewer=None, **_k: _tiles(None, "unavailable"))
     html = W.strip_html()
     assert "hot" not in html
     assert "—" in html
@@ -304,7 +304,7 @@ def test_a_non_urgent_tile_never_goes_hot(monkeypatch):
     """Only tiles that opt in are styled. Decisions and Issues are deliberately
     left plain for now — this change was about alerts, not a restyle of the
     whole strip."""
-    monkeypatch.setattr(W, "gather", lambda now=None, viewer=None: [
+    monkeypatch.setattr(W, "gather", lambda now=None, viewer=None, **_k: [
         {"label": "Decisions", "href": "/d", "count": 9, "sub": "oldest 2d"},
         {"label": "Alerts", "href": "/a", "count": 0, "sub": "", "urgent": True},
     ])
@@ -316,7 +316,7 @@ def test_hot_state_is_not_conveyed_by_colour_alone(monkeypatch):
     """A colour-only signal is invisible to a screen reader and to anyone who
     cannot distinguish it. The count, the sub-label, and the accessible name all
     carry the same state."""
-    monkeypatch.setattr(W, "gather", lambda now=None, viewer=None: _tiles(14))
+    monkeypatch.setattr(W, "gather", lambda now=None, viewer=None, **_k: _tiles(14))
     html = W.strip_html()
     assert "needing attention" in html
     assert "unacknowledged" in html
@@ -401,7 +401,7 @@ def test_alerts_tile_counts_alerts_build_gather_not_signal_store_rows(db, monkey
     that would count the 3 signals instead of the 5 threshold alerts."""
     for i in range(3):
         _seed_alert(f"noise {i}", dt.timedelta(hours=1))
-    monkeypatch.setattr(W.alerts_build, "gather", lambda: _fake_threshold_alerts(5))
+    monkeypatch.setattr(W.alerts_build, "gather", lambda scope, whole_fleet: _fake_threshold_alerts(5))
 
     assert W._active_alerts(W.utcnow())[0] == 5
     tiles = {t["label"]: t for t in W.gather()}
@@ -413,7 +413,7 @@ def test_alerts_tile_is_unavailable_when_alerts_build_gather_raises(monkeypatch)
     """A source that fails to load must read as unknown, never as zero — the
     same self-sealing contract every other tile holds (`strip_html`'s
     docstring)."""
-    def boom():
+    def boom(scope, whole_fleet):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(W.alerts_build, "gather", boom)
@@ -423,7 +423,7 @@ def test_alerts_tile_is_unavailable_when_alerts_build_gather_raises(monkeypatch)
 
 
 def test_alerts_tile_is_zero_when_no_threshold_is_crossed(monkeypatch):
-    monkeypatch.setattr(W.alerts_build, "gather", lambda: [])
+    monkeypatch.setattr(W.alerts_build, "gather", lambda scope, whole_fleet: [])
     assert W._active_alerts(W.utcnow()) == (0, "")
 # --- the warmer must not undo the never-fetch-on-Home property ----------------
 
@@ -609,3 +609,18 @@ def test_the_strip_has_no_visible_heading(monkeypatch):
     assert "wtitle" not in html
     assert "wtitle" not in W.WAITING_CSS
     assert 'aria-label="Waiting on you"' in html
+
+
+def test_alerts_tile_passes_the_viewers_scope_to_alerts_build(monkeypatch):
+    """The tile counts what `/alerts` shows this viewer (E19·3,
+    issue_01M35K5EAZD85FBYXEBQVRKVZV): the scope and the whole-fleet flag
+    reach `alerts_build.gather` unchanged."""
+    seen = []
+
+    def record(scope, whole_fleet):
+        seen.append((scope, whole_fleet))
+        return []
+
+    monkeypatch.setattr(W.alerts_build, "gather", record)
+    W.gather(scope=frozenset({"alpha"}), whole_fleet=True)
+    assert seen == [(frozenset({"alpha"}), True)]

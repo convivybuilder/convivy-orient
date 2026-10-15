@@ -54,3 +54,60 @@ def test_a_missing_registry_is_unavailable(tmp_path, monkeypatch):
     monkeypatch.setattr(crew_registry, "REGISTRY", tmp_path / "absent.json")
     with pytest.raises(crew_registry.RegistryUnavailable):
         crew_registry.public_crews()
+
+
+def test_a_scope_holding_every_project_covers_the_registry(tmp_path, monkeypatch):
+    """`_`-prefixed keys are not projects, and a private unit is one."""
+    _registry(tmp_path, monkeypatch, {"alpha": {"crew": "a"},
+                                      "hidden": {"crew": "h", "private": True}})
+    assert crew_registry.covers_every_project(frozenset({"alpha", "hidden"}))
+    assert crew_registry.covers_every_project(frozenset({"alpha", "hidden", "extra"}))
+
+
+def test_a_scope_missing_one_project_does_not_cover_the_registry(tmp_path, monkeypatch):
+    _registry(tmp_path, monkeypatch, {"alpha": {"crew": "a"},
+                                      "hidden": {"crew": "h", "private": True}})
+    assert not crew_registry.covers_every_project(frozenset({"alpha"}))
+    assert not crew_registry.covers_every_project(frozenset())
+
+
+def test_a_missing_registry_covers_nobody(tmp_path, monkeypatch):
+    monkeypatch.setattr(crew_registry, "REGISTRY", tmp_path / "absent.json")
+    assert not crew_registry.covers_every_project(frozenset({"alpha"}))
+
+
+def test_repos_in_scope_maps_projects_to_their_repos(tmp_path, monkeypatch):
+    """A repo's name is not its project's slug: `agent-platform` is `bosun`'s."""
+    _registry(tmp_path, monkeypatch, {"bosun": {"crew": "bosun", "repos": ["agent-platform"]},
+                                      "library": {"crew": "library", "repos": ["library", "knowledge"]},
+                                      "bare": {"crew": "b"}})
+    assert crew_registry.repos_in_scope(frozenset({"bosun", "library"})) == {
+        "agent-platform", "library", "knowledge"}
+    assert crew_registry.repos_in_scope(frozenset({"bosun"})) == {"agent-platform"}
+    assert crew_registry.repos_in_scope(frozenset({"bare", "unknown"})) == frozenset()
+
+
+def test_a_missing_registry_puts_no_repo_in_scope(tmp_path, monkeypatch):
+    monkeypatch.setattr(crew_registry, "REGISTRY", tmp_path / "absent.json")
+    assert crew_registry.repos_in_scope(frozenset({"bosun"})) == frozenset()
+
+
+def test_crews_in_scope_maps_projects_to_their_crew_keys(tmp_path, monkeypatch):
+    """A crew key is not its project's slug either: `agent-platform`'s is
+    `bosun`. A private unit's crew counts, an underscore key is metadata, and
+    a missing, non-string or blank `crew` contributes nothing."""
+    _registry(tmp_path, monkeypatch, {"agent-platform": {"crew": "bosun"},
+                                      "secret": {"crew": " hush ", "private": True},
+                                      "_meta": {"crew": "nobody"},
+                                      "nocrew": {},
+                                      "numcrew": {"crew": 7},
+                                      "blank": {"crew": "  "}})
+    everything = frozenset({"agent-platform", "secret", "_meta", "nocrew", "numcrew", "blank"})
+    assert crew_registry.crews_in_scope(everything) == {"bosun", "hush"}
+    assert crew_registry.crews_in_scope(frozenset({"agent-platform"})) == {"bosun"}
+    assert crew_registry.crews_in_scope(frozenset({"bosun"})) == frozenset()
+
+
+def test_a_missing_registry_puts_no_crew_in_scope(tmp_path, monkeypatch):
+    monkeypatch.setattr(crew_registry, "REGISTRY", tmp_path / "absent.json")
+    assert crew_registry.crews_in_scope(frozenset({"bosun"})) == frozenset()

@@ -184,6 +184,36 @@ def test_datalist_suggestions_are_sourced_from_roster_discovery(monkeypatch):
     assert '<option value="claude-sonnet-5">' in html
 
 
+def test_datalist_suggestions_are_restricted_to_scope(monkeypatch):
+    """E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M: a project's own lane agents
+    (and its crew) are restricted to the viewer's scope the same way
+    /engineering/roster's own cards are — `autonomous` stays unfiltered,
+    matching roster_build's own precedent (it names agent slugs, never a
+    project)."""
+    import crew_registry
+    monkeypatch.setattr(policy_build.roster_build, "load_roster", lambda: {
+        "projects": [
+            {"slug": "vivy-repo", "label": "Vivy", "repo": "/x",
+             "lanes": [{"name": "daytime", "label": "Daytime",
+                        "agents": [{"slug": "vivy-coder", "model": "claude-opus-5"}]}]},
+            {"slug": "constance-repo", "label": "Constance", "repo": "/y",
+             "lanes": [{"name": "daytime", "label": "Daytime",
+                        "agents": [{"slug": "constance-coder", "model": "claude-opus-5"}]}]},
+        ],
+        "autonomous": [{"slug": "consultant", "model": "claude-sonnet-5"}],
+    })
+    monkeypatch.setattr(crew_registry, "public_crews", lambda: ["vivy-crew", "constance-crew"])
+    monkeypatch.setattr(crew_registry, "repos_in_scope", lambda scope: frozenset({"vivy-repo"}))
+    monkeypatch.setattr(crew_registry, "crews_in_scope", lambda scope: frozenset({"vivy-crew"}))
+    html = policy_build.live_html({}, frozenset({"some-project"}), False)
+    assert '<option value="vivy-coder">' in html
+    assert '<option value="constance-coder">' not in html
+    assert '<option value="vivy-crew">' in html
+    assert '<option value="constance-crew">' not in html
+    # autonomous agents stay unfiltered regardless of scope
+    assert '<option value="consultant">' in html
+
+
 def test_datalist_offers_resolved_model_ids_not_roster_aliases(monkeypatch):
     """The failure this item is about: the roster's `model:` field holds an
     alias (`sonnet`), but the row the page reads and writes is keyed on the
@@ -387,6 +417,52 @@ def test_no_every_crew_option_while_the_registry_is_unavailable(monkeypatch, no_
     html = policy_build.live_html({"agent": "scout", "crew": "vivy", "model": "claude-sonnet-5"})
     assert 'id="polWriteAll"' not in html
     assert 'id="polWriteBtn"' in html
+
+
+# --- a scoped viewer's lookup is restricted to their own crews (E19·4) --------
+
+
+@pytest.fixture
+def two_project_registry(tmp_path, monkeypatch, public_crews):
+    """`vivy` is the viewer's project; `deck` belongs to `convivy-deck`,
+    outside their scope. The real `crews_in_scope` reads this file."""
+    reg = tmp_path / "projects.json"
+    reg.write_text(json.dumps({"vivy": {"crew": "vivy"},
+                               "convivy-deck": {"crew": "deck"},
+                               "agent-platform": {"crew": "bosun"}}))
+    monkeypatch.setattr(crew_registry, "REGISTRY", reg)
+    return frozenset({"vivy"})
+
+
+def test_a_scoped_viewer_cannot_resolve_an_out_of_scope_crew(monkeypatch, no_roster,
+                                                              two_project_registry):
+    """An out-of-scope crew and a crew nobody has heard of answer the same
+    page, and neither asks the Library, so neither existence nor policy leaks."""
+    def must_not_be_called(*a, **k):
+        raise AssertionError("an out-of-scope crew must not reach the Library")
+    monkeypatch.setattr(policy_build.library_client, "resolve_policy", must_not_be_called)
+
+    def page(crew):
+        return policy_build.live_html(
+            {"agent": "scout", "crew": crew, "model": "claude-sonnet-5"},
+            two_project_registry, False)
+
+    out_of_scope, unknown = page("deck"), page("nosuchcrew")
+    assert out_of_scope.replace("deck", "X") == unknown.replace("nosuchcrew", "X")
+    assert 'class="pol-result"' not in out_of_scope
+    assert "in your projects" in out_of_scope
+
+
+def test_a_scoped_viewers_own_crew_resolves_without_naming_any_other_crew(
+        monkeypatch, no_roster, two_project_registry):
+    monkeypatch.setattr(policy_build.library_client, "resolve_policy",
+                        lambda agent, crew, model: _resolution(crew=crew))
+    html = policy_build.live_html({"agent": "scout", "crew": "vivy", "model": "claude-sonnet-5"},
+                                  two_project_registry, False)
+    assert 'id="polWriteBtn"' in html
+    assert 'id="polWriteAll"' not in html
+    assert "deck" not in html
+    assert "bosun" not in html
 
 
 # --- exfiltration-class defaults bind only on private crews ------------------

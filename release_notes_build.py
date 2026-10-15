@@ -22,6 +22,7 @@ from html import escape
 
 from markdown_render import md_to_html
 
+import archives_build
 import design_system as ds
 import library_client
 import orient_time
@@ -125,32 +126,43 @@ def _page(cards_html: str, chips_html: str, count: int,
                          body=body, extra_css=_CSS)
 
 
-def live_html() -> str:
-    """/products/release-notes — authored release notes, newest first.
+def live_html(scope: frozenset[str] = frozenset(), whole_fleet: bool = True) -> str:
+    """/products/release-notes — authored release notes, newest first,
+    restricted to `scope` (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M): the
+    fan-out fetch (`archives_build.fan_out`, the same per-product fetch
+    `/archives/prs` and `/engineering/changelog` use) is restricted to the
+    viewer's own projects, so an out-of-scope product's notes are never
+    even fetched.
 
-    The product datalist (`known`) comes from `signal_facets` over the WHOLE
-    store, unfiltered — the same whole-store distinct-product scan the browse
-    page needs, served in one request rather than a page-through
-    (issue_01KZW183XVJCKFGQT8HMXFJFTY)."""
-    rows = library_client.list_signals(kind=[_KIND], order="produced_at", cap=_LIMIT)
+    The product datalist (`known`), which used to come from `signal_facets`
+    over the WHOLE store unfiltered — a list of every product that has EVER
+    recorded ANY signal, named here regardless of release notes — is
+    narrowed to `scope` the same way, so the write form's suggestions can't
+    name a project outside it."""
+    products = None if whole_fleet else sorted(scope)
+    rows = archives_build.fan_out(_KIND, cap_per_product=_LIMIT, products=products)
+    rows.sort(key=lambda s: s.produced_at or s.ingested_at, reverse=True)
+    rows = rows[:_LIMIT]
     counts: dict[str, int] = {}
     for sig in rows:
         counts[sig.product] = counts.get(sig.product, 0) + 1
-    products = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    product_counts = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
     known = library_client.signal_facets().products
+    if not whole_fleet:
+        known = [p for p in known if p in scope]
     cards = "".join(_card(sig) for sig in rows)
-    return _page(cards, _chips(products, len(rows)), len(rows), known)
+    return _page(cards, _chips(product_counts, len(rows)), len(rows), known)
 
 
 def build_static() -> None:
-    """Seed the empty-state fallback (served only if a live render throws)."""
+    """Seed the empty-state fallback, deliberately empty rather than calling
+    the live renderer (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M) — this used
+    to call `live_html()` with no scope argument, the same zero-argument leak
+    26bb079 found and fixed in `archives_build.build_static()`."""
     SITE.mkdir(parents=True, exist_ok=True)
-    try:
-        html = live_html()
-    except Exception:
-        html = _page("", "", 0)
+    html = _page("", "", 0)
     (SITE / "products-release-notes.html").write_text(html, encoding="utf-8")
-    print("Wrote site/products-release-notes.html")
+    print("Wrote site/products-release-notes.html (static fallback)")
 
 
 _CSS = r"""

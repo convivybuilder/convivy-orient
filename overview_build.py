@@ -24,6 +24,7 @@ from html import escape
 
 import activity_build
 import code_health_build
+import crew_registry
 import dashboard_build
 import design_system as ds
 import engineering_e2e_build
@@ -65,15 +66,11 @@ def _read_json(path: pathlib.Path) -> dict:
         return {}
 
 
-def _cost_per_merged_pr() -> dict:
-    """Cost-per-merged-PR headline from the scorecard ledger (all-time window).
-
-    Reads the same normalize() facts that the Cost-Performance dashboard uses
-    and returns total metered cost ÷ merged PRs — the $/merged figure that is
-    the dashboard's primary cost-efficiency signal.
-    """
+def _cost_per_merged_pr(facts: list[dict]) -> dict:
+    """Cost-per-merged-PR headline from already-scoped scorecard facts (the
+    all-time window) — the $/merged figure that is the Cost-Performance
+    dashboard's primary cost-efficiency signal."""
     try:
-        facts = dashboard_build.normalize()
         total_usd = sum(f["cost_usd"] for f in facts if f.get("cost_usd") is not None)
         merged = sum(1 for f in facts if f.get("merged"))
         if merged == 0:
@@ -93,9 +90,9 @@ def _cost_per_merged_pr() -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _safe_section(fn, label: str) -> str:
+def _safe_section(fn, label: str, scope: frozenset[str], whole_fleet: bool) -> str:
     try:
-        return fn()
+        return fn(scope, whole_fleet)
     except Exception:
         return ds.error_state(f"Could not load {label} data.")
 
@@ -108,26 +105,39 @@ def _section(fresh: ds.Freshness, feed: str, value, delta) -> str:
     return banner + _stat_block(value, delta, fresh.text)
 
 
-def _spending_section() -> str:
+def _spending_section(_scope=frozenset(), _whole_fleet=True) -> str:
+    """FLEET-ONLY (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M): the account-wide
+    spend snapshot carries no `product` field at all (`home_build.
+    _today_spend`'s own docstring), so there is no way to recompute it over a
+    subset of projects. `_build_body` only ever calls this for a whole-fleet
+    viewer — see `_GROUPS`'s `fleet_only` flag — so `_scope`/`_whole_fleet`
+    are accepted for interface symmetry with every other section and unused."""
     snap = dashboard_build.load_latest_snapshot()
     if not snap:
         return ds.empty_state("No spend snapshot yet.")
-    spend = home_build._today_spend()
+    spend = home_build._today_spend(True)
     fresh = dashboard_build.spending_freshness(snap)
     return _section(fresh, "Spend snapshot", spend["value"], spend["delta"])
 
 
-def _cost_performance_section() -> str:
-    facts = dashboard_build.normalize()
+def _cost_performance_section(scope=frozenset(), whole_fleet=True) -> str:
+    """Restricted to `scope` (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M) the
+    same way `dashboard_build.cost_performance_live_html` restricts
+    /cost-performance's own facts."""
+    repos = None if whole_fleet else crew_registry.repos_in_scope(scope)
+    facts = dashboard_build.normalize(repos)
     if not facts:
         return ds.empty_state("No scorecard data yet.")
-    cp = _cost_per_merged_pr()
+    cp = _cost_per_merged_pr(facts)
     fresh = dashboard_build.cost_performance_freshness(facts)
     return _section(fresh, "Cost-performance ledger", cp["value"], cp["delta"])
 
 
-def _activity_section() -> str:
-    snap = activity_build._load_snapshot()
+def _activity_section(scope=frozenset(), whole_fleet=True) -> str:
+    """Restricted to `scope` the same way /activity's own sessions are
+    (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M): a session whose product is
+    outside `scope` is dropped before it is counted."""
+    snap = activity_build.scoped_snapshot(scope, whole_fleet)
     count = snap.get("session_count", 0)
     if not count:
         return ds.empty_state("No session activity captured yet.")
@@ -135,19 +145,25 @@ def _activity_section() -> str:
     return _section(fresh, "Session activity", f"{count} sessions", "logged")
 
 
-def _velocity_section() -> str:
+def _velocity_section(scope=frozenset(), whole_fleet=True) -> str:
     """Waypoints passed, the same number and the same
     `home_build._velocity_stat()` call the front page's hero stat uses, so
     the two surfaces cannot disagree (dashboards epic
-    issue_01M2F3Q1B8J9E0WC5J1F1CMWA1). Computed live from the Library on
-    every render, not from a local snapshot, so there is no freshness
-    cadence to judge it against — a stalled banner does not apply here the
-    way it does to the other cards on this page."""
-    velocity = home_build._velocity_stat()
+    issue_01M2F3Q1B8J9E0WC5J1F1CMWA1), restricted to `scope` the same way
+    (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M). Computed live from the
+    Library on every render, not from a local snapshot, so there is no
+    freshness cadence to judge it against — a stalled banner does not apply
+    here the way it does to the other cards on this page."""
+    velocity = home_build._velocity_stat(scope, whole_fleet)
     return _stat_block(velocity["value"], velocity["delta"], "computed live from the Library")
 
 
-def _warrant_section() -> str:
+def _warrant_section(_scope=frozenset(), _whole_fleet=True) -> str:
+    """FLEET-ONLY (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M): the overall
+    unwarranted-rate headline aggregates across every repo with no way to
+    recompute it over a subset — warrant-report.json's `by_repo` bucket is
+    filtered on /warrant's own page, but this card shows `overall`, not
+    `by_repo`. `_build_body` only calls this for a whole-fleet viewer."""
     data = warrant_build.load()
     o = data.get("overall") or {}
     if not o.get("merged_prs"):
@@ -158,16 +174,25 @@ def _warrant_section() -> str:
     return _section(fresh, "Warrant scorecard", value, delta)
 
 
-def _code_health_section() -> str:
+def _code_health_section(scope=frozenset(), whole_fleet=True) -> str:
+    """Restricted to `scope` the same way `/health`'s own rows are (E19·3,
+    issue_01M35K5EAZD85FBYXEBQVRKVZV), via the same helper Home's hero stat
+    uses."""
     asof, rows = code_health_build.load_snapshot()
+    if not whole_fleet:
+        repos = crew_registry.repos_in_scope(scope)
+        rows = [r for r in rows if r.get("repo") in repos]
     if not rows:
         return ds.empty_state("No code-health harvest yet.")
-    health = home_build._ci_health()
+    health = home_build._ci_health(scope, whole_fleet)
     fresh = code_health_build.freshness(asof)
     return _section(fresh, "Code-health harvest", health["value"], health["delta"])
 
 
-def _security_section() -> str:
+def _security_section(_scope=frozenset(), _whole_fleet=True) -> str:
+    """FLEET-ONLY (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M): same reasoning
+    as `_warrant_section` — `overall`, not the filterable `by_repo` bucket.
+    `_build_body` only calls this for a whole-fleet viewer."""
     data = security_build.load()
     o = data.get("overall") or {}
     if not o.get("prs_reviewed"):
@@ -178,10 +203,14 @@ def _security_section() -> str:
     return _section(fresh, "Security scorecard", value, delta)
 
 
-def _e2e_section() -> str:
+def _e2e_section(scope=frozenset(), whole_fleet=True) -> str:
+    """Restricted to `scope` the same way `/engineering/e2e`'s own tiles are
+    (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M)."""
     recent = library_client.list_signals(
         source=[engineering_e2e_build.CI_SOURCE],
         cap=engineering_e2e_build._SCAN_LIMIT)
+    if not whole_fleet:
+        recent = [s for s in recent if s.product in scope]
     if not recent:
         return ds.empty_state("No CI results captured yet.")
     now = utcnow()
@@ -199,7 +228,7 @@ def _e2e_section() -> str:
     return _section(fresh, "CI test results", value, delta)
 
 
-def _kb_section() -> str:
+def _kb_section(_scope=frozenset(), _whole_fleet=True) -> str:
     """The golden-set eval's own recall, which is what /kb exists to measure.
 
     **This card used to show KB freshness — a doc count and a timestamp — and
@@ -220,6 +249,10 @@ def _kb_section() -> str:
     landed without usable numbers. Empty-stating the second case would drop
     the staleness signal and render a degraded feed as an absent one — the
     collapse this page exists to prevent.
+
+    **FLEET-ONLY** (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M): the golden-set
+    eval runs over the whole KB corpus, with no per-project recall to show
+    instead. `_build_body` only calls this for a whole-fleet viewer.
     """
     # `load_eval` returns None, not {}, when the file is absent or unparseable
     # — its own `dict | None`, and the case this branch exists for. Coalescing
@@ -272,37 +305,48 @@ def _overview_card(href: str, dashboard: str, label: str, inner_html: str) -> st
     )
 
 
-# (href, dashboard name, headline label, section fn) per group. Alerts is
-# deliberately absent — it is a needs-me signal, not a dashboard to browse,
-# and keeps its pinned nav entry plus a Home tile instead (home_build).
+# (href, dashboard name, headline label, section fn, fleet_only) per group.
+# Alerts is deliberately absent — it is a needs-me signal, not a dashboard to
+# browse, and keeps its pinned nav entry plus a Home tile instead (home_build).
+#
+# `fleet_only` (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M): the card's headline
+# figure aggregates across every repo with no `product` dimension to filter
+# on (Spending's account-wide snapshot, Warrant's and Security's `overall`
+# bucket, KB's golden-set recall over the whole corpus) — `_build_body` drops
+# that card from the grid entirely for a scoped, non-whole-fleet viewer,
+# rather than show a fleet figure or an empty husk of a card.
 _GROUPS = [
     ("Money", [
-        ("/spending", "Spending", "Today's LLM Spend", _spending_section),
-        ("/cost-performance", "Cost-Performance", "Cost per Merged PR", _cost_performance_section),
+        ("/spending", "Spending", "Today's LLM Spend", _spending_section, True),
+        ("/cost-performance", "Cost-Performance", "Cost per Merged PR",
+         _cost_performance_section, False),
     ]),
     ("Delivery", [
-        ("/activity", "Activity", "Sessions Logged", _activity_section),
-        ("/velocity", "Velocity", "Waypoints Passed (7d)", _velocity_section),
-        ("/warrant", "Warrant", "Unwarranted Rate", _warrant_section),
+        ("/activity", "Activity", "Sessions Logged", _activity_section, False),
+        ("/velocity", "Velocity", "Waypoints Passed (7d)", _velocity_section, False),
+        ("/warrant", "Warrant", "Unwarranted Rate", _warrant_section, True),
     ]),
     ("Health", [
-        ("/health", "Code Health", "Avg CI Pass Rate", _code_health_section),
-        ("/security", "Security", "Blocking / KLOC", _security_section),
-        ("/engineering/e2e", "E2E", "Suites Passing", _e2e_section),
-        ("/kb", "KB Retrieval", "Golden-Set Recall", _kb_section),
+        ("/health", "Code Health", "Avg CI Pass Rate", _code_health_section, False),
+        ("/security", "Security", "Blocking / KLOC", _security_section, True),
+        ("/engineering/e2e", "E2E", "Suites Passing", _e2e_section, False),
+        ("/kb", "KB Retrieval", "Golden-Set Recall", _kb_section, True),
     ]),
 ]
 
 
-def _build_body() -> str:
+def _build_body(scope: frozenset[str] = frozenset(), whole_fleet: bool = True) -> str:
     now_label = orient_time.now_label()
 
     group_blocks = []
     for group_name, entries in _GROUPS:
+        visible = [e for e in entries if whole_fleet or not e[4]]
         cards = "".join(
-            _overview_card(href, dashboard, label, _safe_section(fn, dashboard))
-            for href, dashboard, label, fn in entries
+            _overview_card(href, dashboard, label, _safe_section(fn, dashboard, scope, whole_fleet))
+            for href, dashboard, label, fn, _fleet_only in visible
         )
+        if not cards:
+            continue
         group_blocks.append(
             f'<div class="overview-group">'
             f'<h2 class="overview-group-title">{escape(group_name)}</h2>'
@@ -324,10 +368,15 @@ def _build_body() -> str:
 </div>"""
 
 
-def live_html() -> str:
-    """Render the Dashboards Overview hub at request time (ARCH-182)."""
+def live_html(scope: frozenset[str] = frozenset(), whole_fleet: bool = False) -> str:
+    """Render the Dashboards Overview hub at request time (ARCH-182),
+    restricted to `scope` (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M): every
+    card's own headline figure is filtered the same way its full dashboard
+    is, and a card whose figure cannot be filtered at all is left off the
+    grid for a scoped viewer — see `_GROUPS`'s `fleet_only` flag. The
+    defaults render an empty-scope grid, for the static fallback."""
     nav_html = ds.nav_component("/overview", "full")
-    body = _build_body()
+    body = _build_body(scope, whole_fleet)
     return ds.page_shell(
         title="Dashboards Overview",
         nav_html=nav_html,

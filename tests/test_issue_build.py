@@ -407,6 +407,7 @@ def test_issue_body_drops_unsafe_link_schemes(db):
 def test_resolved_duplicate_shows_which_issue_it_duplicates(db):
     """A resolved-duplicate row that says only "Duplicate" tells the reader the
     one thing they already knew."""
+    _seed_issue(id="issue_01ORIGINAL", title="the original")
     _seed_issue(state="duplicate", resolution="duplicate", title="a dupe",
                 resolved_by="operator@example.com", resolved_at=models_utcnow(),
                 refs={"duplicate_of": "issue_01ORIGINAL"})
@@ -1509,6 +1510,7 @@ def test_a_resolved_issue_renders_and_cannot_be_resolved_again(db):
 def test_a_duplicate_links_to_the_issue_it_repeats(db):
     """A banner naming an id the reader cannot open is the dead end this page
     exists to close."""
+    library_fake.seed_issue(**_mk(id="issue_original", title="The original"))
     library_fake.seed_issue(**_mk(id="issue_dupe1", title="Same again", state="duplicate",
               resolution="duplicate", resolved_by="operator@example.com",
               refs={"duplicate_of": "issue_original"}))
@@ -2036,6 +2038,7 @@ def test_detail_still_shows_a_met_prerequisite(db):
 
 
 def test_detail_links_an_item_prerequisite_to_the_item_it_names(db):
+    library_fake.seed_issue(**_mk(id="issue_OTHER", title="The thing it waits on"))
     library_fake.seed_issue(**_mk(
         id="issue_blk3", title="Waiting on work", state="open",
         prerequisites=[{"item": "issue_OTHER", "state": "open",
@@ -2875,3 +2878,199 @@ def test_the_client_reads_the_route_by_repo_identity_and_pr(monkeypatch):
                       {"repo_identity": _ORIENT, "pr": "350"})]
     assert rec.role == "reviewer" and rec.auth == "run-verified"
     assert rec.created_at == dt.datetime(2026, 9, 30, 15, 0)
+
+
+# --- per-viewer project scope (E19·2, issue_01M35K5AB4PRTJ71DMQW7Q4D3B) ------
+#
+# `scope` is the viewer's Library-resolved project scope (`library_client.
+# person_scope`), threaded into every Chart House builder and the single-item
+# page. An administrator's scope is simply the full project set the Library
+# returns for them ("*"), so these tests cover both the narrowed case and
+# that wide one, never a role or admin flag of this module's own.
+
+
+def _seed_two_projects():
+    """vivy and bosun, each with an epic + child, a correction, a
+    blocker and a live Course — so every Chart House page has one entry per
+    project to tell apart."""
+    library_fake.seed_issue(**_mk(id="issue_vivy_epic", product="vivy",
+                                  title="VIVY-EPIC-TITLE", type="epic"))
+    library_fake.seed_issue(**_mk(id="issue_vivy_child", product="vivy",
+                                  title="VIVY-CHILD-TITLE", parent_id="issue_vivy_epic"))
+    library_fake.seed_issue(**_mk(id="issue_vivy_corr", product="vivy",
+                                  title="VIVY-CORRECTION-TITLE"))
+    library_fake.seed_issue(**_mk(id="issue_vivy_block", product="vivy",
+                                  title="VIVY-BLOCKER-TITLE", needs="operator"))
+
+    library_fake.seed_issue(**_mk(id="issue_bosun_epic", product="bosun",
+                                  title="BOSUN-EPIC-TITLE", type="epic"))
+    library_fake.seed_issue(**_mk(id="issue_bosun_child", product="bosun",
+                                  title="BOSUN-CHILD-TITLE", parent_id="issue_bosun_epic"))
+    library_fake.seed_issue(**_mk(id="issue_bosun_corr", product="bosun",
+                                  title="BOSUN-CORRECTION-TITLE"))
+    library_fake.seed_issue(**_mk(id="issue_bosun_block", product="bosun",
+                                  title="BOSUN-BLOCKER-TITLE", needs="operator"))
+
+
+def _two_project_courses():
+    return [
+        _course("course_vivy", "vivy", "Vivy's course",
+               entries=[_entry("issue_vivy_epic", "open", title="VIVY-COURSE-STEP")]),
+        _course("course_bosun", "bosun", "Bosun's course",
+               entries=[_entry("issue_bosun_epic", "open", title="BOSUN-COURSE-STEP")]),
+    ]
+
+
+def test_each_viewer_sees_only_their_own_projects_on_every_chart_house_page(db, monkeypatch):
+    """Two projects, two identities: each identity's Epics, Corrections, Course
+    and Blockers page carries only its own project's name, titles and item
+    ids — neither page names the other project at all."""
+    _seed_two_projects()
+    courses = _two_project_courses()
+    monkeypatch.setattr(library_client, "list_courses", lambda **k: courses)
+    monkeypatch.setattr(library_client, "get_course", lambda cid: next(c for c in courses if c.id == cid))
+    library_fake.seed_person_scope("vivy-viewer@example.com", {"vivy"})
+    library_fake.seed_person_scope("bosun-viewer@example.com", {"bosun"})
+    vivy_scope = library_client.person_scope("vivy-viewer@example.com")
+    bosun_scope = library_client.person_scope("bosun-viewer@example.com")
+
+    # Each page's own content, by project — only the needles a correctly
+    # scoped AND correctly rendered page would carry for that project, so
+    # this also catches a page bleeding another page's lane rather than
+    # another viewer's project.
+    pages = {
+        "epics": (issue_build.live_html,
+                 ('data-prod="vivy"', "VIVY-EPIC-TITLE", "VIVY-CHILD-TITLE", "issue_vivy_epic"),
+                 ('data-prod="bosun"', "BOSUN-EPIC-TITLE", "BOSUN-CHILD-TITLE", "issue_bosun_epic")),
+        "corrections": (lambda s: issue_build.live_html_corrections(None, s),
+                       ('data-prod="vivy"', "VIVY-CORRECTION-TITLE", "issue_vivy_corr"),
+                       ('data-prod="bosun"', "BOSUN-CORRECTION-TITLE", "issue_bosun_corr")),
+        "course": (issue_build.live_html_course,
+                  ('data-prod="vivy"', "VIVY-COURSE-STEP"),
+                  ('data-prod="bosun"', "BOSUN-COURSE-STEP")),
+        "blockers": (issue_build.live_html_blockers,
+                    ('data-prod="vivy"', "VIVY-BLOCKER-TITLE", "issue_vivy_block"),
+                    ('data-prod="bosun"', "BOSUN-BLOCKER-TITLE", "issue_bosun_block")),
+    }
+    for name, (builder, vivy_needles, bosun_needles) in pages.items():
+        vivy_html = builder(vivy_scope)
+        for needle in vivy_needles:
+            assert needle in vivy_html, (name, needle)
+        for needle in bosun_needles:
+            assert needle not in vivy_html, (name, needle)
+
+        bosun_html = builder(bosun_scope)
+        for needle in bosun_needles:
+            assert needle in bosun_html, (name, needle)
+        for needle in vivy_needles:
+            assert needle not in bosun_html, (name, needle)
+
+
+def test_an_administrators_resolved_scope_still_sees_every_project(db, monkeypatch):
+    """An administrator's scope is the full project set the Library returns
+    for them — "*" — and this module draws no admin-role distinction of its
+    own, so both projects render on every page given that same wide scope."""
+    _seed_two_projects()
+    courses = _two_project_courses()
+    monkeypatch.setattr(library_client, "list_courses", lambda **k: courses)
+    monkeypatch.setattr(library_client, "get_course", lambda cid: next(c for c in courses if c.id == cid))
+    library_fake.seed_person_scope("admin@example.com", {"*"})
+    admin_scope = library_client.person_scope("admin@example.com")
+
+    epics = issue_build.live_html(admin_scope)
+    assert 'data-prod="vivy"' in epics and 'data-prod="bosun"' in epics
+    corrections = issue_build.live_html_corrections(None, admin_scope)
+    assert 'data-prod="vivy"' in corrections and 'data-prod="bosun"' in corrections
+    course_page = issue_build.live_html_course(admin_scope)
+    assert 'data-prod="vivy"' in course_page and 'data-prod="bosun"' in course_page
+    blockers = issue_build.live_html_blockers(admin_scope)
+    assert "VIVY-BLOCKER-TITLE" in blockers and "BOSUN-BLOCKER-TITLE" in blockers
+
+
+def test_an_out_of_scope_item_page_is_none_exactly_like_a_missing_one(db):
+    """`detail_html` returns None for both (E19·2,
+    issue_01M35K5AB4PRTJ71DMQW7Q4D3B) — server.py turns None into the same 404
+    either way, so an id outside scope must not be told apart from one that
+    does not exist at all."""
+    library_fake.seed_issue(**_mk(id="issue_outscope", product="bosun", title="t"))
+    scope = frozenset({"vivy"})
+    assert issue_build.detail_html("issue_outscope", scope) is None
+    assert issue_build.detail_html("issue_does_not_exist_either", scope) is None
+    # The positive control: the same item, read with a scope that covers it.
+    assert issue_build.detail_html("issue_outscope", frozenset({"bosun"})) is not None
+
+
+def test_a_found_during_item_outside_scope_is_dropped_from_the_epic_page(db):
+    """A found-during item can be filed against a different product than the
+    epic it names (that cross-product case is the feature) — so it leaks that
+    other project's title unless filtered on its own, separately from the
+    epic's already-checked visibility."""
+    library_fake.seed_issue(**_mk(id="issue_epicfd2", product="vivy",
+                                  title="The epic", type="epic"))
+    library_fake.seed_issue(**_mk(id="issue_found_outscope", product="bosun",
+                                  title="BOSUN-FOUND-TITLE", found_during="issue_epicfd2"))
+    library_fake.seed_issue(**_mk(id="issue_found_inscope", product="vivy",
+                                  title="VIVY-FOUND-TITLE", found_during="issue_epicfd2"))
+    scope = frozenset({"vivy"})
+    html = issue_build.detail_html("issue_epicfd2", scope)
+    assert "VIVY-FOUND-TITLE" in html
+    assert "BOSUN-FOUND-TITLE" not in html
+    assert "Found during this epic · 1" in html
+
+
+def test_a_found_during_link_to_an_epic_outside_scope_is_not_shown(db):
+    """The reverse direction of the test above (review round 1 on PR #372): an
+    in-scope item found during an epic in another product must not show that
+    epic's id, which would confirm it exists. The same page read with a scope
+    that covers the epic shows the link, so the omission is the scope check
+    rather than a missing link."""
+    library_fake.seed_issue(**_mk(id="issue_bosun_epic_x", product="bosun",
+                                  title="Bosun epic", type="epic"))
+    library_fake.seed_issue(**_mk(id="issue_vivy_found_x", product="vivy",
+                                  title="Vivy item", found_during="issue_bosun_epic_x"))
+    scoped = issue_build.detail_html("issue_vivy_found_x", frozenset({"vivy"}))
+    assert "issue_bosun_epic_x" not in scoped
+    assert "found during" not in scoped
+    both = issue_build.detail_html("issue_vivy_found_x", frozenset({"vivy", "bosun"}))
+    assert 'found during <a href="/engineering/issues/issue_bosun_epic_x">' in both
+
+
+def test_a_duplicate_of_an_item_outside_scope_names_no_id(db):
+    """Review round 2 on PR #372: the resolve API accepts any duplicate_of, so a
+    vivy item can be marked a duplicate of a bosun one. A viewer scoped to vivy
+    must not see that bosun id, on the item's page or in the Corrections
+    page's resolved strip. A viewer whose scope covers bosun sees it in both
+    places, so the omission is the scope check."""
+    library_fake.seed_issue(**_mk(id="issue_bosun_orig_x", product="bosun", title="Bosun original"))
+    library_fake.seed_issue(**_mk(id="issue_vivy_dupe_x", product="vivy", title="Vivy dupe",
+                                  state="duplicate", resolution="duplicate",
+                                  resolved_by="operator@example.com", resolved_at=models_utcnow(),
+                                  refs={"duplicate_of": "issue_bosun_orig_x"}))
+    vivy = frozenset({"vivy"})
+    both = frozenset({"vivy", "bosun"})
+    assert "issue_bosun_orig_x" not in issue_build.detail_html("issue_vivy_dupe_x", vivy)
+    assert "issue_bosun_orig_x" not in issue_build.live_html_corrections(None, vivy)
+    assert 'href="/engineering/issues/issue_bosun_orig_x"' in issue_build.detail_html(
+        "issue_vivy_dupe_x", both)
+    assert "issue_bosun_orig_x" in issue_build.live_html_corrections(None, both)
+
+
+def test_a_prerequisite_in_a_project_outside_scope_names_no_id_or_title(db):
+    """Review round 2 on PR #372: a prerequisite can name an item in another
+    product (platform/decisions/0074's example is a Deck item waiting on a
+    Bosun item). A viewer scoped to vivy sees the vivy item as blocked by
+    something they cannot see, with neither the bosun item's id nor its title.
+    A viewer whose scope covers bosun sees the title and the link."""
+    library_fake.seed_issue(**_mk(id="issue_bosun_pre_x", product="bosun",
+                                  title="BOSUN-PREREQ-TITLE"))
+    library_fake.seed_issue(**_mk(
+        id="issue_vivy_waits_x", product="vivy", title="Vivy waits", state="open",
+        prerequisites=[{"item": "issue_bosun_pre_x", "state": "open",
+                        "title": "BOSUN-PREREQ-TITLE"}]))
+    scoped = issue_build.detail_html("issue_vivy_waits_x", frozenset({"vivy"}))
+    assert "issue_bosun_pre_x" not in scoped
+    assert "BOSUN-PREREQ-TITLE" not in scoped
+    assert "a project you cannot see" in scoped
+    both = issue_build.detail_html("issue_vivy_waits_x", frozenset({"vivy", "bosun"}))
+    assert "BOSUN-PREREQ-TITLE" in both
+    assert "/engineering/issues/issue_bosun_pre_x" in both

@@ -77,7 +77,8 @@ def _age_short(when, now) -> str:
     return f"{secs // 86400}d"
 
 
-def _active_alerts(now) -> tuple[int, str]:
+def _active_alerts(now, scope: frozenset[str] = frozenset(),
+                   whole_fleet: bool = False) -> tuple[int, str]:
     """Currently-crossed Dashboards policy thresholds — the same
     `alerts_build.gather()` call `/alerts` renders and `home_build`'s
     quick-link pill already counts (`home_build._active_alerts_count`).
@@ -93,8 +94,12 @@ def _active_alerts(now) -> tuple[int, str]:
     internally and never raises on a single bad snapshot; this function adds
     nothing of its own, so `gather()`'s `_vault_tile` wrapper is what turns an
     outright failure here into "unavailable" rather than a false zero.
+
+    `scope` and `whole_fleet` pass straight to `gather()` (E19·3,
+    issue_01M35K5EAZD85FBYXEBQVRKVZV), so the tile counts the alerts `/alerts`
+    shows this viewer. The defaults show none.
     """
-    alerts = alerts_build.gather()
+    alerts = alerts_build.gather(scope, whole_fleet)
     if not alerts:
         return 0, ""
     n_bad = sum(1 for a in alerts if a["severity"] == "bad")
@@ -115,7 +120,8 @@ def _cleared_prs() -> tuple[int | None, str]:
     return cleared, ("CI green, no conflicts" if cleared else "")
 
 
-def gather(now=None, viewer: str | None = None) -> list[dict]:
+def gather(now=None, viewer: str | None = None, *, scope: frozenset[str] = frozenset(),
+           whole_fleet: bool = False) -> list[dict]:
     """The three tiles as data. Each source is isolated: a failure yields a None
     count rather than propagating, because this renders on Home.
 
@@ -158,7 +164,8 @@ def gather(now=None, viewer: str | None = None) -> list[dict]:
     #
     # The href points at /alerts (epic issue_01M0EHRNW5HVJCAXZHYQCBZ3YW moved
     # the page under Dashboards; the old /engineering/alerts still 302s there).
-    alerts = _vault_tile("Alerts", "/alerts", _active_alerts)
+    alerts = _vault_tile("Alerts", "/alerts",
+                         lambda n: _active_alerts(n, scope, whole_fleet))
     alerts["urgent"] = True
     tiles.append(alerts)
     return tiles
@@ -191,7 +198,8 @@ def _tile_html(t: dict) -> str:
             f'<span class="wlabel">{escape(t["label"])}</span>{sub}</a>')
 
 
-def strip_html(now=None, viewer: str | None = None) -> str:
+def strip_html(now=None, viewer: str | None = None, *, scope: frozenset[str] = frozenset(),
+               whole_fleet: bool = False) -> str:
     """The strip, or an all-clear line when every actionable tile is zero.
 
     An unknown (None) count does NOT count as clear — if the merge cache is cold
@@ -207,7 +215,7 @@ def strip_html(now=None, viewer: str | None = None) -> str:
     the round-1 reviewer, who noted the isolation boundary sat one level in.
     """
     try:
-        tiles = gather(now, viewer)
+        tiles = gather(now, viewer, scope=scope, whole_fleet=whole_fleet)
         actionable = [t["count"] for t in tiles]
         if all(c == 0 for c in actionable):
             return ('<section class="waiting clear" aria-label="Waiting on you">'

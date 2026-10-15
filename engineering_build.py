@@ -91,7 +91,12 @@ VISIBLE_KINDS = ["decision", "arch", "architecture", "reference", "runbook",
                  # rule assembled into a session's CLAUDE.md, and it is also a
                  # reviewed Reference Room document a person reads to see what
                  # the agents are told, so it is browsable.
-                 "instruction-block"]
+                 "instruction-block",
+                 # `build-plan` (knowledge validate.py, Library issue
+                 # issue_01M2TWRWHJMA6MF9NKZ9Z05KXN) is the sixth: the
+                 # implementation checklist between an ADR and the code, read by
+                 # the people approving what an agent will build from it.
+                 "build-plan"]
 # Descriptive left-nav labels for every browsable kind — terse codes (DEC/ARCH)
 # read poorly, and "decision" vs "arch" vs "architecture" need disambiguating
 # (the operator 2026-06-19, ARCH-200). The KIND_TOOLTIP below carries the full explanation
@@ -111,6 +116,7 @@ KIND_LABEL = {
     "field-notes": "Field Notes",
     "bead": "Beads",
     "instruction-block": "Instruction Blocks",
+    "build-plan": "Build Plans",
 }
 # Hover tooltip per kind — what the category is, and how the easily-confused ones
 # differ (ADR vs ARCH vs Architecture).
@@ -129,6 +135,7 @@ KIND_TOOLTIP = {
     "field-notes": "Conceptual references explaining how we think about part of the system — no code, written to be readable outside the team.",
     "bead": "One per project — the diagram of where that product is going as currently known, and how far from there it is. Its accounting is what keeps the ADRs and the to-do queue honest.",
     "instruction-block": "One rule for agents, stated once. Its frontmatter names the crews, agents and topics it binds, and a session's CLAUDE.md is assembled from the blocks that bind it.",
+    "build-plan": "The implementation checklist between a decision and the code: what gets built, in what order, from which work items. Its topics bind it to the work items a coder is dispatched on.",
 }
 # Project section order on every category page — "Convivy & Shared" first
 # (the operator 2026-06-19), then the products, then the engineering-internal projects.
@@ -1176,7 +1183,7 @@ if(engToggle && engSidebar) {
 """
 
 
-def render(docs: list[dict]) -> str:
+def render(docs: list[dict], scope: frozenset[str], whole_fleet: bool) -> str:
     # `body` is dropped here, not upstream in `load_docs()`/`arch_docs()` —
     # bodies are 94% of this payload across 1158 rows, 10.5 MB of a page that
     # renders on every request (issue_01M0Y7GZED2THYETHCT8NPHHDS). The drawer
@@ -1187,11 +1194,26 @@ def render(docs: list[dict]) -> str:
     # for the term client-side matching (reflabel/id/title/blurb) can't
     # cover. `blurb` and `len` stay — the drawer threshold at `clickRow`
     # reads `d.len`, not the body, so that logic is unaffected.
+    #
+    # `scope`/`whole_fleet` (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M): a doc
+    # whose project is outside `scope` is dropped before `thin_docs` is even
+    # built, so it never reaches the inline JSON this page embeds — the
+    # "filter before grouping" rule `issue_build` applies, applied here to
+    # the payload rather than a server-rendered list. `projectLabel`/
+    # `projectOrder` are then narrowed to the projects actually PRESENT in
+    # what survives, rather than shipped as the full fleet-wide maps
+    # regardless of scope — the same "an empty pill discloses an unreleased
+    # product's existence" rule ARCH-228 states for the contractor bundle,
+    # applied here to a scoped full-tier viewer instead of a tier.
+    docs = docs if whole_fleet else [d for d in docs if d["project"] in scope]
     thin_docs = [{k: v for k, v in d.items() if k != "body"} for d in docs]
+    present_projects = {d["project"] for d in thin_docs}
+    project_label = {p: label for p, label in PROJECT_LABEL.items() if p in present_projects}
+    project_order = [p for p in PROJECT_ORDER if p in present_projects]
     payload = json.dumps({
         "docs": thin_docs,
-        "projectLabel": PROJECT_LABEL,
-        "projectOrder": PROJECT_ORDER,
+        "projectLabel": project_label,
+        "projectOrder": project_order,
         "kindOrder": VISIBLE_KINDS,
         "kindLabel": KIND_LABEL,
         "kindTooltip": KIND_TOOLTIP,
@@ -1238,10 +1260,10 @@ def render(docs: list[dict]) -> str:
     )
 
 
-def live_html() -> str:
+def live_html(scope: frozenset[str], whole_fleet: bool) -> str:
     # The KB browse = indexed KB docs + the substrate ARCH log surfaced as `arch`
     # docs (ARCH-196), so a cited ARCH-NNN is browsable alongside the ADRs.
-    return render(load_docs() + arch_docs())
+    return render(load_docs() + arch_docs(), scope, whole_fleet)
 
 
 def get_arch_body(doc_id: str) -> str | None:
@@ -1642,12 +1664,22 @@ def arch_log_html() -> str:
 
 
 def build_static() -> None:
-    """Write static fallbacks (server.py serves these if a live render throws)."""
+    """Write static fallbacks (server.py serves these if a live render throws).
+
+    **`engineering.html` is seeded empty, not `live_html()` of some scope**
+    (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M): this file is served to
+    whichever viewer's live render failed, scoped or not, so a snapshot
+    naming every project's documents would leak to a scoped viewer — the
+    same reasoning `chart_house_build.build_static` and `issue_build.main`
+    already apply to their own fallbacks. `engineering-arch-log.html` carries
+    no per-project scoping (the ARCH log is a platform-wide, cross-project
+    decision record, not filtered by viewer scope — see `arch_log_html`'s
+    docstring), so it keeps seeding the real content."""
     OUT.mkdir(parents=True, exist_ok=True)
-    (OUT / "engineering.html").write_text(live_html(), encoding="utf-8")
+    (OUT / "engineering.html").write_text(render([], frozenset(), False), encoding="utf-8")
     (OUT / "engineering-arch-log.html").write_text(arch_log_html(), encoding="utf-8")
-    print(f"Wrote site/engineering.html ({len(load_docs())} docs) + "
-          f"site/engineering-arch-log.html.")
+    print("Wrote site/engineering.html (empty static fallback) + "
+          "site/engineering-arch-log.html.")
 
 
 if __name__ == "__main__":

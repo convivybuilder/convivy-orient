@@ -28,6 +28,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Request
 
+import archives_build
+import crew_registry
 import library_client
 from access_identity import tier_for
 from api_common import _iso, _json, api_guard as _api, resolve_identity
@@ -82,18 +84,36 @@ async def browse(request: Request):
     here validates it against a known-kind list, which is what makes a kind
     this page has never heard of reachable the moment a row of it exists.
 
-    `total` comes from `signal_facets(kind=[kind])`, a true count over the
-    whole matching set — NOT `len(signals)`, which is capped at `_BROWSE_CAP`
-    and would under-report the moment a shape holds more rows than the cap."""
-    _ident, err = _authorized(request)
+    **Restricted to the viewer's own project scope** (E19·4,
+    issue_01M35K5JQ7Z7MHYZGWRSB5F85M): the first pass of this epic scoped
+    `/archives` itself but found this route — its own client-side JS calls
+    it for every shape beyond the three `/archives` browses natively — still
+    fanning out over the whole store. A scoped (non-whole-fleet) viewer's
+    fetch is restricted to their own projects, the same per-product fan-out
+    `archives_build.fan_out` gives `/archives/prs` and `/archives/changelogs`,
+    rather than one flat `list_signals(kind=...)` call an out-of-scope
+    product's rows could crowd a shared cap out of (that module's own
+    docstring). `total` is `signal_facets(kind=[kind]).total`, a true
+    whole-store count, ONLY for a whole-fleet viewer; a scoped viewer's total
+    is `len(signals)` instead — narrower, matching the same rule
+    `signals_build.live_html` already applies to `/archives`'s own header
+    count, since `signal_facets` takes no multi-project filter to recompute
+    a true scoped total from."""
+    ident, err = _authorized(request)
     if err:
         return err
     kind = (request.query_params.get("kind") or "").strip()
     if not kind:
         return _json(400, {"error": "kind is required"})
+    whole_fleet = crew_registry.covers_every_project(ident.products)
     try:
-        rows = library_client.list_signals(kind=[kind], cap=_BROWSE_CAP)
-        total = library_client.signal_facets(kind=[kind]).total
+        if whole_fleet:
+            rows = library_client.list_signals(kind=[kind], cap=_BROWSE_CAP)
+            total = library_client.signal_facets(kind=[kind]).total
+        else:
+            rows = archives_build.fan_out(kind, cap_per_product=_BROWSE_CAP,
+                                          products=sorted(ident.products))
+            total = len(rows)
     except Exception:
         return _json(503, {"error": "the Library could not be reached; try again shortly"})
     return _json(200, {"kind": kind, "total": total, "cap": _BROWSE_CAP,
@@ -109,11 +129,24 @@ async def search(request: Request):
     unchanged rather than relabeling either as one. No `kind` parameter is
     accepted or forwarded — the Library refuses it 400 on this route, and
     offering it here would produce an error a reader cannot act on. `source`/
-    `product` are likewise not accepted: both would narrow the retrieved
-    window rather than the store, the same defect `kind` has, and the page
-    this route serves keeps search a pure text lookup rather than offering a
-    control that looks like `/browse`'s but means something weaker."""
-    _ident, err = _authorized(request)
+    `product` are likewise not accepted as a QUERY parameter: both would
+    narrow the retrieved window rather than the store, the same defect `kind`
+    has, and the page this route serves keeps search a pure text lookup
+    rather than offering a control that looks like `/browse`'s but means
+    something weaker.
+
+    **A scoped (non-whole-fleet) viewer's results ARE filtered to their own
+    project scope** (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M) — post-fetch,
+    since `library_client.search_signals` takes no product pre-filter at
+    all (unlike `list_signals`'s `product=`), so there is no pre-filter to
+    ask the Library for. A scoped viewer's `count` is `len(signals)`, never
+    the Library's count for the unfiltered window: the gap between the two
+    would tell a viewer that a project outside their scope holds rows
+    matching their query (PR #375 security review, round 2). `truncated`
+    stays the Library's own flag, since a nearest-neighbour window over a
+    store larger than the cap comes back truncated whatever the query, so it
+    says nothing about which projects matched."""
+    ident, err = _authorized(request)
     if err:
         return err
     q = (request.query_params.get("q") or "").strip()
@@ -122,10 +155,14 @@ async def search(request: Request):
         # library call to make, so answer the empty case directly rather than
         # asking the Library to refuse it.
         return _json(200, {"count": 0, "truncated": False, "signals": []})
+    whole_fleet = crew_registry.covers_every_project(ident.products)
     try:
         resp = library_client.search_signals(q, cap=_SEARCH_CAP)
     except Exception:
         return _json(503, {"error": "the Library could not be reached; try again shortly"})
-    return _json(200, {"count": resp.count, "truncated": resp.truncated,
+    results = resp.results if whole_fleet else [
+        r for r in resp.results if r.signal.product in ident.products]
+    count = resp.count if whole_fleet else len(results)
+    return _json(200, {"count": count, "truncated": resp.truncated,
                        "signals": [_signal_json(r.signal, distance=r.distance)
-                                  for r in resp.results]})
+                                  for r in results]})

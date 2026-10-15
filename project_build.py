@@ -42,6 +42,7 @@ from urllib.parse import quote
 
 import build
 import chart_house_build
+import crew_registry
 import design_system as ds
 import library_client
 import merge_queue_build
@@ -343,10 +344,20 @@ def _page(name: str, data: dict) -> str:
                          body=body, extra_css=merge_queue_build._CSS + _CSS)
 
 
-def detail_html(name: str) -> str | None:
-    """One project's page, or None when `name` is not a known project — the
-    404 the caller (server.py's `/projects/<name>` route) must serve rather
-    than shelling out to `gh` for a repo nobody declared a project.
+def detail_html(name: str, scope: frozenset[str], whole_fleet: bool) -> str | None:
+    """One project's page, or None when `name` is not a known project, or
+    (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M) is not a repo the viewer's
+    scope reaches — the 404 the caller (server.py's `/projects/<name>`
+    route) must serve rather than shelling out to `gh` for a repo nobody
+    declared a project, or one the viewer is not entitled to.
+
+    `name` is a GitHub repo, the same identity space `crew_registry.
+    repos_in_scope` resolves a viewer's project scope into (see that
+    function's own docstring on why a project slug is not always a repo
+    name) — reused here rather than a second alias table, the same choice
+    `crews_build._visible_repos` makes. A project name can be guessed (it is
+    a short, literal repo name), so this check is this page's own rather
+    than left to the caller.
 
     The lede links to `/chart-house`, Orient's own web surface for a Course
     (added by the same dashboards epic this page's Course-position line
@@ -355,6 +366,8 @@ def detail_html(name: str) -> str | None:
     `chart_house_build._REPO_ALIASES` already documents as not always equal.
     """
     if name not in KNOWN_PROJECTS:
+        return None
+    if not whole_fleet and name not in crew_registry.repos_in_scope(scope):
         return None
     return _page(name, _fetch(name))
 

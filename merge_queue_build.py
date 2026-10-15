@@ -26,6 +26,7 @@ import subprocess
 import time
 from html import escape
 
+import crew_registry
 import design_system as ds
 import orient_time
 from url_safety import safe_http_url
@@ -287,12 +288,18 @@ def _page(rows: list[dict]) -> str:
                          body=body, extra_css=_CSS)
 
 
-def live_html() -> str:
-    """/engineering/merge-queue — the org's open PRs, most-recent activity first."""
+def live_html(scope: frozenset[str] = frozenset(), whole_fleet: bool = True) -> str:
+    """/engineering/merge-queue — the org's open PRs, most-recent activity
+    first, restricted to `scope` (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M):
+    a PR whose repo the registry lists under no project in `scope` is
+    dropped before any count, chip or card is built from it."""
     try:
         rows = _fetch_open_prs()
     except Exception:
         rows = []
+    if not whole_fleet:
+        repos = crew_registry.repos_in_scope(scope)
+        rows = [r for r in rows if r["repo"] in repos]
     return _page(rows)
 
 

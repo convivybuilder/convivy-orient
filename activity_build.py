@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import crew_registry
 import design_system as ds
 import orient_time
 from paths import STATE_ROOT
@@ -60,9 +61,39 @@ def freshness(snap: dict) -> ds.Freshness:
     )
 
 
-def live_html() -> str:
-    """Render the /activity page from the current snapshot at request time."""
-    return _render(_load_snapshot())
+def _in_scope(product: str | None, scope: frozenset[str], whole_fleet: bool) -> bool:
+    """Whether a session's `product` (the repo it targeted) belongs to
+    `scope` (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M) — the same
+    `crew_registry.repos_in_scope` check `/crews`/`/health` key their own
+    per-repo rows on. A session with no product (`product` empty/None)
+    belongs to no project, so it is kept only for a whole-fleet viewer."""
+    if whole_fleet:
+        return True
+    if not product:
+        return False
+    return product in crew_registry.repos_in_scope(scope)
+
+
+def scoped_snapshot(scope: frozenset[str], whole_fleet: bool) -> dict:
+    """The current snapshot, unchanged for a whole-fleet viewer; otherwise
+    with every out-of-scope session dropped and `session_count` recomputed
+    over what remains, so a caller never sees a count that disagrees with
+    the sessions actually in the dict."""
+    snap = _load_snapshot()
+    if whole_fleet:
+        return snap
+    sessions = [s for s in snap.get("sessions", [])
+               if _in_scope(s.get("product"), scope, whole_fleet)]
+    return {**snap, "sessions": sessions, "session_count": len(sessions)}
+
+
+def live_html(scope: frozenset[str] = frozenset(), whole_fleet: bool = True) -> str:
+    """Render the /activity page from the current snapshot at request time,
+    restricted to `scope` (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M): a
+    session whose product is outside `scope` never reaches the embedded
+    JSON, so it cannot appear in the table, the product filter chips, or the
+    totals the page computes client-side from that same embed."""
+    return _render(scoped_snapshot(scope, whole_fleet))
 
 
 def thin(snap: dict) -> dict:
@@ -77,20 +108,32 @@ def thin(snap: dict) -> dict:
                                  for s in snap.get("sessions", [])]}
 
 
-def session_nodes(session_id: str) -> list | None:
-    """One session's dispatch tree, or None when no session has that id."""
+def session_nodes(session_id: str, scope: frozenset[str] = frozenset(),
+                  whole_fleet: bool = True) -> list | None:
+    """One session's dispatch tree, or None when no session has that id OR
+    the session's product is outside `scope` (E19·4,
+    issue_01M35K5JQ7Z7MHYZGWRSB5F85M) — a session that works only an
+    out-of-scope project answers exactly like an unknown id, never a
+    distinguishable refusal."""
     for s in _load_snapshot().get("sessions", []):
         if s.get("session_id") == session_id:
+            if not _in_scope(s.get("product"), scope, whole_fleet):
+                return None
             return s.get("nodes") or []
     return None
 
 
 def build() -> None:
+    """Seed the static fallback, deliberately empty (E19·4,
+    issue_01M35K5JQ7Z7MHYZGWRSB5F85M) — this file used to write the current,
+    real, unscoped snapshot, which a scoped viewer would see on any live-
+    render failure (the same leak class 26bb079 fixed for crews/signals/
+    engineering/roster)."""
     out = STATE_ROOT / "site"
     out.mkdir(parents=True, exist_ok=True)
-    snap = _load_snapshot()
-    (out / "activity.html").write_text(_render(snap), encoding="utf-8")
-    print(f"Wrote site/activity.html ({snap['session_count']} sessions).")
+    fallback = _render({"generated_at": None, "session_count": 0, "sessions": []})
+    (out / "activity.html").write_text(fallback, encoding="utf-8")
+    print("Wrote site/activity.html (empty static fallback)")
 
 
 def _render(snap: dict) -> str:

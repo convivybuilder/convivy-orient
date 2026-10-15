@@ -172,6 +172,19 @@ def test_the_capability_is_checked_against_the_epics_own_product(client, monkeyp
     assert _post(client, _human("scoped@example.com")).status_code == 200
 
 
+def test_an_out_of_scope_epic_and_a_missing_one_answer_byte_identically(client, monkeypatch):
+    """E19·2 (issue_01M35K5AB4PRTJ71DMQW7Q4D3B): an epic outside the caller's
+    scope must read exactly like one that does not exist, never a distinct
+    refusal that would confirm the epic is there."""
+    scoped_out_lib = _Library(monkeypatch, _epic())
+    out_of_scope = _post(client, _human("scoped@example.com"))
+    missing_lib = _Library(monkeypatch, None)
+    missing = _post(client, _human("scoped@example.com"))
+    assert out_of_scope.status_code == missing.status_code == 404
+    assert out_of_scope.content == missing.content
+    assert scoped_out_lib.calls == missing_lib.calls == []
+
+
 def test_a_missing_epic_and_a_non_epic_both_404(client, monkeypatch):
     _Library(monkeypatch, None)
     assert _post(client, _human()).status_code == 404

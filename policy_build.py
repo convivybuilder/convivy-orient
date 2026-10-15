@@ -59,8 +59,9 @@ _SCOPE_NOTE = (
 )
 
 
-def _known_values(table: dict[str, str] | None,
-                  crews: list[str] | None) -> tuple[list[str], list[str], list[str]]:
+def _known_values(table: dict[str, str] | None, crews: list[str] | None,
+                  scope: frozenset[str], whole_fleet: bool,
+                  ) -> tuple[list[str], list[str], list[str]]:
     """Agent, crew and model strings this repo already knows about, offered
     as `<datalist>` suggestions — NOT a validation list. The Library's policy
     table has no notion of a valid agent/crew/model, only strings it was
@@ -74,6 +75,14 @@ def _known_values(table: dict[str, str] | None,
     means a new project or agent shows up in these suggestions the same way
     it shows up on /engineering/roster, with nothing here to fall out of
     sync.
+
+    **A project's own lane agents and its crew are restricted to `scope`**
+    (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M) the same way `/engineering/
+    roster`'s own cards are: a project the registry lists under no project
+    in `scope` offers no agent slug and no crew key here. `autonomous`
+    (cross-cutting agents in no project's profile) stays unfiltered,
+    matching `roster_build`'s own precedent — it names agent slugs and
+    models, never a project.
 
     **Crews are the registry's crew keys** (`crew_registry.public_crews`),
     the value `agentctl` looks a dispatch's policy up under. The roster's
@@ -94,9 +103,12 @@ def _known_values(table: dict[str, str] | None,
     unavailable) no model is suggested, since a raw alias is the wrong key.
     """
     roster = roster_build.load_roster()
+    repos = None if whole_fleet else crew_registry.repos_in_scope(scope)
     agents: set[str] = set()
     models: set[str] = set()
     for project in roster["projects"]:
+        if repos is not None and project.get("slug") not in repos:
+            continue
         for lane in project["lanes"]:
             for agent in lane["agents"]:
                 slug = agent.get("slug")
@@ -112,7 +124,11 @@ def _known_values(table: dict[str, str] | None,
         model = agent.get("model")
         if model and table is not None:
             models.add(model_ids.resolve(model, table))
-    return sorted(agents), list(crews or []), sorted(models)
+    crews = crews or []
+    if not whole_fleet:
+        in_scope_crews = crew_registry.crews_in_scope(scope)
+        crews = [c for c in crews if c in in_scope_crews]
+    return sorted(agents), list(crews), sorted(models)
 
 
 def _datalist_html(id_: str, values: list[str]) -> str:
@@ -121,8 +137,8 @@ def _datalist_html(id_: str, values: list[str]) -> str:
 
 
 def _form_html(agent: str, crew: str, model: str, table: dict[str, str] | None,
-               crews: list[str] | None) -> str:
-    known_agents, known_crews, known_models = _known_values(table, crews)
+               crews: list[str] | None, scope: frozenset[str], whole_fleet: bool) -> str:
+    known_agents, known_crews, known_models = _known_values(table, crews, scope, whole_fleet)
     return (
         f'<form method="get" action="/engineering/policy" class="pol-form">'
         f'<label>Agent<br><input type="text" name="agent" list="polAgents" '
@@ -314,7 +330,11 @@ _WRITE_JS = r"""
 """
 
 
-def _result_html(agent: str, crew: str, model: str, crews: list[str] | None) -> str:
+def _result_html(agent: str, crew: str, model: str, crews: list[str] | None,
+                 whole_fleet: bool = True) -> str:
+    """The resolution for one triple, and the write form under it. The write
+    form's "every public crew" box names every crew in the registry, so a
+    scoped viewer is given the form without it (E19·4)."""
     resolution = library_client.resolve_policy(agent, crew, model)
     rows = _policy_rows(resolution, crews is not None and crew in crews)
     if not resolution.explicit:
@@ -347,12 +367,13 @@ def _result_html(agent: str, crew: str, model: str, crews: list[str] | None) -> 
         f'<p class="pol-footnote">Everything not listed above resolves to '
         f'"{escape(resolution.default)}". Read from the Library for this '
         f'request only — policy version {resolution.version}, never cached.</p>'
-        f'{_write_form_html(agent, crew, model, crews)}'
+        f'{_write_form_html(agent, crew, model, crews if whole_fleet else None)}'
         f'</div>'
     )
 
 
-def live_html(query: dict | None = None) -> str:
+def live_html(query: dict | None = None, scope: frozenset[str] = frozenset(),
+              whole_fleet: bool = True) -> str:
     """Render /engineering/policy for the agent/crew/model in `query` (the
     raw `dict(request.query_params)` server.py passes, matching
     `crews_build.runs_html`'s own signature). Raises whatever
@@ -361,6 +382,14 @@ def live_html(query: dict | None = None) -> str:
     /crews/runs, logs it, and answers 500 with no static fallback, which is
     the only way this page is visibly different from an empty result rather
     than silently indistinguishable from one.
+
+    `scope`/`whole_fleet` (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M) restrict
+    the form's own agent/crew suggestion lists, passed to `_form_html` — see
+    `_known_values`'s docstring — and gate the resolve itself: a scoped
+    viewer's crew must be one `crew_registry.crews_in_scope(scope)` lists,
+    or the Library is never asked. A crew outside their scope and a crew the
+    registry has never heard of get the same answer, so the page cannot be
+    used to probe whether an out-of-scope crew exists or what it is denied.
 
     `model` is normalized through `model_ids.resolve` before it is used for
     anything — the lookup, the redisplayed form field, and the write form's
@@ -385,12 +414,17 @@ def live_html(query: dict | None = None) -> str:
     except crew_registry.RegistryUnavailable:
         crews = None
 
-    if agent and crew and model and table is None:
+    if (agent and crew and model and not whole_fleet
+            and crew not in crew_registry.crews_in_scope(scope)):
+        content = ds.empty_state(
+            f'No crew "{crew}" in your projects. This lookup answers only for '
+            f'the crews of the projects you have access to.')
+    elif agent and crew and model and table is None:
         content = ds.empty_state(
             "The model list is unavailable (agentctl models gave no usable "
             "answer), so this lookup cannot be keyed the way a dispatch keys it.")
     elif agent and crew and model:
-        content = _result_html(agent, crew, model, crews)
+        content = _result_html(agent, crew, model, crews, whole_fleet)
     else:
         content = ds.empty_state(
             "Enter an agent, crew and model above to see what's denied for "
@@ -404,7 +438,7 @@ def live_html(query: dict | None = None) -> str:
     <p class="scope-note">{escape(_SCOPE_NOTE)}</p>
   </header>
   <div class="wrap">
-    {_form_html(agent, crew, model, table, crews)}
+    {_form_html(agent, crew, model, table, crews, scope, whole_fleet)}
     {content}
   </div>
 </div>'''

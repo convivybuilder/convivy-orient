@@ -3,6 +3,7 @@
 //
 //   node kb_doc_harness.mjs corpus <dir>   one JSON line per .md file under dir
 //   node kb_doc_harness.mjs format         one JSON object for the formatting run
+//   node kb_doc_harness.mjs table          one JSON object for the table-cell edit run
 //
 // Paths are resolved from this file, so the test needs no install step.
 import { readFileSync, readdirSync } from 'node:fs';
@@ -81,7 +82,30 @@ function format() {
   }));
 }
 
+// A cell typed into the way a reader would: md-serial gives each cell of a
+// top-level table its own contenteditable island, so the text node changes and
+// the browser fires `input` on the root.
+function table() {
+  const fm = '---\nid: synthetic/table\nkind: reference\ntitle: Table\nstatus: current\n---\n\n';
+  const content = fm + 'Before\n\n|Name|Count|Note|\n|:---|:---:|---:|\n| alpha | 1 | `a\\|b` |\n|gamma|  2 |`c\\|d`|\n\nAfter\n';
+  const { root, frontmatter, ed } = open(content);
+  const tableEl = root.children[0].children[1];
+  const th = tableEl.children[0].children[0].children[0];
+  const td = tableEl.children[1].children[0].children[0];
+  const revBefore = ed.revision();
+  Array.from(td.childNodes)[0].data = 'beta';
+  root.dispatchEvent({ type: 'input' });
+  const checked = kb.checkedDraft(frontmatter, ed);
+  console.log(JSON.stringify({
+    original: content, frontmatter, draft: checked.draft, round_trip_ok: checked.ok,
+    failures: checked.failures, tag: tableEl.tagName,
+    th_editable: th.getAttribute('contenteditable'), td_editable: td.getAttribute('contenteditable'),
+    revision_advanced: ed.revision() > revBefore,
+  }));
+}
+
 const [mode, arg] = process.argv.slice(2);
 if (mode === 'corpus') corpus(arg);
 else if (mode === 'format') format();
-else { console.error('usage: kb_doc_harness.mjs corpus <dir> | format'); process.exit(2); }
+else if (mode === 'table') table();
+else { console.error('usage: kb_doc_harness.mjs corpus <dir> | format | table'); process.exit(2); }

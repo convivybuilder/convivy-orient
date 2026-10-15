@@ -20,6 +20,7 @@ import datetime as dt
 import json
 import pathlib
 
+import crew_registry
 import home_build
 import design_system as ds
 import library_client
@@ -144,17 +145,20 @@ def test_overview_cost_performance_differs_from_ci_health(tmp_path, monkeypatch)
     monkeypatch.setattr(db, "PA_LEDGER", tmp_path / "absent.jsonl")
     monkeypatch.setattr(db, "JUDGE", tmp_path / "absent2.jsonl")
 
-    cp = overview_build._cost_per_merged_pr()
+    cp = overview_build._cost_per_merged_pr(db.normalize())
     # One merged PR at $0.50 → $/merged should be "$0.50"
     assert cp["value"] == "$0.50", f"Expected '$0.50', got {cp['value']!r}"
     assert "merged PR" in cp["delta"]
 
-    # The CI pass rate from home_build reads health.json, not the scorecard.
-    # We just need to confirm the two values differ — set up a health snapshot
-    # so _ci_health() returns a known percentage, and compare.
-    health_snap = tmp_path / "health.json"
-    health_snap.write_text(json.dumps({"repos": [{"ci_pass_rate": 0.80}]}))
-    monkeypatch.setattr(home_build, "_HEALTH_SNAPSHOT", health_snap)
+    # The CI pass rate from home_build reads health.json (through
+    # code_health_build.load_snapshot, since E19·4's scoping of /health —
+    # issue_01M35K5JQ7Z7MHYZGWRSB5F85M), not the scorecard. We just need to
+    # confirm the two values differ — stub the snapshot load so
+    # home_build._ci_health(whole_fleet=True) returns a known percentage,
+    # and compare.
+    import code_health_build
+    monkeypatch.setattr(code_health_build, "load_snapshot",
+                        lambda: ("2026-06-21T00:00:00Z", [{"repo": "vivy", "ci_pass_rate": 0.80}]))
 
     health = home_build._ci_health()
     assert health["value"] != cp["value"], (
@@ -170,7 +174,7 @@ def test_overview_cost_performance_graceful_on_empty_scorecard(tmp_path, monkeyp
     monkeypatch.setattr(db, "PA_LEDGER", tmp_path / "absent2.jsonl")
     monkeypatch.setattr(db, "JUDGE", tmp_path / "absent3.jsonl")
 
-    cp = overview_build._cost_per_merged_pr()
+    cp = overview_build._cost_per_merged_pr(db.normalize())
     assert cp["value"] == "—"
 
 
@@ -432,7 +436,7 @@ def test_full_home_recent_docs_link_to_the_documents_own_page(monkeypatch):
                                     title="Spine brief", audience=["team"],
                                     last_reviewed="2026-07-16")
 
-    html = home_build.live_html("full", "t")
+    html = home_build.live_html("full", "t", scope=frozenset({"proj"}), whole_fleet=True)
     assert 'href="/reference/doc/constance/reference/spine-brief"' in html
     assert "/reference#doc=" not in html
     # no full-tier doc item may still carry the old generic /orientation href
@@ -442,7 +446,7 @@ def test_full_home_recent_docs_link_to_the_documents_own_page(monkeypatch):
 def test_browse_js_handles_doc_hash():
     """The KB browse carries the #doc= deep-link handler the home items target."""
     import engineering_build
-    html = engineering_build.render([])
+    html = engineering_build.render([], frozenset(), True)
     assert "#doc=(.+)" in html and "openFromHash" in html and "hashchange" in html
 
 
@@ -453,7 +457,7 @@ def test_browse_deep_link_deferred_past_drawer_init():
     'load' / readyState, never called bare-synchronously at parse time."""
     import re
     import engineering_build
-    html = engineering_build.render([])
+    html = engineering_build.render([], frozenset(), True)
     assert "addEventListener('load', openFromHash)" in html
     # no bare synchronous `openFromHash();` call (only inside the readyState guard)
     assert not re.search(r"(?<![.'])\n\s*openFromHash\(\);", html)
@@ -493,20 +497,31 @@ def test_build_body_has_three_group_headings():
 
 def test_velocity_section_shows_the_same_number_as_the_front_page(monkeypatch):
     """/overview's velocity card and the front page's hero stat both headline
-    waypoints passed in the trailing 7 days, and must agree — they call the
-    same `home_build._velocity_stat()` (dashboards epic
-    issue_01M2F3Q1B8J9E0WC5J1F1CMWA1)."""
+    waypoints passed in the trailing 7 days, and must agree for the SAME
+    viewer scope — they call the same `home_build._velocity_stat()`
+    (dashboards epic issue_01M2F3Q1B8J9E0WC5J1F1CMWA1). Scoped to "bosun"
+    explicitly (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M) rather than relying
+    on either function's default, now that both are scope-aware."""
     now = utcnow()
     course = _course("course_1", "bosun", "Make dispatch accountable", entries=[
         _entry("i1", "fixed", resolved_at=now - dt.timedelta(days=1)), _entry("i2", "open"),
     ])
-    monkeypatch.setattr(library_client, "list_courses", lambda **k: [course])
-    monkeypatch.setattr(library_client, "get_course", lambda cid: course)
+    # An out-of-scope Course with two passes of its own: an unfiltered count
+    # reads "3 passed", so the scope filter has to run for "1 passed" to hold.
+    other = _course("course_2", "vivy", "Ship taste maps", entries=[
+        _entry("i3", "fixed", resolved_at=now - dt.timedelta(days=1)),
+        _entry("i4", "fixed", resolved_at=now - dt.timedelta(days=2)),
+    ])
+    courses = {"course_1": course, "course_2": other}
+    monkeypatch.setattr(library_client, "list_courses", lambda **k: list(courses.values()))
+    monkeypatch.setattr(library_client, "get_course", lambda cid: courses[cid])
 
-    card_html = overview_build._velocity_section()
-    hero_html = home_build._full_body()
+    scope = frozenset({"bosun"})
+    card_html = overview_build._velocity_section(scope, False)
+    hero_html = home_build._full_body(None, scope, False)
     assert "1 passed" in card_html
     assert "1 passed" in hero_html
+    assert "1 of 2 passed" in card_html
 
 
 def test_activity_stalled_when_producer_generated_at_is_old(tmp_path, monkeypatch):
@@ -534,7 +549,7 @@ def test_spending_stalled_when_the_daily_harvest_snapshot_is_old(monkeypatch):
     monkeypatch.setattr(dashboard_build, "load_latest_snapshot",
                         lambda: {"generated_at": "2020-01-01T00:00:00+00:00"})
     monkeypatch.setattr(home_build, "_today_spend",
-                        lambda: {"value": "$12.00", "delta": "today"})
+                        lambda whole_fleet: {"value": "$12.00", "delta": "today"})
     html = overview_build._spending_section()
     assert 'class="stalled-banner"' in html
     assert "$12.00" in html            # banner ABOVE the stat, never instead
@@ -549,7 +564,7 @@ def test_spending_not_stalled_when_the_snapshot_is_fresh(monkeypatch):
     monkeypatch.setattr(dashboard_build, "load_latest_snapshot",
                         lambda: {"generated_at": fresh})
     monkeypatch.setattr(home_build, "_today_spend",
-                        lambda: {"value": "$12.00", "delta": "today"})
+                        lambda whole_fleet: {"value": "$12.00", "delta": "today"})
     html = overview_build._spending_section()
     assert 'class="stalled-banner"' not in html
     assert "$12.00" in html
@@ -562,7 +577,7 @@ def test_code_health_stalled_when_the_daily_harvest_snapshot_is_old(monkeypatch)
     monkeypatch.setattr(code_health_build, "load_snapshot",
                         lambda: ("2020-01-01T00:00:00+00:00", [{"repo": "x"}]))
     monkeypatch.setattr(home_build, "_ci_health",
-                        lambda: {"value": "97.8%", "delta": "avg CI pass rate"})
+                        lambda scope, whole_fleet: {"value": "97.8%", "delta": "avg CI pass rate"})
     html = overview_build._code_health_section()
     assert 'class="stalled-banner"' in html
     assert "97.8%" in html
@@ -574,7 +589,7 @@ def test_code_health_not_stalled_when_the_snapshot_is_fresh(monkeypatch):
     monkeypatch.setattr(code_health_build, "load_snapshot",
                         lambda: (orient_time.now().isoformat(), [{"repo": "x"}]))
     monkeypatch.setattr(home_build, "_ci_health",
-                        lambda: {"value": "97.8%", "delta": "avg CI pass rate"})
+                        lambda scope, whole_fleet: {"value": "97.8%", "delta": "avg CI pass rate"})
     html = overview_build._code_health_section()
     assert 'class="stalled-banner"' not in html
 
@@ -681,7 +696,10 @@ def test_one_failing_loader_does_not_take_down_the_page(monkeypatch):
         raise RuntimeError("security-report.json is corrupt")
 
     monkeypatch.setattr(security_build, "load", _boom)
-    html = overview_build.live_html()
+    # whole_fleet=True: Security is a `fleet_only` card (E19·4,
+    # issue_01M35K5JQ7Z7MHYZGWRSB5F85M) and would not render at all for a
+    # scoped viewer, which this test is not exercising.
+    html = overview_build.live_html(frozenset(), True)
     assert "<html" in html.lower()
     assert 'class="error-state"' in html
     assert "Could not load Security data." in html
@@ -703,7 +721,7 @@ def test_spending_card_and_page_agree_when_stalled(monkeypatch):
     monkeypatch.setattr(dashboard_build, "load_latest_snapshot",
                         lambda: {"generated_at": "2020-01-01T00:00:00Z"})
     monkeypatch.setattr(home_build, "_today_spend",
-                        lambda: {"value": "$12.00", "delta": "today"})
+                        lambda whole_fleet: {"value": "$12.00", "delta": "today"})
     card_html = overview_build._spending_section()
     page_html = dashboard_build.spending_render()
     assert 'class="stalled-banner"' in card_html
@@ -715,9 +733,16 @@ def test_code_health_card_and_page_agree_when_stalled(monkeypatch):
     monkeypatch.setattr(code_health_build, "load_snapshot",
                         lambda: ("2020-01-01T00:00:00Z", [{"repo": "x", "test_count": 1}]))
     monkeypatch.setattr(home_build, "_ci_health",
-                        lambda: {"value": "97.8%", "delta": "avg CI pass rate"})
+                        lambda scope, whole_fleet: {"value": "97.8%", "delta": "avg CI pass rate"})
+    # whole_fleet=True on the card: the card's own default already is, but
+    # the page's `scope={"x"}` must actually cover repo "x" in the registry
+    # for its own filter not to drop it — monkeypatched here (E19·4,
+    # issue_01M35K5JQ7Z7MHYZGWRSB5F85M) rather than relying on this
+    # machine's real ~/Convivy/agent-platform/config/projects.json, which
+    # has no project named "x".
+    monkeypatch.setattr(crew_registry, "repos_in_scope", lambda scope: frozenset({"x"}))
     card_html = overview_build._code_health_section()
-    page_html = code_health_build.live_html()
+    page_html = code_health_build.live_html(frozenset({"x"}))
     assert 'class="stalled-banner"' in card_html
     assert 'class="stalled-banner"' in page_html
 
@@ -741,7 +766,7 @@ def test_velocity_page_shows_stalled_banner_for_delivery_activity_when_rollup_is
     data = {"windows": {"7": {"total": {"prs_merged": 4}}}, "generated_at": "2020-01-01T00:00:00"}
     monkeypatch.setattr(velocity_build, "load", lambda: {**data, "history": []})
     monkeypatch.setattr(library_client, "list_courses", lambda **k: [])
-    page_html = velocity_build.live_html()
+    page_html = velocity_build.live_html(frozenset(), True)
     assert 'class="stalled-banner"' in page_html
 
 
@@ -904,25 +929,51 @@ def test_kb_card_only_empty_states_when_no_eval_has_ever_run(monkeypatch):
 # --- the spend figure names its day, and the spend pages reload (the operator, 2026-09-28)
 
 
-def test_the_spend_figure_names_the_day_and_time_its_snapshot_covers(tmp_path, monkeypatch):
-    """A bare "today" read the same on a tab left open since the night before,
-    which showed Sunday's $750 beside Monday's $158 on another device."""
-    monkeypatch.setattr(home_build, "_COST_DIR", tmp_path)
-    (tmp_path / "latest.json").write_text(json.dumps(
-        {"date": "2026-09-28", "generated_at": "2026-09-28T14:35:06.055563", "total": 158.71}))
+def test_the_spend_figure_names_the_render_day_and_time(monkeypatch):
+    """A bare "today" read the same on a tab left open since the night
+    before, which showed Sunday's $750 beside Monday's $158 on another
+    device. The figure is a live per-request read now (CQ·154,
+    issue_01M4ZBBQK0KFH9YQ16MNK75HJT), so the day and clock named are the
+    render's own rather than a snapshot's."""
+    import orient_time
+    fixed = dt.datetime(2026, 9, 28, 14, 35, 6, tzinfo=orient_time.MST)
+    monkeypatch.setattr(orient_time, "now", lambda: fixed)
+    monkeypatch.setattr(library_client, "list_finished_runs", lambda since, until=None: [])
+    monkeypatch.setattr(library_client, "cost_rollup_by_project",
+                        lambda runs: {"vivy": {"cost_usd": 158.71, "runs": 3}})
     assert home_build._today_spend() == {"value": "$158.71",
                                          "delta": "Mon Sep 28 · as of 2:35 PM"}
 
 
-def test_a_snapshot_without_its_date_falls_back_to_today(tmp_path, monkeypatch):
-    monkeypatch.setattr(home_build, "_COST_DIR", tmp_path)
-    (tmp_path / "latest.json").write_text(json.dumps({"total": 1.5}))
-    assert home_build._today_spend()["delta"] == "today"
+def test_the_spend_figure_sums_every_project_in_the_rollup(monkeypatch):
+    monkeypatch.setattr(library_client, "list_finished_runs", lambda since, until=None: [])
+    monkeypatch.setattr(library_client, "cost_rollup_by_project", lambda runs: {
+        "vivy": {"cost_usd": 1.5, "runs": 1}, "constance": {"cost_usd": 2.5, "runs": 2}})
+    assert home_build._today_spend()["value"] == "$4.00"
+
+
+def test_the_spend_figure_degrades_to_unavailable_on_a_library_outage(monkeypatch):
+    """Matches every other loader in this module (its own docstring): one
+    broken source degrades, it never 500s the whole Home page."""
+    def boom(since, until=None):
+        raise ConnectionError("Library unreachable")
+
+    monkeypatch.setattr(library_client, "list_finished_runs", boom)
+    assert home_build._today_spend() == {"value": "—", "delta": "unavailable"}
+
+
+def test_the_spend_figure_is_none_for_a_scoped_viewer(monkeypatch):
+    """Rule 1 (E19·3, issue_01M35K5EAZD85FBYXEBQVRKVZV): no fleet total to a
+    scoped viewer. Asserted with the Library call itself unmocked, so a
+    regression that moved the gate past the read would be a hard failure
+    here, not a quietly-passing stub."""
+    assert home_build._today_spend(whole_fleet=False) is None
 
 
 def test_the_pages_showing_todays_spend_reload_every_fifteen_minutes(monkeypatch):
     import dashboard_build
-    monkeypatch.setattr(home_build, "_today_spend", lambda: {"value": "$1.00", "delta": "today"})
+    monkeypatch.setattr(home_build, "_today_spend",
+                        lambda whole_fleet: {"value": "$1.00", "delta": "today"})
     monkeypatch.setattr(dashboard_build, "load_latest_snapshot", lambda: {})
     marker = f'data-seconds="{15 * 60}"'
     assert marker in dashboard_build.spending_render()
@@ -951,3 +1002,152 @@ def test_both_home_heroes_carry_the_same_aria_hidden_ship_mark(monkeypatch):
         assert 'class="hero-mark"' in svg and 'aria-hidden="true"' in svg, tier
         marks.append(svg)
     assert marks[0] == marks[1] == ds.ship_mark()
+
+
+def test_full_home_alerts_pill_counts_the_viewers_alerts(monkeypatch):
+    """Home's Alerts pill counts what `/alerts` shows this viewer (E19·3,
+    issue_01M35K5EAZD85FBYXEBQVRKVZV): the scope and whole-fleet flag reach
+    `alerts_build.gather`, and its result sets the pill. With no scope, the
+    pill counts nothing."""
+    library_fake.patch(monkeypatch)
+    seen = []
+
+    def gather(scope, whole_fleet):
+        seen.append((scope, whole_fleet))
+        if not scope:
+            return []
+        return [{"severity": "warn", "category": "Code Health", "subject": "alpha-repo"},
+                {"severity": "bad", "category": "Code Health", "subject": "alpha-repo"}]
+
+    monkeypatch.setattr(home_build.alerts_build, "gather", gather)
+
+    html = home_build._full_body(None, frozenset({"alpha"}), True)
+    assert "2 active" in html
+    assert (frozenset({"alpha"}), True) in seen
+
+    seen.clear()
+    html = home_build._full_body()
+    assert "2 active" not in html and "All clear" in html
+    assert seen and all(call == (frozenset(), False) for call in seen)
+
+
+# --- build_static: the static fallback must never carry real Home data -----
+
+
+def test_build_static_seeds_an_empty_fallback_not_real_data(tmp_path, monkeypatch):
+    """home.full.html/home.contractor.html are served to ANY viewer's failed
+    render, scoped or not (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M): a
+    snapshot naming a real doc or a real spend figure would leak to a
+    scoped viewer. `live_html`'s own defaults (empty scope, not
+    whole-fleet) already make this empty by construction — pinned here so
+    a future default change is caught."""
+    library_fake.patch(monkeypatch)
+    library_fake.seed_reference_doc(id="realproj/reference/real-doc", title="REAL-DOC-TITLE",
+                                    project="realproj", last_reviewed="2026-01-01")
+    monkeypatch.setattr(home_build, "OUT", tmp_path)
+    home_build.build_static()
+    for name in ("home.full.html", "home.contractor.html"):
+        html = (tmp_path / name).read_text(encoding="utf-8")
+        assert "REAL-DOC-TITLE" not in html
+        assert "realproj" not in html
+
+
+# --- E19·4: Home's CI rate and /overview's e2e card count only the viewer's
+# own projects, checked against a second, out-of-scope project ---------------
+
+
+def test_ci_health_averages_only_in_scope_repos(tmp_path, monkeypatch):
+    """`agent-platform` is `bosun`'s repo and `deck-repo` is `convivy-deck`'s.
+    An unfiltered average reads 50.0%; the bosun viewer's reads 100.0%."""
+    import code_health_build
+    reg = tmp_path / "projects.json"
+    reg.write_text(json.dumps({"bosun": {"crew": "bosun", "repos": ["agent-platform"]},
+                               "convivy-deck": {"crew": "deck", "repos": ["deck-repo"]}}))
+    monkeypatch.setattr(crew_registry, "REGISTRY", reg)
+    monkeypatch.setattr(code_health_build, "load_snapshot", lambda: (
+        "2026-10-13T00:00:00Z",
+        [{"repo": "agent-platform", "ci_pass_rate": 1.0},
+         {"repo": "deck-repo", "ci_pass_rate": 0.0}]))
+
+    assert home_build._ci_health(frozenset({"bosun"}), False)["value"] == "100.0%"
+    assert home_build._ci_health(frozenset(), True)["value"] == "50.0%"
+
+
+def test_e2e_section_counts_only_in_scope_suites(monkeypatch):
+    """A failing `constance` suite must neither appear in the scoped viewer's
+    count nor drag their "passing" figure: unfiltered, the card reads 1/2."""
+    import datetime as dt
+
+    fresh = utcnow() - dt.timedelta(hours=1)
+
+    def sig(product, status):
+        class _Sig:
+            stream = "e2e-stage-smoke"
+            kind = "test-result"
+            meta = {"status": status}
+            produced_at = fresh
+            ingested_at = fresh
+        _Sig.product = product
+        return _Sig()
+
+    monkeypatch.setattr(library_client, "list_signals",
+                        lambda **k: [sig("vivy", "pass"), sig("constance", "fail")])
+    scoped = overview_build._e2e_section(frozenset({"vivy"}), False)
+    assert "1/1 passing" in scoped
+    assert "1 suites" in scoped
+    assert "1/2 passing" in overview_build._e2e_section(frozenset(), True)
+
+
+def test_kb_doc_count_counts_only_in_scope_documents(monkeypatch):
+    """Home's knowledge-base pill: unfiltered it reads 3 docs; the vivy
+    viewer's reads 1."""
+    library_fake.patch(monkeypatch)
+    library_fake.seed_reference_doc(id="vivy/a", title="A", project="vivy")
+    library_fake.seed_reference_doc(id="deck/b", title="B", project="convivy-deck")
+    library_fake.seed_reference_doc(id="deck/c", title="C", project="convivy-deck")
+
+    assert home_build._kb_doc_count(frozenset({"vivy"}), False) == "1 docs indexed"
+    assert home_build._kb_doc_count(frozenset(), True) == "3 docs indexed"
+
+
+def _two_repo_registry(tmp_path, monkeypatch):
+    reg = tmp_path / "projects.json"
+    reg.write_text(json.dumps({"bosun": {"crew": "bosun", "repos": ["agent-platform"]},
+                               "convivy-deck": {"crew": "deck", "repos": ["deck-repo"]}}))
+    monkeypatch.setattr(crew_registry, "REGISTRY", reg)
+    return frozenset({"bosun"})
+
+
+def test_cost_performance_section_counts_only_in_scope_repos(tmp_path, monkeypatch):
+    """One merged PR per repo, $0.50 in scope and $9.50 out: unfiltered the
+    card reads $5.00 over 2 PRs, the bosun viewer's $0.50 over 1."""
+    import dashboard_build as db
+    scope = _two_repo_registry(tmp_path, monkeypatch)
+    sc = tmp_path / "scorecard.jsonl"
+    rows = [dict(run_id=f"r{i}", date="2026-10-13", agent="coder", model="claude-sonnet-5",
+                 billing_source="subscription", repo=repo, cost_usd=cost, pr_state="MERGED",
+                 merged=True, survived=True, ci_first_pass=True, pr_number=i)
+            for i, (repo, cost) in enumerate([("agent-platform", 0.50), ("deck-repo", 9.50)])]
+    sc.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    monkeypatch.setattr(db, "SCORECARD", sc)
+    monkeypatch.setattr(db, "PA_LEDGER", tmp_path / "absent.jsonl")
+    monkeypatch.setattr(db, "JUDGE", tmp_path / "absent2.jsonl")
+
+    scoped = overview_build._cost_performance_section(scope, False)
+    assert "$0.50" in scoped
+    assert "1 total" in scoped
+    assert "$5.00" in overview_build._cost_performance_section(frozenset(), True)
+
+
+def test_activity_section_counts_only_in_scope_sessions(tmp_path, monkeypatch):
+    """Sessions carry a repo as `product`. Unfiltered: 3 sessions; the bosun
+    viewer's: 1, with the product-less session kept only for the whole fleet."""
+    import activity_build
+    scope = _two_repo_registry(tmp_path, monkeypatch)
+    snap = {"generated_at": utcnow().isoformat() + "+00:00", "session_count": 3,
+            "sessions": [{"product": "agent-platform"}, {"product": "deck-repo"},
+                         {"product": None}]}
+    monkeypatch.setattr(activity_build, "_load_snapshot", lambda: snap)
+
+    assert "1 sessions" in overview_build._activity_section(scope, False)
+    assert "3 sessions" in overview_build._activity_section(frozenset(), True)

@@ -443,7 +443,8 @@ def _audit_panel(rows: list[library_client.SignalRecord] | None, now: dt.datetim
 
 
 def render(ev: dict | None, q: dict, m: dict, thresholds: dict | None = None,
-           audit: list[library_client.SignalRecord] | None = None) -> str:
+           audit: list[library_client.SignalRecord] | None = None,
+           whole_fleet: bool = True) -> str:
     """`thresholds` defaults to `alert_policy_store.DEFAULTS` — pure, so a
     test calling this with three arguments (every existing caller) renders
     against the shipped default with no control_db touched. `live_html()`
@@ -453,12 +454,27 @@ def render(ev: dict | None, q: dict, m: dict, thresholds: dict | None = None,
 
     `audit` is `load_audit()`'s result. The default None renders panel 4 as
     unavailable, so a caller that omits the stream cannot show a clean audit
-    by omission."""
+    by omission.
+
+    **`whole_fleet` (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M) gates panels 1,
+    2 and 4** (retrieval quality, live queries, the KB write audit): each is
+    a corpus-wide or repo-wide figure with no per-project breakdown this file
+    can filter it by — the golden-set eval runs over the whole KB, the query
+    log has no product field, and the write audit is about commits to the
+    shared `convivy/knowledge` repo, not a product repo. Panel 3
+    (individuation coverage) is filtered to `scope` by its caller
+    (`live_html`/`build`) before it ever reaches here — `m`'s `profiles` are
+    already scoped, so this function renders them unconditionally. The
+    default `whole_fleet=True` keeps every existing caller unchanged."""
     asof = orient_time.now_label()
     t = thresholds or alert_policy_store.DEFAULTS["kb.recall"]
+    scoped_note = ds.empty_state(
+        "Fleet-wide; shown to a whole-fleet scope only.")
 
     # Panel 1 — retrieval quality.
-    if ev:
+    if not whole_fleet:
+        eval_panel = f'<section><h2>Retrieval quality</h2>{scoped_note}</section>'
+    elif ev:
         o = ev["overall"]
         k = ev["k"]
         rk = f"recall@{k}"
@@ -527,7 +543,9 @@ def render(ev: dict | None, q: dict, m: dict, thresholds: dict | None = None,
         eval_panel = '<section><h2>Retrieval quality</h2><p class="muted">No kb-eval.json yet — run <code>kb-eval</code>.</p></section>'
 
     # Panel 2 — live queries.
-    if q["total"]:
+    if not whole_fleet:
+        q_panel = f'<section><h2>Live queries</h2>{scoped_note}</section>'
+    elif q["total"]:
         span = ""
         if q["first"] and q["last"]:
             span = f'{q["first"][:10]} → {q["last"][:10]}'
@@ -589,7 +607,10 @@ def render(ev: dict | None, q: dict, m: dict, thresholds: dict | None = None,
         m_panel = ('<section><h2>Individuation coverage</h2><p class="muted">No individuations logged yet. '
                    'kb-materializations.jsonl fills as <code>knowledge-ctx use</code> runs on session start.</p></section>')
 
-    audit_panel = _audit_panel(audit, dt.datetime.now(dt.timezone.utc).replace(tzinfo=None))
+    if whole_fleet:
+        audit_panel = _audit_panel(audit, dt.datetime.now(dt.timezone.utc).replace(tzinfo=None))
+    else:
+        audit_panel = f'<section><h2>KB write audit</h2>{scoped_note}</section>'
     banner = ds.stalled_banner_html("KB golden-set eval", freshness(ev))
     alert_form = ds.alert_threshold_form_html(
         key="kb.recall", title="Recall/MRR alert threshold",
@@ -625,7 +646,7 @@ def load_query_stats() -> dict:
     return query_stats(_read_jsonl(QUERY_LOG))
 
 
-def live_html() -> str:
+def live_html(scope: frozenset[str] = frozenset(), whole_fleet: bool = True) -> str:
     """Render /kb from current data at request time (ARCH-182). Cheap: reads the
     last eval JSON + the live query and individuation logs — so the query/latency
     stats are truly current, not frozen at the daily build. refresh_eval() (the
@@ -634,23 +655,39 @@ def live_html() -> str:
 
     Fetches the live recall/MRR threshold fresh on every call (no cache) so a
     write made from this same page's own form reaches every colored cell and
-    the write form's displayed values on the very next request."""
+    the write form's displayed values on the very next request.
+
+    `scope`/`whole_fleet` (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M): the
+    materializations rows are filtered to `scope` (each row carries a
+    `project` field) before `mat_stats` ever sums them; `render`'s own
+    `whole_fleet` gate hides the three corpus-/repo-wide panels it can't
+    filter at all."""
     thresholds = alert_policy_store.get("kb.recall")
-    return render(load_eval(), load_query_stats(), mat_stats(_read_jsonl(MAT_LOG)), thresholds,
-                  audit=load_audit())
+    mat_rows = _read_jsonl(MAT_LOG)
+    if not whole_fleet:
+        mat_rows = [r for r in mat_rows if r.get("project") in scope]
+    return render(load_eval(), load_query_stats(), mat_stats(mat_rows), thresholds,
+                  audit=load_audit(), whole_fleet=whole_fleet)
 
 
 def build() -> None:
+    """Refreshes the golden-set eval (the heavy, scheduled part of this job),
+    then writes the STATIC FALLBACK deliberately empty (E19·4,
+    issue_01M35K5JQ7Z7MHYZGWRSB5F85M) — this used to write the current, real,
+    unscoped report (including every project's individuation-coverage row),
+    which a scoped viewer would see on any live-render failure (the same leak
+    class 26bb079 fixed for crews/signals/engineering/roster). `refresh_eval`
+    still runs on every scheduled build so the golden-set numbers the live
+    page reads stay current; only the file this writes is now empty."""
     OUT.mkdir(parents=True, exist_ok=True)
     refreshed = refresh_eval()
-    ev = load_eval()
-    q = load_query_stats()
-    m = mat_stats(_read_jsonl(MAT_LOG))
-    thresholds = alert_policy_store.get("kb.recall")
-    (OUT / "kb.html").write_text(render(ev, q, m, thresholds, audit=load_audit()),
-                                 encoding="utf-8")
-    print(f"Wrote site/kb.html (eval_refreshed={'yes' if refreshed else 'no'}, "
-          f"{q['total']} queries, {m['total']} individuations).")
+    fallback = ds.page_shell(
+        title="KB retrieval", nav_html=ds.nav_component("/kb", "full"),
+        body=ds.empty_state("Live view unavailable — reload in a moment."),
+        extra_css=_PAGE_CSS)
+    (OUT / "kb.html").write_text(fallback, encoding="utf-8")
+    print(f"Wrote site/kb.html (empty static fallback, eval_refreshed="
+          f"{'yes' if refreshed else 'no'}).")
 
 
 if __name__ == "__main__":

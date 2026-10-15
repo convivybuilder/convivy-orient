@@ -35,6 +35,12 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(control_db, "_engine_url", None)
     control_db.init_db()
     library_fake.patch(monkeypatch)
+    # person_scope is the Library's own scope resolver (E19·1,
+    # issue_01M35K54QHJYYPXWS28YWEHJP3), NOT `authz.ROLES`'s products list
+    # below — browse/search now restrict to it (E19·4,
+    # issue_01M35K5JQ7Z7MHYZGWRSB5F85M), so it must be seeded here or every
+    # fixture signal (product="vivy") reads as out-of-scope.
+    library_fake.seed_person_scope("mem@example.com", {"vivy"})
 
     roles = tmp_path / "roles.json"
     roles.write_text(json.dumps({
@@ -140,8 +146,18 @@ def test_browse_total_comes_from_facets_not_from_the_capped_list_length(client, 
     """Plant a fixture where `signal_facets().total` and the capped browse
     list's length DISAGREE, and assert the exact one renders. A fixture where
     they happen to match would prove nothing — this is `signals_build`'s own
-    'the decisions_build pattern' rule, applied to the Archives tail."""
+    'the decisions_build pattern' rule, applied to the Archives tail.
+
+    This is the WHOLE-FLEET path specifically (E19·4,
+    issue_01M35K5JQ7Z7MHYZGWRSB5F85M): a scoped viewer's own total is
+    `len(signals)` instead, deliberately narrower, since `signal_facets`
+    takes no multi-project filter to recompute a true scoped total from
+    (`browse`'s own docstring) — forced here via `crew_registry.
+    covers_every_project` rather than relying on this machine's real
+    registry file to agree that "vivy" is every project."""
+    import crew_registry
     import signal_search_api
+    monkeypatch.setattr(crew_registry, "covers_every_project", lambda scope: True)
     monkeypatch.setattr(signal_search_api, "_BROWSE_CAP", 2)
     for i in range(5):
         library_fake.seed_signal(**_mk(kind="alert", body=f"alert-{i}"))
@@ -256,3 +272,35 @@ def test_search_503s_on_a_library_outage_rather_than_a_silent_empty_result(clien
     monkeypatch.setattr(library_client, "search_signals", boom)
     r = client.get("/api/signals/search", params={"q": "deploy"}, headers=_human())
     assert r.status_code == 503
+
+
+# --- scope: a second, out-of-scope project never reaches the viewer ----------
+
+
+def test_browse_excludes_a_project_outside_the_viewers_scope(client):
+    """The viewer holds `vivy` only (the fixture's person_scope). A `constance`
+    row of the same kind must not appear, and must not count toward `total`."""
+    library_fake.seed_signal(**_mk(kind="alert", body="vivy disk full"))
+    library_fake.seed_signal(**_mk(kind="alert", product="constance", body="constance disk full"))
+
+    r = client.get("/api/signals/browse", params={"kind": "alert"}, headers=_human())
+    assert r.status_code == 200
+    body = r.json()
+    assert [s["product"] for s in body["signals"]] == ["vivy"]
+    assert body["total"] == 1
+    assert "constance" not in r.text
+
+
+def test_search_excludes_a_project_outside_the_viewers_scope_from_rows_and_count(client):
+    """`count` must agree with the filtered list: a Library count over the
+    unfiltered window would read 2 here, and the gap between it and the one
+    row shown would tell the viewer that another project matched `deploy`."""
+    library_fake.seed_signal(**_mk(body="vivy deploy failed"))
+    library_fake.seed_signal(**_mk(product="constance", body="constance deploy failed"))
+
+    r = client.get("/api/signals/search", params={"q": "deploy"}, headers=_human())
+    assert r.status_code == 200
+    body = r.json()
+    assert [s["product"] for s in body["signals"]] == ["vivy"]
+    assert body["count"] == 1
+    assert "constance" not in r.text

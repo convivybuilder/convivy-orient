@@ -10,22 +10,15 @@ environment, a 0600 content file removed afterward — and that each way
 `agentctl` can refuse maps to its own exception rather than one generic
 failure.
 
-**`ACTOR` is deliberately an email, matching production exactly.** PR #210's
-review caught a bug this suite's mocks could not: every test here mocked
-`subprocess.run` and asserted only mocked return values, so nothing ever
-noticed that the real `agentctl` rejects any `--holder` containing `@` — the
-one shape production always sends, since `actor` is always a verified
-Cloudflare Access email. `test_holder_sent_to_subprocess_matches_agentctls_
-real_regex` below is the fix: it asserts the ACTUAL holder value handed to
-`subprocess.run` against `agentctl`'s real `HOLDER_RE`
-(`lib/agent-platform/kb_writes.py:426`), copied here rather than imported —
-this repo does not depend on agent-platform — so a regression in
-`_holder_for` that produces an invalid holder fails this test even though
-every mocked `subprocess.run` still returns 0."""
+**`ACTOR` is deliberately an email, matching production exactly.** The
+Library's checkout records the member's Cloudflare Access email as its holder,
+and agentctl's lease is taken under that same string, unchanged
+(agent-platform#889 made agentctl accept it).
+`test_commit_document_hands_agentctl_the_recorded_holder_unchanged` and its
+`read_document` twin below pin that."""
 from __future__ import annotations
 
 import json
-import re
 import stat
 import subprocess
 
@@ -55,10 +48,9 @@ def _agentctl_resolves_to_the_bare_name(monkeypatch):
     resolver itself override this."""
     monkeypatch.setattr(kb_commit.paths, "resolve_tool", lambda name: None)
 
-# `agentctl`'s real gate, `lib/agent-platform/kb_writes.py:426`. Confirmed live
-# (PR #210 review): `agentctl kb apply <doc> --holder "operator@example.com" --dry-run`
-# refuses before the stale-base check with exactly this shape rejected.
-_AGENTCTL_HOLDER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:._-]{0,63}$")
+# A holder as the Library's checkout can record it, distinct from `ACTOR`, so a
+# test can tell which argument reached agentctl's `--holder`.
+RECORDED_HOLDER = "member@example.com"
 
 
 def _checkout_ok(cmd, *, sha=OPEN_SHA):
@@ -106,11 +98,11 @@ def test_commit_document_happy_path(monkeypatch):
         lambda cmd: subprocess.CompletedProcess(cmd, 0, stdout="kb apply: updated", stderr=""),
         calls, written))
 
-    kb_commit.commit_document(DOC, body="new text", actor=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
+    kb_commit.commit_document(DOC, body="new text", actor=ACTOR, holder=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
 
     assert len(calls) == 3  # checkout, apply, release
     checkout_cmd, apply_cmd, release_cmd = calls
-    holder = kb_commit._holder_for(ACTOR)
+    holder = ACTOR
     assert checkout_cmd == ["agentctl", "kb", "checkout", "--holder", holder, "--", DOC]
     assert apply_cmd[0:2] == ["agentctl", "kb"] and apply_cmd[2] == "apply"
     assert apply_cmd[-2:] == ["--", DOC]  # doc_id reaches agentctl only after `--`
@@ -160,7 +152,7 @@ def test_apply_allows_overwrite_and_passes_the_callers_sha_as_base(monkeypatch):
         lambda cmd: subprocess.CompletedProcess(cmd, 0, stdout="kb apply: updated", stderr=""),
         calls, written))
 
-    kb_commit.commit_document(DOC, body="new text", actor=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
+    kb_commit.commit_document(DOC, body="new text", actor=ACTOR, holder=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
 
     apply_cmd = calls[1]
     assert apply_cmd[2] == "apply"
@@ -184,11 +176,11 @@ def test_a_commit_that_landed_while_the_editor_was_open_is_refused(monkeypatch):
         _apply_gated_on(MOVED_SHA), calls, written))
 
     with pytest.raises(kb_commit.CommitStale):
-        kb_commit.commit_document(DOC, body="my edit", actor=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
+        kb_commit.commit_document(DOC, body="my edit", actor=ACTOR, holder=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
 
     # And the same document, opened after that commit, saves.
     calls.clear()
-    kb_commit.commit_document(DOC, body="my edit", actor=ACTOR, base_sha=MOVED_SHA, assertion=ASSERTION)
+    kb_commit.commit_document(DOC, body="my edit", actor=ACTOR, holder=ACTOR, base_sha=MOVED_SHA, assertion=ASSERTION)
     assert calls[1][calls[1].index("--base-sha") + 1] == MOVED_SHA
 
 
@@ -205,33 +197,29 @@ def test_a_malformed_base_sha_never_reaches_agentctl(monkeypatch, bad):
                         lambda *a, **k: ran.append(a) or pytest.fail("agentctl was invoked"))
 
     with pytest.raises(kb_commit.CommitFailed):
-        kb_commit.commit_document(DOC, body="x", actor=ACTOR, base_sha=bad, assertion=ASSERTION)
+        kb_commit.commit_document(DOC, body="x", actor=ACTOR, holder=ACTOR, base_sha=bad, assertion=ASSERTION)
 
     assert ran == []
 
 
-def test_holder_sent_to_subprocess_matches_agentctls_real_regex(monkeypatch):
-    """The bug PR #210's review found: every prior test here mocked
-    `subprocess.run` and asserted only against mocked return values, so
-    nothing noticed that the real `agentctl` refuses any `--holder`
-    containing `@` — the one shape production always sends (`actor` is
-    always a verified Cloudflare Access email). This asserts the ACTUAL
-    argv value against `agentctl`'s real gate, copied from the live tool
-    (confirmed via `--dry-run` against a real document in PR #210's review),
-    not against a belief about what the tool does."""
+def test_commit_document_hands_agentctl_the_recorded_holder_unchanged(monkeypatch):
+    """Every agentctl call takes its lease under the holder the Library's
+    checkout recorded, byte for byte. Orient used to reshape it to fit an
+    older agentctl rule (`@` became `_`), so the two leases named different
+    holders. `actor` names only the commit message."""
     calls, written = [], {}
     monkeypatch.setattr(kb_commit.subprocess, "run", _dispatch(
         _checkout_ok,
         lambda cmd: subprocess.CompletedProcess(cmd, 0, stdout="", stderr=""),
         calls, written))
 
-    kb_commit.commit_document(DOC, body="x", actor="operator@example.com", base_sha=OPEN_SHA, assertion=ASSERTION)
+    kb_commit.commit_document(DOC, body="x", actor=ACTOR, holder=RECORDED_HOLDER,
+                              base_sha=OPEN_SHA, assertion=ASSERTION)
 
     checkout_cmd, apply_cmd, release_cmd = calls
     for cmd in (checkout_cmd, apply_cmd, release_cmd):
-        holder = cmd[cmd.index("--holder") + 1]
-        assert _AGENTCTL_HOLDER_RE.match(holder), \
-            f"holder {holder!r} would be refused by agentctl's real HOLDER_RE"
+        assert cmd[cmd.index("--holder") + 1] == RECORDED_HOLDER
+    assert apply_cmd[apply_cmd.index("--message") + 1].endswith(f"by {ACTOR}.")
 
 
 def test_body_travels_only_via_content_file_never_via_argv(monkeypatch):
@@ -242,7 +230,7 @@ def test_body_travels_only_via_content_file_never_via_argv(monkeypatch):
         calls, written))
 
     secret_marker = "SECRET-BODY-CONTENT-1234"
-    kb_commit.commit_document(DOC, body=secret_marker, actor=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
+    kb_commit.commit_document(DOC, body=secret_marker, actor=ACTOR, holder=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
 
     apply_cmd = calls[1]
     assert "--content" not in apply_cmd  # only --content-file, never the literal flag
@@ -258,7 +246,7 @@ def test_content_file_is_0600_and_removed_after_success(monkeypatch):
         lambda cmd: subprocess.CompletedProcess(cmd, 0, stdout="", stderr=""),
         calls, written))
 
-    kb_commit.commit_document(DOC, body="x", actor=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
+    kb_commit.commit_document(DOC, body="x", actor=ACTOR, holder=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
 
     assert written["mode"] == 0o600
     assert not written["path"].exists(), "the content file must be removed after use"
@@ -272,7 +260,7 @@ def test_content_file_is_removed_even_when_apply_fails(monkeypatch):
         calls, written))
 
     with pytest.raises(kb_commit.CommitFailed):
-        kb_commit.commit_document(DOC, body="x", actor=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
+        kb_commit.commit_document(DOC, body="x", actor=ACTOR, holder=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
 
     assert not written["path"].exists(), "the content file must be removed even on failure"
 
@@ -292,7 +280,7 @@ def test_subprocess_env_is_allowlisted_not_the_parent_env_minus_a_few_keys(monke
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     monkeypatch.setattr(kb_commit.subprocess, "run", fake_run)
-    kb_commit.commit_document(DOC, body="x", actor=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
+    kb_commit.commit_document(DOC, body="x", actor=ACTOR, holder=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
 
     assert len(seen_envs) == 3  # checkout, apply, release
     for env in seen_envs:
@@ -312,7 +300,7 @@ def test_argv_is_a_list_not_a_shell_string(monkeypatch):
         _checkout_ok,
         lambda cmd: subprocess.CompletedProcess(cmd, 0, stdout="", stderr=""),
         calls, written))
-    kb_commit.commit_document(DOC, body="x", actor=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
+    kb_commit.commit_document(DOC, body="x", actor=ACTOR, holder=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
     assert len(calls) == 3  # checkout, apply, release
 
 
@@ -330,7 +318,7 @@ def test_lease_conflict_raises_commit_lease_conflict_and_never_attempts_apply(mo
 
     monkeypatch.setattr(kb_commit.subprocess, "run", fake_run)
     with pytest.raises(kb_commit.CommitLeaseConflict) as exc:
-        kb_commit.commit_document(DOC, body="x", actor=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
+        kb_commit.commit_document(DOC, body="x", actor=ACTOR, holder=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
 
     assert "leased by mem@example.com" in str(exc.value)
     assert len(calls) == 1, ("apply must never be attempted once the lease is refused, "
@@ -358,8 +346,8 @@ def _checkout_then_fail(how, calls):
 
 @pytest.mark.parametrize("how", ["timeout", "nonzero-exit"])
 @pytest.mark.parametrize("call", [
-    lambda: kb_commit.commit_document(DOC, body="x", actor=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION),
-    lambda: kb_commit.read_document(DOC, actor=ACTOR),
+    lambda: kb_commit.commit_document(DOC, body="x", actor=ACTOR, holder=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION),
+    lambda: kb_commit.read_document(DOC, holder=ACTOR),
 ], ids=["commit_document", "read_document"])
 def test_a_checkout_that_fails_after_taking_the_lease_releases_it(monkeypatch, how, call):
     """The regression this pins: the checkout timed out, `_checkout` raised
@@ -373,7 +361,7 @@ def test_a_checkout_that_fails_after_taking_the_lease_releases_it(monkeypatch, h
     with pytest.raises(kb_commit.CommitFailed):
         call()
 
-    holder = kb_commit._holder_for(ACTOR)
+    holder = ACTOR
     assert calls == [
         ["agentctl", "kb", "checkout", "--holder", holder, "--", DOC],
         ["agentctl", "kb", "release", "--holder", holder, "--", DOC],
@@ -391,7 +379,7 @@ def test_a_failed_release_after_a_failed_checkout_does_not_replace_the_checkout_
 
     monkeypatch.setattr(kb_commit.subprocess, "run", fake_run)
     with pytest.raises(kb_commit.CommitFailed) as exc:
-        kb_commit.commit_document(DOC, body="x", actor=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
+        kb_commit.commit_document(DOC, body="x", actor=ACTOR, holder=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
     assert "timed out" in str(exc.value)
 
 
@@ -406,7 +394,7 @@ def test_stale_base_sha_raises_commit_stale(monkeypatch):
         calls, written))
 
     with pytest.raises(kb_commit.CommitStale) as exc:
-        kb_commit.commit_document(DOC, body="x", actor=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
+        kb_commit.commit_document(DOC, body="x", actor=ACTOR, holder=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
 
     assert "stale base" in str(exc.value)
 
@@ -425,7 +413,7 @@ def test_push_race_also_raises_commit_stale(monkeypatch):
         calls, written))
 
     with pytest.raises(kb_commit.CommitStale) as exc:
-        kb_commit.commit_document(DOC, body="x", actor=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
+        kb_commit.commit_document(DOC, body="x", actor=ACTOR, holder=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
     assert "advanced" in str(exc.value)
 
 
@@ -439,7 +427,7 @@ def test_validator_rejection_raises_commit_rejected(monkeypatch):
         calls, written))
 
     with pytest.raises(kb_commit.CommitRejected) as exc:
-        kb_commit.commit_document(DOC, body="x", actor=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
+        kb_commit.commit_document(DOC, body="x", actor=ACTOR, holder=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
 
     assert "missing required field: title" in str(exc.value)
 
@@ -453,7 +441,7 @@ def test_policy_refusal_raises_commit_rejected(monkeypatch):
         calls, written))
 
     with pytest.raises(kb_commit.CommitRejected) as exc:
-        kb_commit.commit_document(DOC, body="x", actor=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
+        kb_commit.commit_document(DOC, body="x", actor=ACTOR, holder=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
     assert "not allowed" in str(exc.value)
 
 
@@ -470,7 +458,7 @@ def test_an_unverifiable_assertion_raises_commit_auth_expired_and_still_releases
         calls, written))
 
     with pytest.raises(kb_commit.CommitAuthExpired) as exc:
-        kb_commit.commit_document(DOC, body="x", actor=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
+        kb_commit.commit_document(DOC, body="x", actor=ACTOR, holder=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
     assert "expired" in str(exc.value)
     assert not isinstance(exc.value, kb_commit.CommitFailed)
     assert calls[-1][1:3] == ["kb", "release"]
@@ -488,7 +476,7 @@ def test_the_assertion_never_reaches_the_subprocess_environment(monkeypatch):
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     monkeypatch.setattr(kb_commit.subprocess, "run", fake_run)
-    kb_commit.commit_document(DOC, body="x", actor=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
+    kb_commit.commit_document(DOC, body="x", actor=ACTOR, holder=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
     assert kb_commit._ENV_ALLOWLIST == ("HOME", "PATH")
     assert all(set(e) <= {"HOME", "PATH"} for e in envs)
     assert all(ASSERTION not in v for e in envs for v in e.values())
@@ -500,7 +488,7 @@ def test_agentctl_missing_raises_commit_failed(monkeypatch):
 
     monkeypatch.setattr(kb_commit.subprocess, "run", fake_run)
     with pytest.raises(kb_commit.CommitFailed):
-        kb_commit.commit_document(DOC, body="x", actor=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
+        kb_commit.commit_document(DOC, body="x", actor=ACTOR, holder=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
 
 
 def test_timeout_raises_commit_failed(monkeypatch):
@@ -509,7 +497,7 @@ def test_timeout_raises_commit_failed(monkeypatch):
 
     monkeypatch.setattr(kb_commit.subprocess, "run", fake_run)
     with pytest.raises(kb_commit.CommitFailed):
-        kb_commit.commit_document(DOC, body="x", actor=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
+        kb_commit.commit_document(DOC, body="x", actor=ACTOR, holder=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
 
 
 def test_unexpected_nonzero_exit_raises_commit_failed_not_a_bare_failure(monkeypatch):
@@ -521,7 +509,7 @@ def test_unexpected_nonzero_exit_raises_commit_failed_not_a_bare_failure(monkeyp
 
     monkeypatch.setattr(kb_commit.subprocess, "run", fake_run)
     with pytest.raises(kb_commit.CommitFailed) as exc:
-        kb_commit.commit_document(DOC, body="x", actor=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
+        kb_commit.commit_document(DOC, body="x", actor=ACTOR, holder=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
     assert "knowledge index missing" in str(exc.value)
 
 
@@ -531,7 +519,7 @@ def test_checkout_output_that_is_not_json_raises_commit_failed(monkeypatch):
 
     monkeypatch.setattr(kb_commit.subprocess, "run", fake_run)
     with pytest.raises(kb_commit.CommitFailed):
-        kb_commit.commit_document(DOC, body="x", actor=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
+        kb_commit.commit_document(DOC, body="x", actor=ACTOR, holder=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
 
 
 def test_checkout_output_that_is_json_but_not_an_object_raises_commit_failed(monkeypatch):
@@ -548,7 +536,7 @@ def test_checkout_output_that_is_json_but_not_an_object_raises_commit_failed(mon
         calls, {}))
 
     with pytest.raises(kb_commit.CommitFailed) as exc:
-        kb_commit.commit_document(DOC, body="x", actor=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
+        kb_commit.commit_document(DOC, body="x", actor=ACTOR, holder=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
 
     assert "not an object" in str(exc.value)
     assert [c[1:3] for c in calls] == [["kb", "checkout"], ["kb", "release"]]
@@ -560,7 +548,7 @@ def test_checkout_output_missing_content_sha_raises_commit_failed(monkeypatch):
 
     monkeypatch.setattr(kb_commit.subprocess, "run", fake_run)
     with pytest.raises(kb_commit.CommitFailed):
-        kb_commit.commit_document(DOC, body="x", actor=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
+        kb_commit.commit_document(DOC, body="x", actor=ACTOR, holder=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
 
 
 # --- agentctl lease release ---------------------------------------------------
@@ -591,7 +579,7 @@ def test_lease_is_released_even_when_apply_is_refused(
         calls, written))
 
     with pytest.raises(exc_type):
-        kb_commit.commit_document(DOC, body="x", actor=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
+        kb_commit.commit_document(DOC, body="x", actor=ACTOR, holder=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
 
     assert len(calls) == 3, "checkout, apply, and release must all be attempted"
     release_cmd = calls[2]
@@ -613,7 +601,7 @@ def test_lease_is_released_when_checkout_succeeds_but_the_stdout_cannot_be_used(
 
     monkeypatch.setattr(kb_commit.subprocess, "run", fake_run)
     with pytest.raises(kb_commit.CommitFailed):
-        kb_commit.commit_document(DOC, body="x", actor=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
+        kb_commit.commit_document(DOC, body="x", actor=ACTOR, holder=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
 
     assert len(release_calls) == 1
     assert release_calls[0][1:3] == ["kb", "release"]
@@ -631,7 +619,7 @@ def test_lease_release_failure_does_not_mask_a_successful_commit(monkeypatch):
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     monkeypatch.setattr(kb_commit.subprocess, "run", fake_run)
-    kb_commit.commit_document(DOC, body="x", actor=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)  # must not raise
+    kb_commit.commit_document(DOC, body="x", actor=ACTOR, holder=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)  # must not raise
 
 
 def test_lease_release_failure_does_not_mask_a_real_commit_error(monkeypatch):
@@ -647,7 +635,7 @@ def test_lease_release_failure_does_not_mask_a_real_commit_error(monkeypatch):
 
     monkeypatch.setattr(kb_commit.subprocess, "run", fake_run)
     with pytest.raises(kb_commit.CommitStale):
-        kb_commit.commit_document(DOC, body="x", actor=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
+        kb_commit.commit_document(DOC, body="x", actor=ACTOR, holder=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
 
 
 # --- stderr sanitization ------------------------------------------------------
@@ -663,7 +651,7 @@ def test_stderr_control_characters_are_stripped_from_the_exception(monkeypatch):
 
     monkeypatch.setattr(kb_commit.subprocess, "run", fake_run)
     with pytest.raises(kb_commit.CommitFailed) as exc:
-        kb_commit.commit_document(DOC, body="x", actor=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
+        kb_commit.commit_document(DOC, body="x", actor=ACTOR, holder=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
 
     message = str(exc.value)
     for ch in message:
@@ -691,7 +679,7 @@ def test_stderr_sanitization_covers_del_nel_and_unicode_line_separators(monkeypa
 
     monkeypatch.setattr(kb_commit.subprocess, "run", fake_run)
     with pytest.raises(kb_commit.CommitFailed) as exc:
-        kb_commit.commit_document(DOC, body="x", actor=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
+        kb_commit.commit_document(DOC, body="x", actor=ACTOR, holder=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
 
     message = str(exc.value)
     for banned in ("\x7f", "\x85", " ", " ", "\n"):
@@ -717,7 +705,7 @@ def test_stderr_sanitization_covers_the_rest_of_c1(monkeypatch):
 
     monkeypatch.setattr(kb_commit.subprocess, "run", fake_run)
     with pytest.raises(kb_commit.CommitFailed) as exc:
-        kb_commit.commit_document(DOC, body="x", actor=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
+        kb_commit.commit_document(DOC, body="x", actor=ACTOR, holder=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
 
     message = str(exc.value)
     assert "\x9f" not in message, f"\\x9f leaked into: {message!r}"
@@ -734,7 +722,7 @@ def test_stderr_is_capped_in_length(monkeypatch):
 
     monkeypatch.setattr(kb_commit.subprocess, "run", fake_run)
     with pytest.raises(kb_commit.CommitFailed) as exc:
-        kb_commit.commit_document(DOC, body="x", actor=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
+        kb_commit.commit_document(DOC, body="x", actor=ACTOR, holder=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
 
     assert len(str(exc.value)) <= kb_commit._STDERR_LIMIT + 1  # +1 for the truncation marker
 
@@ -757,7 +745,7 @@ def test_commit_document_invokes_the_resolver_returned_path_not_the_bare_name(mo
         lambda cmd: subprocess.CompletedProcess(cmd, 0, stdout="", stderr=""),
         calls, written))
 
-    kb_commit.commit_document(DOC, body="x", actor=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
+    kb_commit.commit_document(DOC, body="x", actor=ACTOR, holder=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
 
     assert len(calls) == 3  # checkout, apply, release
     for cmd in calls:
@@ -777,7 +765,7 @@ def test_commit_document_resolves_agentctl_exactly_once_and_reuses_it(monkeypatc
         lambda cmd: subprocess.CompletedProcess(cmd, 0, stdout="", stderr=""),
         calls, written))
 
-    kb_commit.commit_document(DOC, body="x", actor=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
+    kb_commit.commit_document(DOC, body="x", actor=ACTOR, holder=ACTOR, base_sha=OPEN_SHA, assertion=ASSERTION)
 
     assert resolved_for == ["agentctl"]  # exactly one resolve call for all 3 subprocesses
 
@@ -816,12 +804,12 @@ def test_read_document_returns_the_stored_file_with_its_frontmatter(monkeypatch)
     monkeypatch.setattr(kb_commit.subprocess, "run",
                         _read_dispatch(_stored_checkout, calls))
 
-    stored = kb_commit.read_document(DOC, actor=ACTOR)
+    stored = kb_commit.read_document(DOC, holder=ACTOR)
 
     assert stored.content.startswith("---\n")
     assert stored.content == _STORED_FILE
     assert stored.content_sha == "sha-stored"
-    holder = kb_commit._holder_for(ACTOR)
+    holder = ACTOR
     assert calls == [
         ["agentctl", "kb", "checkout", "--holder", holder, "--", DOC],
         ["agentctl", "kb", "release", "--holder", holder, "--", DOC],
@@ -843,7 +831,7 @@ def test_read_document_releases_the_lease_when_the_payload_is_unusable(monkeypat
         lambda cmd: subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr=""), calls))
 
     with pytest.raises(kb_commit.CommitFailed):
-        kb_commit.read_document(DOC, actor=ACTOR)
+        kb_commit.read_document(DOC, holder=ACTOR)
 
     assert [c[1:3] for c in calls] == [["kb", "checkout"], ["kb", "release"]], \
         "the lease `kb checkout` took must be released even though the read failed"
@@ -861,7 +849,7 @@ def test_read_document_releases_the_lease_on_an_exception_it_has_no_name_for(mon
 
     monkeypatch.setattr(kb_commit, "_checkout_payload", boom)
     with pytest.raises(RuntimeError):
-        kb_commit.read_document(DOC, actor=ACTOR)
+        kb_commit.read_document(DOC, holder=ACTOR)
 
     assert [c[1:3] for c in calls] == [["kb", "checkout"], ["kb", "release"]]
 
@@ -872,7 +860,7 @@ def test_read_document_holds_no_lease_after_it_returns(monkeypatch):
     calls = []
     monkeypatch.setattr(kb_commit.subprocess, "run",
                         _read_dispatch(_stored_checkout, calls))
-    kb_commit.read_document(DOC, actor=ACTOR)
+    kb_commit.read_document(DOC, holder=ACTOR)
     assert calls[-1][1:3] == ["kb", "release"]
 
 
@@ -880,7 +868,7 @@ def test_a_failed_release_does_not_lose_the_content_that_was_read(monkeypatch):
     calls = []
     monkeypatch.setattr(kb_commit.subprocess, "run", _read_dispatch(
         _stored_checkout, calls, release_raises=FileNotFoundError("agentctl vanished")))
-    assert kb_commit.read_document(DOC, actor=ACTOR).content == _STORED_FILE
+    assert kb_commit.read_document(DOC, holder=ACTOR).content == _STORED_FILE
 
 
 def test_read_document_reports_another_holders_lease_as_a_lease_conflict(monkeypatch):
@@ -890,7 +878,7 @@ def test_read_document_reports_another_holders_lease_as_a_lease_conflict(monkeyp
             stderr="kb checkout: proj/kind/doc-1 is leased by someone-else"), calls))
 
     with pytest.raises(kb_commit.CommitLeaseConflict) as exc:
-        kb_commit.read_document(DOC, actor=ACTOR)
+        kb_commit.read_document(DOC, holder=ACTOR)
 
     assert "leased by someone-else" in str(exc.value)
     assert [c[1:3] for c in calls] == [["kb", "checkout"]], \
@@ -902,17 +890,18 @@ def test_read_document_reports_an_agentctl_failure_as_commit_failed(monkeypatch)
         lambda cmd: subprocess.CompletedProcess(cmd, 1, stdout="",
             stderr="kb checkout: knowledge index missing"), []))
     with pytest.raises(kb_commit.CommitFailed) as exc:
-        kb_commit.read_document(DOC, actor=ACTOR)
+        kb_commit.read_document(DOC, holder=ACTOR)
     assert "knowledge index missing" in str(exc.value)
 
 
-def test_read_document_sends_a_holder_agentctl_accepts(monkeypatch):
+def test_read_document_hands_agentctl_the_recorded_holder_unchanged(monkeypatch):
     calls = []
     monkeypatch.setattr(kb_commit.subprocess, "run",
                         _read_dispatch(_stored_checkout, calls))
-    kb_commit.read_document(DOC, actor=ACTOR)
+    kb_commit.read_document(DOC, holder=RECORDED_HOLDER)
+    assert [cmd[1:3] for cmd in calls] == [["kb", "checkout"], ["kb", "release"]]
     for cmd in calls:
-        assert _AGENTCTL_HOLDER_RE.match(cmd[cmd.index("--holder") + 1])
+        assert cmd[cmd.index("--holder") + 1] == RECORDED_HOLDER
 
 
 def test_read_document_says_origin_was_unreadable_when_checkout_reports_exists_false(monkeypatch):
@@ -923,5 +912,5 @@ def test_read_document_says_origin_was_unreadable_when_checkout_reports_exists_f
     monkeypatch.setattr(kb_commit.subprocess, "run", _read_dispatch(
         lambda cmd: _stored_checkout(cmd, content="", sha="sha-of-nothing", exists=False), []))
     with pytest.raises(kb_commit.CommitFailed) as exc:
-        kb_commit.read_document(DOC, actor=ACTOR)
+        kb_commit.read_document(DOC, holder=ACTOR)
     assert "origin/main" in str(exc.value)

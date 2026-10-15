@@ -4,9 +4,11 @@ The gh/git IO is impure (excluded); these pin the metric derivation, where a
 wrong CI pass-rate or test count would mislead the dashboard. The CI-run shape
 is the subtle one: products run CI on PR branches and produce cancelled runs.
 """
+import json
 from datetime import datetime, timezone
 
 import code_health_build as ch
+import crew_registry
 
 
 # --- ci_health ---------------------------------------------------------------
@@ -329,3 +331,56 @@ def test_nav_is_styled():
     assert "--brand" in html                       # ds token present
     assert "topnav" not in html                    # old nav class absent
     assert "--grad" not in html or "var(--grad)" in html  # no old palette literal bare
+
+
+# --- live_html scoping (E19·3, issue_01M35K5EAZD85FBYXEBQVRKVZV) ------------
+
+
+def test_live_html_scopes_rows_and_history_to_the_viewer(tmp_path, monkeypatch):
+    """A viewer scoped to one of two projects sees only that project's repo
+    row and trend history — the other repo never appears, in the embedded
+    JSON or the trend table. A viewer holding both projects sees both. The
+    repo `agent-platform` belongs to project `bosun`, as in the real
+    registry, so a filter against the slug would drop it."""
+    registry = tmp_path / "projects.json"
+    registry.write_text(json.dumps({"_meta": {}, "vivy": {"repos": ["vivy"]},
+                                    "bosun": {"repos": ["agent-platform"]}}))
+    monkeypatch.setattr(crew_registry, "REGISTRY", registry)
+    rows = [_row("vivy", test_count=10), _row("agent-platform", test_count=20)]
+    history = [ch.history_record(_row("vivy", test_count=10), "2026-06-01"),
+              ch.history_record(_row("agent-platform", test_count=20), "2026-06-01")]
+    monkeypatch.setattr(ch, "load_snapshot", lambda: ("2026-06-02T00:00:00Z", rows))
+    monkeypatch.setattr(ch, "load_history", lambda: history)
+
+    scoped = ch.live_html(frozenset({"vivy"})).replace(" ", "")
+    assert '"repo":"vivy"' in scoped
+    assert '"repo":"agent-platform"' not in scoped
+
+    bosun = ch.live_html(frozenset({"bosun"})).replace(" ", "")
+    assert '"repo":"agent-platform"' in bosun
+    assert '"repo":"vivy"' not in bosun
+
+    both = ch.live_html(frozenset({"vivy", "bosun"})).replace(" ", "")
+    assert '"repo":"vivy"' in both
+    assert '"repo":"agent-platform"' in both
+
+
+def test_build_writes_an_empty_static_fallback_naming_no_repo(tmp_path, monkeypatch):
+    """server.py serves site/health.html to ANY viewer whose live render
+    throws, before scope is known to this file at all — so the fallback
+    `build()` writes must name no repo, even though `build()`'s harvest still
+    sees both (the data store `live_html()` reads is unaffected)."""
+    monkeypatch.setattr(ch, "OUT", tmp_path)
+    monkeypatch.setattr(ch, "SNAPSHOT", tmp_path / "health.json")
+    history_path = tmp_path / "health-history.jsonl"
+    monkeypatch.setattr(ch, "HISTORY", history_path)
+    monkeypatch.setattr(ch, "load_history", lambda path=history_path: [])
+    monkeypatch.setattr(ch, "harvest", lambda now: [_row("repo-alpha"), _row("repo-beta")])
+
+    ch.build()
+
+    fallback = (tmp_path / "health.html").read_text()
+    assert "repo-alpha" not in fallback and "repo-beta" not in fallback
+    assert "Live view unavailable" in fallback
+    snapshot = (tmp_path / "health.json").read_text()
+    assert "repo-alpha" in snapshot and "repo-beta" in snapshot  # the data store itself is unaffected

@@ -7,7 +7,8 @@ file from `/editor/js/kb-doc.js`. Two definition-of-done clauses of the editor
 epic (issue_01M17HYDBQ4GPWHPFS56M6QQPH) are asserted here:
 
 - a formatting change made through the editor's commands, with no Markdown
-  typed, changes the stored Markdown correspondingly;
+  typed, changes the stored Markdown correspondingly, and a table's cell is
+  edited as rendered (knowledge#883) the same way;
 - a document opened and saved with no change comes back byte-identical,
   frontmatter included, over a corpus of real documents.
 """
@@ -57,6 +58,32 @@ def test_formatting_through_the_editor_changes_the_stored_markdown():
     assert got["draft"] != got["original"]
 
 
+def test_a_table_cell_edited_as_rendered_changes_the_stored_markdown():
+    """The epic's clause names tables beside headings, lists, emphasis, links
+    and code blocks. md-serial gives each cell of a top-level table its own
+    editable island (knowledge#883); typing into one rewrites only the edited
+    row (knowledge#895), keeping the separator line and every other row's
+    source spelling, escaped pipes included, and leaving the frontmatter and
+    the paragraphs around it byte for byte. The fixture's header and second
+    row are spaced unlike md-serial's own output, so a regenerated row would
+    show here."""
+    got = json.loads(_node("table"))
+    assert got["tag"] == "TABLE"
+    assert (got["th_editable"], got["td_editable"]) == ("true", "true")
+    assert got["revision_advanced"], "a cell edit must advance revision(), the unsaved-changes signal"
+    assert got["round_trip_ok"], got["failures"]
+    assert got["draft"].startswith(got["frontmatter"]), "the frontmatter is untouched"
+    assert got["draft"] == got["original"].replace(
+        "| alpha | 1 | `a\\|b` |\n", "| beta | 1 | `a\\|b` |\n")
+    assert got["draft"][len(got["frontmatter"]):] == (
+        "Before\n\n"
+        "|Name|Count|Note|\n"
+        "|:---|:---:|---:|\n"
+        "| beta | 1 | `a\\|b` |\n"
+        "|gamma|  2 |`c\\|d`|\n\n"
+        "After\n")
+
+
 def test_every_corpus_document_saves_unchanged_byte_for_byte():
     """The bullet that decides whether the editor is safe to ship: a formatter
     that rewrites what it did not understand corrupts documents nobody was
@@ -99,6 +126,6 @@ def test_the_whole_knowledge_tree_saves_unchanged_when_it_is_on_this_machine():
 
 def test_the_vendored_md_serial_names_the_commit_it_was_copied_from():
     source = (REPO / "vendor" / "md-serial" / "SOURCE.md").read_text()
-    assert "d31622cbaeb4fb0e637b61beffbf05842b83e56d" in source
+    assert "a2dfdd200fbf7ba2667a65e27e71f220b44ad107" in source
     for name in ("md-serial.js", "render.js", "editor.js"):
         assert (REPO / "vendor" / "md-serial" / name).is_file()

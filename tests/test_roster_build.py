@@ -10,6 +10,7 @@ Invariants:
 - The __WHOAMI__ placeholder is present for server.py identity substitution.
 - The Engineering sub-strip (nav) shows Roster on /engineering/roster.
 """
+import json
 from pathlib import Path
 
 import pytest
@@ -671,7 +672,7 @@ def _mock_roster():
 
 def test_live_html_embeds_agent_names(monkeypatch):
     monkeypatch.setattr(R, "load_roster", _mock_roster)
-    html = R.live_html()
+    html = R.live_html(frozenset(), True)
     assert "Coder" in html
     assert "Curator" in html
     assert "Vivy" in html
@@ -679,14 +680,14 @@ def test_live_html_embeds_agent_names(monkeypatch):
 
 def test_live_html_embeds_launch_commands(monkeypatch):
     monkeypatch.setattr(R, "load_roster", _mock_roster)
-    html = R.live_html()
+    html = R.live_html(frozenset(), True)
     assert "/srv/convivy/vivy" in html
     assert "agentctl spawn curator" in html
 
 
 def test_live_html_whoami_placeholder_present(monkeypatch):
     monkeypatch.setattr(R, "load_roster", _mock_roster)
-    html = R.live_html()
+    html = R.live_html(frozenset(), True)
     assert "__WHOAMI__" in html
 
 
@@ -696,14 +697,14 @@ def test_live_html_escapes_script_injection(monkeypatch):
     roster["projects"][0]["lanes"][0]["agents"][0]["launch"] = (
         "cd /tmp && echo </script><script>alert(1)</script>")
     monkeypatch.setattr(R, "load_roster", lambda: roster)
-    html = R.live_html()
+    html = R.live_html(frozenset(), True)
     assert "</script><script>alert(1)" not in html
     assert "<\\/script>" in html
 
 
 def test_live_html_carries_nav_with_engineering_area(monkeypatch):
     monkeypatch.setattr(R, "load_roster", _mock_roster)
-    html = R.live_html()
+    html = R.live_html(frozenset(), True)
     # Engineering (= the roster) is its own single-page area (ARCH-355)
     assert 'href="/engineering/roster" aria-current="page"' in html
     # the KB/briefs live under Documents now, not on this page's sub-strip
@@ -712,8 +713,57 @@ def test_live_html_carries_nav_with_engineering_area(monkeypatch):
 
 def test_live_html_empty_projects_shows_empty_state(monkeypatch):
     monkeypatch.setattr(R, "load_roster", lambda: {"projects": [], "autonomous": []})
-    html = R.live_html()
+    html = R.live_html(frozenset(), True)
     assert "No projects found" in html
+
+
+# --- scope (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M) -------------------------
+
+
+def test_live_html_drops_a_project_whose_repo_is_out_of_scope(tmp_path, monkeypatch):
+    roster = _mock_roster()
+    roster["projects"].append({
+        "slug": "selector", "label": "Selector", "repo": "/x",
+        "lanes": [{"name": "daytime", "label": "Daytime (interactive)", "agents": [
+            {"slug": "sel-coder", "title": "Sel Coder", "model": "sonnet",
+             "desc": "d", "launch": "co sel-coder"}]}],
+    })
+    monkeypatch.setattr(R, "load_roster", lambda: roster)
+    registry = tmp_path / "projects.json"
+    registry.write_text(json.dumps({
+        "vivy": {"crew": "vivy", "lifecycle": "active", "repos": ["vivy"]},
+        "selector": {"crew": "selector", "lifecycle": "active", "repos": ["selector"]},
+    }))
+    monkeypatch.setattr(R.crew_registry, "REGISTRY", registry)
+    html = R.live_html(frozenset({"vivy"}), False)
+    assert '"label": "Vivy"' in html
+    assert '"label": "Selector"' not in html
+    assert "sel-coder" not in html
+
+
+def test_build_static_seeds_an_empty_fallback_not_real_data(tmp_path, monkeypatch):
+    """roster.html is served to ANY viewer's failed render, scoped or not
+    (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M) — a snapshot naming a real
+    project's roster would leak to a scoped viewer."""
+    monkeypatch.setattr(R, "load_roster", _mock_roster)
+    monkeypatch.setattr(R, "OUT", tmp_path)
+    R.build_static()
+    html = (tmp_path / "roster.html").read_text(encoding="utf-8")
+    assert "Coder" not in html
+    assert "Curator" not in html
+    assert "Live view unavailable" in html
+
+
+def test_live_html_keeps_autonomous_agents_unfiltered(tmp_path, monkeypatch):
+    """`autonomous` names agent slugs and models, never a project, so it is
+    not scope-filtered at all."""
+    monkeypatch.setattr(R, "load_roster", _mock_roster)
+    registry = tmp_path / "projects.json"
+    registry.write_text(json.dumps({}))
+    monkeypatch.setattr(R.crew_registry, "REGISTRY", registry)
+    html = R.live_html(frozenset(), False)
+    assert "Curator" in html
+    assert "Vivy" not in html
 
 
 # ---------------------------------------------------------------------------
@@ -839,7 +889,7 @@ def test_page_renders_filter_controls(tmp_path, monkeypatch):
         "coder": {"slug": "coder", "title": "Coder", "model": "sonnet", "desc": "d"}})
     _write_profile(tmp_path, "vivy", "daytime", ["coder"])
     monkeypatch.setattr(R, "PROJECTS", [("vivy", "Vivy", str(tmp_path / "vivy"), ["daytime"])])
-    html = R.live_html()
+    html = R.live_html(frozenset(), True)
     assert 'id="projectChips"' in html
     assert 'id="agentSearch"' in html
     assert 'data-search=' in html

@@ -31,6 +31,7 @@ from html import escape
 from pathlib import Path
 
 import alert_policy_store
+import crew_registry
 import design_system as ds
 import library_client
 import orient_time
@@ -141,8 +142,17 @@ def _week(date_str: str | None) -> str:
     return (d - timedelta(days=d.weekday())).isoformat()
 
 
-def normalize() -> list[dict]:
-    """Flatten every ledger into a common fact record. One row per PR/run."""
+def normalize(repos: frozenset[str] | None = None) -> list[dict]:
+    """Flatten every ledger into a common fact record. One row per PR/run.
+
+    `repos`, when given, drops any row whose raw `repo` field isn't in it —
+    the repo names `crew_registry.repos_in_scope` returns (E19·4,
+    issue_01M35K5JQ7Z7MHYZGWRSB5F85M), filtered BEFORE `_canon_product` folds
+    several raw repos into one display bucket (the three NYH repos, the
+    `hollis`/`personal-assistant`/`pa` aliases), so the filter matches the
+    name the registry actually lists rather than the renamed one a fact's
+    own `product` field shows. `repos=None` (the default) keeps every row,
+    for the whole-fleet caller."""
     judge_by_run: dict = {}
     for j in _load(JUDGE):
         if j.get("run_id"):
@@ -173,8 +183,12 @@ def normalize() -> list[dict]:
         }
 
     for r in _load(SCORECARD):
+        if repos is not None and r.get("repo") not in repos:
+            continue
         facts.append(fact(r, source="run"))
     for r in _load(PA_LEDGER):
+        if repos is not None and r.get("repo") not in repos:
+            continue
         facts.append(fact(r, source="github-pr"))
     return facts
 
@@ -920,12 +934,18 @@ def ledger_section_html(entries: list, ledgers: list, epic_of: dict) -> str:
 LEDGER_CORRECTIONS = "Corrections"
 
 
-def _ledger_section() -> str:
-    """Read the ledger live, per request, and render the section. Work items
-    are read only when an entry names one, to find each item's epic. A
-    correction, whose parent is null or its project's corrections queue,
+def _ledger_section(scope: frozenset[str], whole_fleet: bool) -> str:
+    """Read the ledger live, per request, and render the section, restricted
+    to `scope` (E19·3, issue_01M35K5EAZD85FBYXEBQVRKVZV): an entry whose
+    `product` is outside the viewer's scope is dropped before any total is
+    summed or any project heading is written. An entry with no product belongs
+    to no project, so it is kept only when `whole_fleet` says the viewer's
+    scope covers every registry project. Work items
+    are read only when an in-scope entry names one, to find each item's epic.
+    A correction, whose parent is null or its project's corrections queue,
     groups under "Corrections" rather than a raw queue id."""
-    entries = library_client.list_ledger_entries()
+    entries = [e for e in library_client.list_ledger_entries()
+               if e.product in scope or (e.product is None and whole_fleet)]
     epic_of: dict = {}
     if any(e.item_id for e in entries):
         items = library_client.list_issue_items()
@@ -943,8 +963,20 @@ def _ledger_section() -> str:
     return ledger_section_html(entries, library_client.list_ledgers(), epic_of)
 
 
-def spending_render(thresholds: dict | None = None, ledger_html: str = "") -> str:
+def spending_render(thresholds: dict | None = None, ledger_html: str = "",
+                     show_account_wide: bool = True) -> str:
+    """`show_account_wide` gates the "Spend — all sessions" panel
+    (`cost_panel_html`) — account-wide across every session, interactive `co`
+    included, with NO per-project dimension at all: `agent-cost-report`'s
+    ledger carries no `product` field, so there is no row to filter and no way
+    to recompute this total over a subset of projects (E19·3,
+    issue_01M35K5EAZD85FBYXEBQVRKVZV). A scoped viewer must never see it
+    (rule 1: no fleet total to a scoped viewer); a viewer whose scope covers
+    every registry project still does. `spending_live_html` is the only caller that threads a
+    real value through; every other caller (the static-fallback writer,
+    existing tests) keeps the old unconditional default."""
     banner = ds.stalled_banner_html("Spend snapshot", spending_freshness(load_latest_snapshot()))
+    account_wide_html = cost_panel_html(thresholds) if show_account_wide else ""
     body = (
         '<div class="page-head">'
         '<h1>Spending <span class="pill-brand">all sessions</span></h1>'
@@ -952,7 +984,7 @@ def spending_render(thresholds: dict | None = None, ledger_html: str = "") -> st
         '<code>co</code> sessions included (ARCH-136). Pick a window or a custom range; '
         'hover ⓘ for what each number means.</p></div>'
         + banner
-        + cost_panel_html(thresholds)
+        + account_wide_html
         + ledger_html
     )
     return ds.page_shell(
@@ -964,17 +996,22 @@ def spending_render(thresholds: dict | None = None, ledger_html: str = "") -> st
     )
 
 
-def spending_live_html() -> str:
+def spending_live_html(scope: frozenset[str], whole_fleet: bool) -> str:
     """Render the Spending dashboard from current data at request time
-    (ARCH-182). Fetches the live overage threshold fresh on every call (no
-    cache) so a write made from this page's own form reaches both the
-    overage-line coloring and the form's displayed value on the next request.
+    (ARCH-182), restricted to `scope` (E19·3, issue_01M35K5EAZD85FBYXEBQVRKVZV).
+    `whole_fleet` (`crew_registry.covers_every_project(scope)`, computed by the
+    caller) gates the account-wide panel `spending_render` can't scope at all
+    and the ledger rows that name no product. Fetches the live overage threshold fresh on every
+    call (no cache) so a write made from this page's own form reaches both
+    the overage-line coloring and the form's displayed value on the next
+    request.
 
     The ledger section is read here and not in `spending_render`, because the
     scheduled `build()` also calls that to write the static fallback, and a
     fallback that needs the Library cannot stand in when the Library is down."""
     return spending_render(alert_policy_store.get("spending.overage_runs"),
-                           ledger_html=_ledger_section())
+                           ledger_html=_ledger_section(scope, whole_fleet),
+                           show_account_wide=whole_fleet)
 
 
 # ---------------------------------------------------------------------------
@@ -1621,22 +1658,40 @@ def cost_performance_render(facts: list[dict]) -> str:
     )
 
 
-def cost_performance_live_html() -> str:
+def cost_performance_live_html(scope: frozenset[str], whole_fleet: bool) -> str:
     """Render the Cost-Performance dashboard from current data at request time
-    (ARCH-182). Cheap: reads the scorecard ledgers, no heavy producer — so the
-    page reflects the latest scorecard the moment it lands, instead of being
-    frozen at the once-daily static build. The scheduled build() still writes the
-    static file as a fallback."""
-    return cost_performance_render(normalize())
+    (ARCH-182), restricted to `scope` (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M):
+    a fact whose raw repo is outside the viewer's scope is dropped before
+    `normalize()` ever returns it. Cheap: reads the scorecard ledgers, no
+    heavy producer — so the page reflects the latest scorecard the moment it
+    lands, instead of being frozen at the once-daily static build. The
+    scheduled build() still writes the static file as a fallback."""
+    repos = None if whole_fleet else crew_registry.repos_in_scope(scope)
+    return cost_performance_render(normalize(repos))
 
 
 def build() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
+    # Both static fallbacks are served (ARCH-182) to ANY viewer whose live
+    # render throws, before scope is known to this file at all — the old
+    # unconditional spending_render() carried the account-wide panel plus
+    # whatever the ledger section happened to hold, and the old unconditional
+    # normalize() carried every repo's scorecard facts, neither checked
+    # against a viewer's scope (E19·3/E19·4, issue_01M35K5EAZD85FBYXEBQVRKVZV
+    # / issue_01M35K5JQ7Z7MHYZGWRSB5F85M). Deliberately empty rather than
+    # that, same discipline as issue_build.main().
     (OUT / "spending.html").write_text(
-        spending_render(alert_policy_store.get("spending.overage_runs")), encoding="utf-8")
-    facts = normalize()
-    (OUT / "cost-performance.html").write_text(cost_performance_render(facts), encoding="utf-8")
-    print(f"Wrote site/spending.html + site/cost-performance.html ({len(facts)} facts).")
+        ds.page_shell(title="spending", nav_html=ds.nav_component("/spending", "full"),
+                     body=ds.empty_state("Live view unavailable — reload in a moment."),
+                     extra_css=_SPENDING_CSS),
+        encoding="utf-8")
+    (OUT / "cost-performance.html").write_text(
+        ds.page_shell(title="cost-performance",
+                     nav_html=ds.nav_component("/cost-performance", "full"),
+                     body=ds.empty_state("Live view unavailable — reload in a moment."),
+                     extra_css=_COSTPERF_CSS),
+        encoding="utf-8")
+    print("Wrote site/spending.html + site/cost-performance.html (both static fallbacks, empty).")
 
 
 if __name__ == "__main__":

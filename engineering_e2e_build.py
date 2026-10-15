@@ -224,9 +224,16 @@ def _when(sig: library_client.SignalRecord) -> dt.datetime:
     return sig.produced_at or sig.ingested_at or dt.datetime.min
 
 
-def live_html() -> str:
+def live_html(scope: frozenset[str] = frozenset(), whole_fleet: bool = True) -> str:
     """Render from the Library (full-tier, server-gated). Internal-class CI
     signals only — the same coarse tier boundary every full-tier page uses.
+
+    Restricted to `scope` (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M): an
+    out-of-scope signal is dropped from `recent` before any tile, history
+    row or stalled-banner verdict is computed from it — applied to the
+    already-fetched list (rather than a per-product fan-out) so the
+    latest-per-suite max and the ordering this function's own docstring
+    establishes stay exactly as they were.
 
     `source=ci` is a Library filter now, not a Python one: unfiltered, this scan
     is 26 rows out of 18,455 live signals, 93 requests to find
@@ -245,6 +252,8 @@ def live_html() -> str:
     # the ones that don't (issue_01M1F4KN3XW0670TTWMM7PP8C1).
     recent = library_client.list_signals(
         source=[CI_SOURCE], cap=_SCAN_LIMIT, order="produced_at")
+    if not whole_fleet:
+        recent = [s for s in recent if s.product in scope]
     # Latest per (product, stream) by an explicit max over the same clock the
     # fetch was ordered by, rather than first-occurrence in `recent`. The two
     # agree today, but a max is correct even if the Library's ordering ever

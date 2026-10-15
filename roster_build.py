@@ -42,6 +42,7 @@ import re
 import sys
 from pathlib import Path
 
+import crew_registry
 import design_system as ds
 from paths import STATE_ROOT
 
@@ -768,8 +769,18 @@ if (DATA.autonomous.length) {
 """
 
 
-def live_html() -> str:
+def live_html(scope: frozenset[str], whole_fleet: bool) -> str:
+    """`scope`/`whole_fleet` (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M): a
+    project whose repo the viewer's scope does not reach carries no card, no
+    chip and no entry in the inline JSON — filtered before this page builds
+    anything from it, the same filter `crews_build._visible_repos` applies
+    to the identical roster/repo identity. `autonomous` is left unfiltered:
+    it names agent slugs and models, never a project."""
     roster = load_roster()
+    if not whole_fleet:
+        visible = crew_registry.repos_in_scope(scope)
+        roster = {"projects": [p for p in roster["projects"] if p["slug"] in visible],
+                 "autonomous": roster["autonomous"]}
     payload = json.dumps(roster, ensure_ascii=False).replace("</", "<\\/")
     body = (
         f'<main class="roster-main" id="main">\n'
@@ -802,19 +813,21 @@ def live_html() -> str:
 
 
 def build_static() -> None:
-    """Write the static fallback file."""
+    """Write the static fallback file.
+
+    **Deliberately empty, not `live_html()` of some scope** (E19·4,
+    issue_01M35K5JQ7Z7MHYZGWRSB5F85M): this file is served to whichever
+    viewer's live render failed, scoped or not, so a snapshot naming every
+    project's roster would leak to a scoped viewer — the same reasoning
+    `crews_build.build_static` already applies to its own fallback."""
     OUT.mkdir(parents=True, exist_ok=True)
-    (OUT / "roster.html").write_text(live_html(), encoding="utf-8")
-    roster = load_roster()
-    n_projects = len(roster["projects"])
-    n_auto = len(roster["autonomous"])
-    n_agents = sum(
-        len(lane["agents"])
-        for p in roster["projects"]
-        for lane in p["lanes"]
-    )
-    print(f"Wrote site/roster.html ({n_projects} projects, {n_agents} agent-lane entries, "
-          f"{n_auto} autonomous).")
+    fallback = ds.page_shell(
+        title="Agent Roster",
+        nav_html=ds.nav_component("/engineering/roster", "full"),
+        body=ds.empty_state("Live view unavailable — reload in a moment."),
+        extra_css=_ROSTER_CSS)
+    (OUT / "roster.html").write_text(fallback, encoding="utf-8")
+    print("Wrote site/roster.html (empty static fallback)")
 
 
 if __name__ == "__main__":

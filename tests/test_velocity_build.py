@@ -13,6 +13,20 @@ import waypoints
 from models import utcnow
 
 
+class _AllScope(frozenset):
+    """A viewer scope that contains every product — stands in for a
+    whole-fleet viewer's scope (E19·3,
+    issue_01M35K5EAZD85FBYXEBQVRKVZV) in tests that aren't about scope
+    filtering itself, so each doesn't need to know every product its fixture
+    happens to carry."""
+
+    def __contains__(self, item):
+        return True
+
+
+_ALL = _AllScope()
+
+
 @pytest.fixture(autouse=True)
 def _no_live_courses(monkeypatch):
     """Default to no live Courses, so a test that doesn't care about
@@ -70,7 +84,7 @@ def test_render_embeds_data_nav_asof_and_notes(tmp_path, monkeypatch):
     p = tmp_path / "velocity.json"
     p.write_text(json.dumps(_sample()))
     monkeypatch.setattr(vb, "DATA_PATH", p)
-    html = vb.render(vb.load())
+    html = vb.render(vb.load(), _ALL, True)
     # MST-labeled asof from generated_at (ARCH-171), window selector, nav link
     assert "MST" in html and 'data-w="7"' in html and 'data-w="90"' in html
     assert ">Velocity<" in html  # its own nav link, highlighted
@@ -90,7 +104,7 @@ def test_nav_is_styled(tmp_path, monkeypatch):
     p = tmp_path / "velocity.json"
     p.write_text(json.dumps(_sample()))
     monkeypatch.setattr(vb, "DATA_PATH", p)
-    html = vb.render(vb.load())
+    html = vb.render(vb.load(), _ALL, True)
     assert 'class="atelier-nav"' in html          # ds nav rendered
     assert 'aria-current="page"' in html          # active link marked
     assert ">Velocity<" in html                   # the sub-strip link is there
@@ -102,7 +116,7 @@ def test_load_missing_file_is_safe(tmp_path, monkeypatch):
     data = vb.load()
     assert data["windows"] == {} and data["bucket_order"] == []
     # render still produces a page (the JS shows an empty-state)
-    assert "<html" in vb.render(data)
+    assert "<html" in vb.render(data, _ALL, True)
 
 
 # --- freshness (owns the /velocity <-> /overview stalled agreement) ---------
@@ -123,7 +137,7 @@ def test_freshness_not_stalled_when_recent():
 def test_render_shows_stalled_banner_for_an_old_report():
     data = _sample()
     data["generated_at"] = "2020-01-01T00:00:00"
-    html = vb.render(data)
+    html = vb.render(data, _ALL, True)
     assert 'class="stalled-banner"' in html
 
 
@@ -131,7 +145,7 @@ def test_render_no_stalled_banner_for_a_fresh_report():
     import orient_time
     data = _sample()
     data["generated_at"] = orient_time.now().replace(tzinfo=None).isoformat()
-    html = vb.render(data)
+    html = vb.render(data, _ALL, True)
     assert 'class="stalled-banner"' not in html
 
 
@@ -295,7 +309,7 @@ def test_render_puts_both_page_notes_ahead_of_the_producers_own(tmp_path, monkey
     p = tmp_path / "velocity.json"
     p.write_text(json.dumps(_sample()))
     monkeypatch.setattr(vb, "DATA_PATH", p)
-    html = vb.render(vb.load())
+    html = vb.render(vb.load(), _ALL, True)
 
     assert "step down on 2026-09-05" in html
     assert "un-shallowed from 337 commits to 2,118" in html
@@ -315,6 +329,66 @@ def test_render_puts_both_page_notes_ahead_of_the_producers_own(tmp_path, monkey
 # --- waypoints headline (dashboards epic issue_01M2F3Q1B8J9E0WC5J1F1CMWA1) --
 
 
+# --- scoping (E19·3, issue_01M35K5EAZD85FBYXEBQVRKVZV) ----------------------
+
+
+def test_waypoints_section_scopes_to_the_viewers_projects(monkeypatch):
+    """Definition of done: a scoped viewer's waypoints-passed total equals the
+    same total computed over their project alone, and the page names neither
+    the other project nor the fleet total. A viewer whose scope holds both
+    projects still sees the fleet total."""
+    alpha = _course("course_a", "alpha", "Alpha course", entries=[_entry("i1", "fixed")])
+    beta = _course("course_b", "beta", "Beta course", entries=[_entry("i2", "fixed")])
+    monkeypatch.setattr(library_client, "list_courses", lambda **k: [alpha, beta])
+    monkeypatch.setattr(library_client, "get_course", lambda cid: {"course_a": alpha, "course_b": beta}[cid])
+
+    scoped = vb._waypoints_section(frozenset({"alpha"}))
+    assert "1 of 1 passed" in scoped
+    assert "alpha" in scoped
+    assert "beta" not in scoped and "2 of 2 passed" not in scoped
+
+    both = vb._waypoints_section(frozenset({"alpha", "beta"}))
+    assert "2 of 2 passed" in both
+    assert "alpha" in both and "beta" in both
+
+
+def test_render_hides_delivery_activity_from_a_scoped_viewer(tmp_path, monkeypatch):
+    """The "Delivery activity" section's buckets (bosun/library/etc. crews,
+    features with no project of their own) don't reconcile with a human
+    viewer's project-slug scope at all, so it reaches only a viewer whose
+    scope covers every registry project rather than being guessed at (see
+    `render`'s own docstring). That viewer still sees it, bucket names
+    included."""
+    p = tmp_path / "velocity.json"
+    p.write_text(json.dumps(_sample()))
+    monkeypatch.setattr(vb, "DATA_PATH", p)
+
+    scoped = vb.render(vb.load(), frozenset({"alpha"}), False)
+    assert "Delivery activity" not in scoped
+    assert "Engineering-internal" not in scoped
+
+    whole = vb.render(vb.load(), frozenset({"alpha"}), True)
+    assert "Delivery activity" in whole
+    assert "Engineering-internal" in whole
+
+
+def test_main_writes_an_empty_static_fallback_naming_no_project(tmp_path, monkeypatch):
+    """server.py serves site/velocity.html to ANY viewer whose live render
+    throws, before scope is known to this file at all — so the fallback
+    `main()` writes must name no Course product or Delivery-activity bucket,
+    even though a real render might hold several."""
+    monkeypatch.setattr(vb, "OUT", tmp_path)
+    p = tmp_path / "velocity.json"
+    p.write_text(json.dumps(_sample()))
+    monkeypatch.setattr(vb, "DATA_PATH", p)
+
+    vb.main()
+
+    fallback = (tmp_path / "velocity.html").read_text()
+    assert "Vivy" not in fallback and "Engineering-internal" not in fallback
+    assert "Live view unavailable" in fallback
+
+
 def test_waypoints_section_headlines_passed_count_and_per_course_progress(monkeypatch):
     course = _course("course_1", "bosun", "Make dispatch accountable", entries=[
         _entry("i1", "fixed", title="Ship the queue"),
@@ -323,7 +397,7 @@ def test_waypoints_section_headlines_passed_count_and_per_course_progress(monkey
     monkeypatch.setattr(library_client, "list_courses", lambda **k: [course])
     monkeypatch.setattr(library_client, "get_course", lambda cid: course)
 
-    html = vb._waypoints_section()
+    html = vb._waypoints_section(_ALL)
     assert "1" in html and "Waypoints passed" in html
     assert "bosun" in html
     assert "Make dispatch accountable" in html
@@ -343,7 +417,7 @@ def test_waypoints_section_shows_windowed_pace_per_window(monkeypatch):
     monkeypatch.setattr(library_client, "list_courses", lambda **k: [course])
     monkeypatch.setattr(library_client, "get_course", lambda cid: course)
 
-    html = vb._waypoints_section()
+    html = vb._waypoints_section(_ALL)
     assert "not shown" not in html and "unavailable" not in html
     assert "Waypoints passed (7d)" in html
     assert "Waypoints passed (30d)" in html
@@ -351,7 +425,7 @@ def test_waypoints_section_shows_windowed_pace_per_window(monkeypatch):
 
 
 def test_waypoints_section_renders_no_live_courses_without_error():
-    html = vb._waypoints_section()  # autouse fixture already sets list_courses -> []
+    html = vb._waypoints_section(_ALL)  # autouse fixture already sets list_courses -> []
     assert "No live Courses" in html
 
 
@@ -360,7 +434,7 @@ def test_waypoints_section_degrades_on_library_outage(monkeypatch):
         raise ConnectionError("Library unreachable")
 
     monkeypatch.setattr(library_client, "list_courses", boom)
-    html = vb._waypoints_section()
+    html = vb._waypoints_section(_ALL)
     assert 'class="error-state"' in html
 
 
@@ -369,7 +443,7 @@ def test_render_puts_waypoints_headline_ahead_of_delivery_activity(monkeypatch):
     monkeypatch.setattr(library_client, "list_courses", lambda **k: [course])
     monkeypatch.setattr(library_client, "get_course", lambda cid: course)
 
-    html = vb.render(vb.load())
+    html = vb.render(vb.load(), _ALL, True)
     assert "Waypoints passed" in html
     assert "Delivery activity" in html
     assert html.index("Waypoints passed") < html.index("Delivery activity")
@@ -384,7 +458,7 @@ def test_waypoints_section_degrades_on_a_get_course_wide_failure_too(monkeypatch
         raise ConnectionError("Library unreachable")
 
     monkeypatch.setattr(library_client, "list_courses", boom)
-    html = vb._waypoints_section()
+    html = vb._waypoints_section(_ALL)
     assert 'class="error-state"' in html
     assert "Weekly trend" not in html  # nothing below the failure renders either
 
@@ -408,7 +482,7 @@ def test_weekly_pace_chart_renders_from_live_courses_mixing_terminal_and_open(mo
     monkeypatch.setattr(library_client, "get_course", lambda cid: course)
     monkeypatch.setattr(waypoints, "utcnow", lambda: _NOW)
 
-    html = vb._waypoints_section()
+    html = vb._waypoints_section(_ALL)
     assert "Weekly trend" in html
     assert "<svg" in html
 
@@ -422,7 +496,7 @@ def test_weekly_pace_chart_shows_a_quiet_week_as_zero_not_a_gap(monkeypatch):
     monkeypatch.setattr(library_client, "get_course", lambda cid: course)
     monkeypatch.setattr(waypoints, "utcnow", lambda: _NOW)
 
-    html = vb._waypoints_section()
+    html = vb._waypoints_section(_ALL)
     gap_week = waypoints._iso_week(_NOW - dt.timedelta(days=14))
     assert f">{gap_week}<" in html  # the breakdown table's zero row is present
     # its Total cell reads 0, not an absent row
@@ -439,7 +513,7 @@ def test_weekly_pace_chart_marks_the_current_week_partial(monkeypatch):
     monkeypatch.setattr(library_client, "get_course", lambda cid: course)
     monkeypatch.setattr(waypoints, "utcnow", lambda: _NOW)
 
-    html = vb._waypoints_section()
+    html = vb._waypoints_section(_ALL)
     assert "(partial)" in html
     assert 'partial"' in html
 
@@ -449,7 +523,7 @@ def test_weekly_pace_chart_degrades_on_library_outage(monkeypatch):
         raise ConnectionError("Library unreachable")
 
     monkeypatch.setattr(library_client, "list_courses", boom)
-    html = vb._waypoints_section()
+    html = vb._waypoints_section(_ALL)
     assert 'class="error-state"' in html
     assert "<svg" not in html
 
@@ -467,7 +541,7 @@ def test_weekly_pace_breakdown_splits_builder_from_products_and_sums(monkeypatch
                          lambda cid: {"course_1": builder, "course_2": product}[cid])
     monkeypatch.setattr(waypoints, "utcnow", lambda: _NOW)
 
-    html = vb._waypoints_section()
+    html = vb._waypoints_section(_ALL)
     assert ">Builder<" in html
     assert ">vivy<" in html
     week = waypoints._iso_week(_NOW - dt.timedelta(days=7))
@@ -487,7 +561,7 @@ def test_weekly_pace_unresolved_passed_entries_counted_and_disclosed(monkeypatch
     monkeypatch.setattr(library_client, "get_course", lambda cid: course)
     monkeypatch.setattr(waypoints, "utcnow", lambda: _NOW)
 
-    html = vb._waypoints_section()
+    html = vb._waypoints_section(_ALL)
     assert "2 of 2 passed" in html  # both count toward the position/total
     assert "1 passed waypoint carries no resolved time" in html
 
@@ -499,7 +573,7 @@ def test_old_prs_merged_headline_no_longer_drives_the_page_headline(tmp_path, mo
     p = tmp_path / "velocity.json"
     p.write_text(json.dumps(_sample()))
     monkeypatch.setattr(vb, "DATA_PATH", p)
-    html = vb.render(vb.load())
+    html = vb.render(vb.load(), _ALL, True)
     assert "<h1>Engineering velocity</h1>" in html
     assert "Waypoints passed" in html
     # the old headline framing ("N PRs" as the top figure) is gone — merged-PR
@@ -523,7 +597,7 @@ def test_weekly_pace_tooltip_escapes_a_product_name_carrying_markup(monkeypatch)
     monkeypatch.setattr(library_client, "get_course", lambda cid: course)
     monkeypatch.setattr(waypoints, "utcnow", lambda: _NOW)
 
-    html = vb._waypoints_section()
+    html = vb._waypoints_section(_ALL)
 
     assert "<script>alert(1)</script>" not in html
     assert "&lt;/title&gt;&lt;script&gt;" in html

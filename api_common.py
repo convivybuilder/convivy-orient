@@ -22,6 +22,7 @@ from urllib.parse import urlsplit
 from access_identity import EMAIL_HEADER, JWT_HEADER, jwt_config, verify_access_jwt
 from authz import Identity, agent_identity, human_identity, system_identity
 import library_client
+import tailnet_identity
 from logutil import clean_log_field
 from paths import CONFIG_ROOT
 
@@ -228,9 +229,22 @@ def resolve_identity(request: Request) -> Identity | None:
             return _note_identity(request, None, "auth=bearer-unknown")
         make = system_identity if meta.get("kind") == "system" else agent_identity
         return _note_identity(request, make(meta["name"], meta["products"]), "auth=bearer")
-    email = _verified_email(request)
+    # The human's identity comes from the listener the request landed on, as
+    # server._identity's does: whois on the tailnet listener, which never reads
+    # the Cloudflare email header a tailnet peer could forge (security review,
+    # PR #381), and Cloudflare Access on loopback. An unbound socket is refused.
+    listener = tailnet_identity.listener_for(request.scope.get("server"))
+    if listener == tailnet_identity.TAILNET:
+        peer = request.client
+        email = tailnet_identity.login_for_peer(peer.host, peer.port) if peer else None
+        source = "auth=tailnet"
+    elif listener == tailnet_identity.LOOPBACK:
+        email = _verified_email(request)
+        source = "auth=cf-access"
+    else:
+        return _note_identity(request, None, "auth=listener-unknown")
     ident = human_identity(email, library_client.person_scope(email)) if email else None
-    return _note_identity(request, ident, "auth=cf-access" if ident else "auth=none")
+    return _note_identity(request, ident, source if ident else "auth=none")
 
 
 def same_origin(request: Request) -> bool:

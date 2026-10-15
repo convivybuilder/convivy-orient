@@ -28,6 +28,7 @@ from html import escape
 from pathlib import Path
 
 import alert_policy_store
+import crew_registry
 import design_system as ds
 import orient_time
 from paths import STATE_ROOT
@@ -396,8 +397,15 @@ def freshness(asof: str) -> ds.Freshness:
     )
 
 
-def live_html() -> str:
-    """Render /health from the last persisted harvest at request time (ARCH-182).
+def live_html(scope: frozenset[str]) -> str:
+    """Render /health from the last persisted harvest at request time (ARCH-182),
+    restricted to the viewer's project scope (E19·3,
+    issue_01M35K5EAZD85FBYXEBQVRKVZV): every row and history record for a repo
+    the registry lists under no project in `scope` is dropped before `render()` ever sees it, so no out-of-scope
+    repo name reaches the page, its inline JSON, or its trend table. An
+    administrator's scope is the Library's full project list, so this filter
+    removes nothing for them — the same rows render as before.
+
     The harvest (gh/git) stays the scheduled producer; this only re-reads its
     snapshot + history, so the page picks up a new harvest the moment it lands.
     asof reflects the harvest time, not the request, since the data is producer-fresh.
@@ -406,8 +414,11 @@ def live_html() -> str:
     made from this same page's own form reaches both the table's coloring and
     the write form's displayed values on the very next request."""
     asof, rows = load_snapshot()
+    repos = crew_registry.repos_in_scope(scope)
+    rows = [r for r in rows if r.get("repo") in repos]
+    history = [h for h in load_history() if h.get("repo") in repos]
     thresholds = alert_policy_store.get("code_health.ci_pass_rate")
-    return render(rows, load_history(), fresh=freshness(asof), thresholds=thresholds)
+    return render(rows, history, fresh=freshness(asof), thresholds=thresholds)
 
 
 _PAGE_CSS = r"""
@@ -750,15 +761,22 @@ def build() -> None:
     # UTC, so an evening rebuild and the next-morning scheduled run don't collide.
     local_day = datetime.now().astimezone().date().isoformat()
     history = merge_history(load_history(), rows, local_day)
-    thresholds = alert_policy_store.get("code_health.ci_pass_rate")
-    (OUT / "health.html").write_text(
-        render(rows, history, thresholds=thresholds), encoding="utf-8")
     SNAPSHOT.parent.mkdir(parents=True, exist_ok=True)
     SNAPSHOT.write_text(json.dumps(
         {"asof": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "repos": rows}, indent=2))
     HISTORY.parent.mkdir(parents=True, exist_ok=True)
     HISTORY.write_text("\n".join(json.dumps(h, separators=(",", ":")) for h in history) + "\n")
-    print(f"Wrote site/health.html + {SNAPSHOT} ({len(rows)} repos) + "
+    # The static fallback is served (ARCH-182) to ANY viewer whose live render
+    # throws, before scope is known to this file at all — a per-repo row here
+    # would be real project data with no scope check on the way out (E19·3,
+    # issue_01M35K5EAZD85FBYXEBQVRKVZV). Deliberately empty rather than the
+    # last harvest, same discipline as issue_build.main().
+    (OUT / "health.html").write_text(
+        ds.page_shell(title="code health", nav_html=ds.nav_component("/health", "full"),
+                     body=ds.empty_state("Live view unavailable — reload in a moment."),
+                     extra_css=_PAGE_CSS),
+        encoding="utf-8")
+    print(f"Wrote site/health.html (static fallback, empty) + {SNAPSHOT} ({len(rows)} repos) + "
           f"{HISTORY.name} ({len(history)} records / {len({h['date'] for h in history})} days).")
 
 

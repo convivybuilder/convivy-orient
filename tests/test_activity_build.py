@@ -267,6 +267,28 @@ def test_session_nodes_finds_one_tree_and_answers_none_for_an_unknown_id(tmp_pat
     assert ab.session_nodes("") is None
 
 
+def test_session_nodes_answers_an_out_of_scope_session_like_an_unknown_id(tmp_path, monkeypatch):
+    """E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M: a session whose product the
+    registry lists under no project in the viewer's scope must answer
+    byte-identically to an unknown id, never a distinguishable refusal —
+    the same reasoning the issue/signal/reference-doc detail routes already
+    apply."""
+    snap = _big_snapshot(sessions=2, nodes_each=1)
+    snap["sessions"][0]["product"] = "in-scope-repo"
+    snap["sessions"][1]["product"] = "out-of-scope-repo"
+    f = tmp_path / "sessions.json"
+    f.write_text(json.dumps(snap))
+    monkeypatch.setattr(ab, "ACTIVITY_FILE", f)
+    monkeypatch.setattr(ab.crew_registry, "repos_in_scope",
+                        lambda scope: frozenset({"in-scope-repo"}))
+    unknown = ab.session_nodes("nope", frozenset({"x"}), False)
+    out_of_scope = ab.session_nodes("s-1", frozenset({"x"}), False)
+    assert unknown is None
+    assert out_of_scope is None
+    in_scope = ab.session_nodes("s-0", frozenset({"x"}), False)
+    assert in_scope is not None
+
+
 def test_expanding_a_row_fetches_its_tree_once_and_renders_it():
     """Runs the page's own loadNodes against a stub fetch: the first open
     asks /activity/nodes for that session, renders the answer, and a second
@@ -295,3 +317,26 @@ loadNodes({ session_id: "x" }, inner);
 setTimeout(() => console.log(JSON.stringify({ html: inner.innerHTML })), 20);
 """, [])
     assert "load workers" in result["html"] and "HTTP 404" in result["html"]
+
+
+# --- build: the static fallback must never carry real session data --------
+
+
+def test_build_seeds_an_empty_fallback_not_real_data(tmp_path, monkeypatch):
+    """activity.html is served to ANY viewer's failed render, scoped or not
+    (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M): a snapshot naming a real
+    session would leak to a scoped viewer."""
+    snap = _big_snapshot(sessions=1, nodes_each=0)
+    snap["sessions"][0]["product"] = "REAL-REPO"
+    snap["sessions"][0]["label"] = "REAL-SESSION-LABEL"
+    f = tmp_path / "sessions.json"
+    f.write_text(json.dumps(snap))
+    monkeypatch.setattr(ab, "ACTIVITY_FILE", f)
+    out = tmp_path / "out"
+    import paths
+    monkeypatch.setattr(paths, "STATE_ROOT", out)
+    monkeypatch.setattr(ab, "STATE_ROOT", out)
+    ab.build()
+    html = (out / "site" / "activity.html").read_text(encoding="utf-8")
+    assert "REAL-REPO" not in html
+    assert "REAL-SESSION-LABEL" not in html

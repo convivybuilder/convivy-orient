@@ -153,9 +153,15 @@ def test_empty_state_when_only_git_derived_rows_exist(db):
 
 
 def test_route_registered_full_tier():
+    """/engineering/changelog moved out of `_full_only_routes()` into
+    `server.SCOPED_ROUTES` (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M): that
+    dispatcher calls its renderer with no arguments, and this page now needs
+    the viewer's scope. `tests/test_server.py`'s
+    `_MOVED_OUT_OF_FULL_ONLY_ROUTES` carries the full-tier/nav/contractor-leak
+    coverage this move must not lose."""
     import server
-    routes = server._full_only_routes()
-    assert routes["/engineering/changelog"][1] is c.changelog_live_html
+    assert "/engineering/changelog" in server.SCOPED_ROUTES
+    assert "/engineering/changelog" not in server._full_only_routes()
 
 
 def test_nav_places_changelog_in_engineering():
@@ -167,3 +173,20 @@ def test_nav_places_changelog_in_engineering():
     import design_system as ds
     eng = ds.nav_component("/engineering/changelog", "full")
     assert 'href="/engineering/changelog" aria-current="page"' in eng and 'href="/engineering/merge-queue"' in eng
+
+
+# --- build_static: the static fallback must never carry real entries -------
+
+
+def test_build_static_seeds_an_empty_fallback_not_real_data(tmp_path, monkeypatch, db):
+    """engineering-changelog.html is served to ANY viewer's failed render,
+    scoped or not (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M): a snapshot
+    naming a real entry would leak to a scoped viewer. `build_static` never
+    calls the live renderer at all now — the same zero-argument leak 26bb079
+    found and fixed in `archives_build.build_static()`."""
+    _seed(_mk(body="REAL-CHANGELOG-ENTRY"))
+    monkeypatch.setattr(c, "SITE", tmp_path)
+    c.build_static()
+    html = (tmp_path / "engineering-changelog.html").read_text(encoding="utf-8")
+    assert "REAL-CHANGELOG-ENTRY" not in html
+    assert "Live view unavailable" in html

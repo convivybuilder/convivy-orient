@@ -227,19 +227,43 @@ def _stub_fetch(monkeypatch, *, open_prs=None, merged_prs=None, commits=None, be
 
 
 def test_detail_html_none_for_unknown_project():
-    assert p.detail_html("not-a-real-project") is None
+    assert p.detail_html("not-a-real-project", frozenset(), True) is None
 
 
 def test_detail_html_renders_known_project(monkeypatch):
     _stub_fetch(monkeypatch)
-    html = p.detail_html("vivy")
+    html = p.detail_html("vivy", frozenset(), True)
+    assert html is not None
+    assert "Vivy" in html
+
+
+# --- scope (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M) -------------------------
+
+
+def test_detail_html_none_for_a_known_project_outside_the_viewers_scope(tmp_path, monkeypatch):
+    """A project name is a short, guessable repo name, so this page's own
+    check, not just the caller's, must refuse it — a scoped viewer not
+    entitled to "vivy" gets the same 404 an unknown name gets."""
+    _stub_fetch(monkeypatch)
+    registry = tmp_path / "projects.json"
+    registry.write_text('{"vivy": {"crew": "vivy", "lifecycle": "active", "repos": ["vivy"]}}')
+    monkeypatch.setattr(p.crew_registry, "REGISTRY", registry)
+    assert p.detail_html("vivy", frozenset({"other"}), False) is None
+
+
+def test_detail_html_renders_for_a_viewer_whose_scope_holds_the_repo(tmp_path, monkeypatch):
+    _stub_fetch(monkeypatch)
+    registry = tmp_path / "projects.json"
+    registry.write_text('{"vivy": {"crew": "vivy", "lifecycle": "active", "repos": ["vivy"]}}')
+    monkeypatch.setattr(p.crew_registry, "REGISTRY", registry)
+    html = p.detail_html("vivy", frozenset({"vivy"}), False)
     assert html is not None
     assert "Vivy" in html
 
 
 def test_empty_sections_render_empty_state(monkeypatch):
     _stub_fetch(monkeypatch)
-    html = p.detail_html("vivy")
+    html = p.detail_html("vivy", frozenset(), True)
     assert "No open pull requests." in html
     assert "No recently merged pull requests." in html
     assert "No recent commits." in html
@@ -254,7 +278,7 @@ def test_project_page_renders_error_state_when_the_library_is_unreachable(monkey
     empty-state text."""
     _stub_fetch(monkeypatch, bead_error="The Library could not be reached "
                 "(RuntimeError). Try again shortly.")
-    html = p.detail_html("vivy")
+    html = p.detail_html("vivy", frozenset(), True)
     assert html is not None
     assert "The Library could not be reached (RuntimeError). Try again shortly." in html
     assert "No bead on file for this project yet." not in html
@@ -277,7 +301,7 @@ def test_fetch_distinguishes_unreachable_library_from_no_bead(monkeypatch):
 def test_bead_link_renders_when_present(monkeypatch):
     _stub_fetch(monkeypatch, bead={"id": "vivy/bead/x", "title": "Where Vivy is going",
                                    "url": "/reference/doc/vivy/bead/x"})
-    html = p.detail_html("vivy")
+    html = p.detail_html("vivy", frozenset(), True)
     assert 'href="/reference/doc/vivy/bead/x"' in html
     assert "Where Vivy is going" in html
     # No Typora / OPEN_BASE anywhere (issue_01M17HYDBQ4GPWHPFS56M6QQPH)
@@ -294,7 +318,7 @@ def test_merged_and_commit_rows_escape_content(monkeypatch):
                   "author": "<b>y</b>", "date": "2026-07-17T00:00:00Z",
                   "url": "https://github.com/convivy/vivy/commit/abcdef0"}],
     )
-    html = p.detail_html("vivy")
+    html = p.detail_html("vivy", frozenset(), True)
     assert "<script>alert(1)</script>" not in html
     assert "<img onerror=alert(1)>" not in html
     assert "&lt;b&gt;x&lt;/b&gt;" in html and "&lt;b&gt;y&lt;/b&gt;" in html
@@ -314,7 +338,7 @@ def test_repo_exists_false_when_gh_fails(monkeypatch):
 
 def test_page_for_a_project_with_no_github_repo(monkeypatch):
     _stub_fetch(monkeypatch, repo_exists=False)
-    html = p.detail_html("company")
+    html = p.detail_html("company", frozenset(), True)
     assert "No GitHub repo named convivy/company" in html
     # No dead link to a 404'ing github.com/convivy/company.
     assert 'href="https://github.com/convivy/company"' not in html
@@ -345,7 +369,7 @@ def test_open_prs_count_reflected_in_heading(monkeypatch):
                             reviewDecision="REVIEW_REQUIRED", mergeable="MERGEABLE",
                             statusCheckRollup=[{"conclusion": "SUCCESS"}], repo="vivy"))
     _stub_fetch(monkeypatch, open_prs=[pr])
-    html = p.detail_html("vivy")
+    html = p.detail_html("vivy", frozenset(), True)
     assert "Open pull requests" in html
     assert "· 1" in html
 
@@ -400,7 +424,7 @@ def test_lede_shows_course_position_for_a_project_with_a_live_course(monkeypatch
         ],
     )
     _stub_fetch(monkeypatch)
-    html = p.detail_html("vivy")
+    html = p.detail_html("vivy", frozenset(), True)
     assert "2 of 3 waypoints passed" in html
     assert 'href="/chart-house"' in html
     assert "No progress measure yet" not in html
@@ -416,14 +440,14 @@ def test_lede_matches_a_course_whose_product_key_is_not_the_repo_name(monkeypatc
         entries=[{"issue_id": "i1", "state": "fixed"}],
     )
     _stub_fetch(monkeypatch)
-    html = p.detail_html("agent-platform")
+    html = p.detail_html("agent-platform", frozenset(), True)
     assert "1 of 1 waypoints passed" in html
 
 
 def test_lede_says_no_live_course_plainly(monkeypatch):
     library_fake.patch(monkeypatch)
     _stub_fetch(monkeypatch)
-    html = p.detail_html("vivy")
+    html = p.detail_html("vivy", frozenset(), True)
     assert "No live Course yet" in html
     assert 'href="/chart-house"' in html
     assert "No progress measure yet" not in html
@@ -435,7 +459,7 @@ def test_lede_shows_unavailable_on_a_library_failure_never_a_false_zero(monkeypa
 
     monkeypatch.setattr(library_client, "list_courses", _boom)
     _stub_fetch(monkeypatch)
-    html = p.detail_html("vivy")
+    html = p.detail_html("vivy", frozenset(), True)
     assert "Course progress unavailable" in html
     assert "0 of 0" not in html
     # the rest of the page still renders rather than 500ing

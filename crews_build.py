@@ -126,6 +126,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 import chart_house_build as ch
+import crew_registry
 import design_system as ds
 import library_client
 import orient_time
@@ -833,13 +834,37 @@ def _refusals_by_crew(refusals: list) -> dict[str, int]:
     return dict(out)
 
 
-def _roster_counts() -> dict[str, dict]:
+def _visible_repos(scope: frozenset[str], whole_fleet: bool) -> frozenset[str] | None:
+    """The repo names (roster_build's own project-slug identity, e.g.
+    "agent-platform" rather than the registry's "bosun") the viewer's scope
+    reaches — `None` means every repo, for a `whole_fleet` viewer (E19·4,
+    issue_01M35K5JQ7Z7MHYZGWRSB5F85M).
+
+    This page's "crew" is a repo, not a registry project slug — the same gap
+    `crew_registry.repos_in_scope`'s own docstring names (`agent-platform`
+    belongs to project `bosun`; `convivy-app-kit`/`convivy-services` to `svc`)
+    — so that function, which already resolves a project slug the Library
+    returns to the repo names a project unit lists, is reused rather than a
+    second alias table grown here."""
+    if whole_fleet:
+        return None
+    return crew_registry.repos_in_scope(scope)
+
+
+def _roster_counts(scope: frozenset[str], whole_fleet: bool) -> dict[str, dict]:
     """{slug: {"label": str, "agents": n}} from roster_build's own payload —
     reused, not reimplemented, so this page can't disagree with the roster
-    page about who's dispatchable."""
+    page about who's dispatchable.
+
+    A roster project whose slug is not a repo the viewer's scope reaches
+    (`_visible_repos`) is dropped before any row is built for it (E19·4) —
+    the same "filter before grouping" rule `issue_build.live_html` applies."""
     roster = roster_build.load_roster()
+    visible = _visible_repos(scope, whole_fleet)
     out = {}
     for proj in roster["projects"]:
+        if visible is not None and proj["slug"] not in visible:
+            continue
         agent_count = sum(len(lane["agents"]) for lane in proj["lanes"])
         label = _CREW_NAME_OVERRIDES.get(proj["slug"], proj["label"])
         out[proj["slug"]] = {"label": label, "agents": agent_count}
@@ -1094,7 +1119,30 @@ def _live_run_line_html(run) -> str:
             f'</div>')
 
 
-def _live_runs_section_html(result) -> str:
+def _visible_refusals(refusals: list, visible: frozenset[str] | None) -> list:
+    """Drop a refusal whose own `product` the viewer's scope does not reach
+    (E19·4). `visible is None` is the whole-fleet viewer, who sees every
+    refusal including the unattributed ones (`product` is nullable on the
+    row — `_refusals_by_crew`'s own docstring); a scoped viewer sees neither
+    an out-of-scope product's collision nor an unattributed one, the same
+    default-deny rule the Library's own disclosure bound rests on for this
+    page (`test_crews_is_full_tier_only_because_the_disclosure_bound_depends_on_it`)."""
+    if visible is None:
+        return list(refusals)
+    return [r for r in refusals if r.product in visible]
+
+
+def _visible_live_runs(runs: list, visible: frozenset[str] | None) -> list:
+    """Drop a live Bosun run whose own `repo` the viewer's scope does not
+    reach (E19·4) — the raw "Live Bosun state" list is not keyed by roster
+    slug the way the in-flight column is, so it needs its own filter rather
+    than inheriting one from `_roster_counts`."""
+    if visible is None:
+        return list(runs)
+    return [r for r in runs if r.repo in visible]
+
+
+def _live_runs_section_html(result, visible: frozenset[str] | None) -> str:
     """The real "Live Bosun state" panel (the operator, reading /crews, 2026-09-02:
     replacing the `awaiting_state` placeholder now that
     `library_client.list_live_runs()` exists). `available: False` is the
@@ -1108,21 +1156,33 @@ def _live_runs_section_html(result) -> str:
     if not result.available:
         reason = result.reason or "no reason given"
         return ds.empty_state(f"Live Bosun state is unavailable right now — {reason}.")
-    if not result.runs:
+    runs = _visible_live_runs(result.runs, visible)
+    if not runs:
         return ds.empty_state("No runs on foot right now.")
     as_of = ""
     if result.generated_at:
         as_of = (f'<p class="cr-sub">As of '
                 f'{escape(orient_time.fmt(result.generated_at, assume_utc=True))}.</p>')
-    rows = "".join(_live_run_line_html(r) for r in result.runs)
+    rows = "".join(_live_run_line_html(r) for r in runs)
     return as_of + f'<div class="cr-live-runs">{rows}</div>'
 
 
-def live_html() -> str:
-    roster = _roster_counts()
+def live_html(scope: frozenset[str], whole_fleet: bool) -> str:
+    """Render /crews at request time, restricted to the viewer's project
+    scope (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M): a crew whose repo is not
+    reachable from `scope` carries no row, no runs panel, no in-flight count
+    and no cost figure; the lease-refusal "Collisions" list and the raw
+    "Live Bosun state" list — the two sections not keyed by roster slug, so
+    filtering the roster alone would not reach them — are filtered against
+    the same visible-repo set. `whole_fleet`
+    (`crew_registry.covers_every_project(scope)`, computed by the caller)
+    gates nothing further here beyond lifting that filter entirely, since
+    every figure on this page already carries its own project."""
+    visible = _visible_repos(scope, whole_fleet)
+    roster = _roster_counts(scope, whole_fleet)
     items = library_client.list_issue_items()
     lease_result = library_client.list_leases(state="all")
-    refusals = library_client.list_lease_refusals()
+    refusals = _visible_refusals(library_client.list_lease_refusals(), visible)
     live_runs_result = library_client.list_live_runs()
     work = _work_by_crew(items)
     lease_counts = _leases_by_crew(lease_result.leases, items, policy=lease_result.policy)
@@ -1201,7 +1261,7 @@ def live_html() -> str:
     working CO session that has not yet dispatched a run does not appear
     here, since Orient reads the Bosun's run register, never its control
     channel (ADR-0050).</p>
-    {_live_runs_section_html(live_runs_result)}
+    {_live_runs_section_html(live_runs_result, visible)}
     <div class="footnote">Roster from /engineering/roster's own data, crew names
     per ADR-0042 where they differ from a repo's own label. Work and leases read
     live from the Library, joined by issue id; refusals carry their own product
@@ -1234,14 +1294,20 @@ def _crew_controls_html(roster: dict, selected: str, since: dt.date, until: dt.d
             f'<button type="submit">View</button></form>')
 
 
-def runs_html(query: dict | None = None) -> str:
+def runs_html(query: dict | None, scope: frozenset[str], whole_fleet: bool) -> str:
     """The click-through the epic asks for: the same per-crew run list /crews
     shows a recent slice of, over a time window the reader picks — one crew
     at a time, so the read stays bounded (RUNS_PAGE_LIMIT) instead of an
-    unbounded fleet-wide scan."""
+    unbounded fleet-wide scan.
+
+    `scope`/`whole_fleet` (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M): `roster`
+    is already filtered to the viewer's visible repos, so a `?product=`
+    naming one outside it simply isn't `in roster` and falls to the same
+    "pick a crew" empty state an unknown product name already got — no
+    separate scope check needed here."""
     query = query or {}
     since, until, _ = resolve_window(query)
-    roster = _roster_counts()
+    roster = _roster_counts(scope, whole_fleet)
     product = (query.get("product") or "").strip()
 
     if product and product in roster:
@@ -1468,11 +1534,21 @@ def build_static() -> None:
     """Seed the static fallback (issue_01M2KVHTVFF4MAQF94M2SP6TZ0): /crews had
     no builder at all, so a live-render throw during a Library stall had
     nothing to fall back to and server.py returned 500 naming this file
-    rather than a stale page. `live_html()` is cheap (no `gh` calls, per its
-    module docstring), so seeding is just calling it once at deploy time,
-    same as `roster_build.build_static`."""
+    rather than a stale page.
+
+    **Deliberately empty, not `live_html()` of some scope** (E19·4,
+    issue_01M35K5JQ7Z7MHYZGWRSB5F85M): this file is served to whichever
+    viewer's live render failed, scoped or not, so a snapshot naming every
+    crew's roster, work and cost would leak to a scoped viewer — the same
+    reasoning `chart_house_build.build_static` and `issue_build.main` already
+    apply to their own fallbacks."""
     OUT.mkdir(parents=True, exist_ok=True)
-    (OUT / "crews.html").write_text(live_html(), encoding="utf-8")
+    fallback = ds.page_shell(
+        title="Crews",
+        nav_html=ds.nav_component("/crews", "full"),
+        body=ds.empty_state("Live view unavailable — reload in a moment."),
+        extra_css=_CSS)
+    (OUT / "crews.html").write_text(fallback, encoding="utf-8")
     print("Wrote site/crews.html")
 
 

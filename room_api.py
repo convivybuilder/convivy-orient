@@ -7,15 +7,20 @@ the control DB's single-writer rule — one of the few tables still local to
 Orient (ADR-0022), unlike the issue/signal/decision vaults this API used to
 share that rule with.
 
-Every entry a room gets is validated against the TARGET member's live entitlement
-(kb_index.room_entitlement) at write time, so a seed can never place a doc the
-member isn't entitled to. This is belt-and-suspenders with the render, which
-intersects curation ∩ grant again on every load: write-time validation gives a
-clean error, the render is the wall.
+Every entry a room gets is validated against the TARGET member's live grant at
+write time, so a seed can never place a reference the member isn't entitled to.
+A `doc` entry checks kb_index.room_entitlement, as it always has; an `item` or
+`signal` entry (CQ·147, E22) is fetched from the Library and checked against the
+member's Library-resolved project scope, and either kind is refused outright for
+a contractor — their grant has no item or signal half at all. This is
+belt-and-suspenders with the render, which intersects curation ∩ grant again on
+every load: write-time validation gives a clean error, the render is the wall.
 
-The concierge request→edit loop (a member editing their OWN room via an agent)
-is a separate surface arriving with the fast-follow concierge PR; this module is
-the steward/admin plane only.
+The concierge request→edit loop (a member editing their OWN room via an agent,
+`room_request` below) applies the SAME per-kind check to whatever the model's
+plan names (CQ·149, E22): a `doc`/`item`/`signal` reference the member is not
+entitled to is refused and the whole plan applied or not at all, exactly as a
+curated entry is refused here.
 """
 from __future__ import annotations
 
@@ -24,6 +29,7 @@ import sys
 from fastapi import APIRouter, Request
 from sqlalchemy import select
 
+import access_identity
 import concierge
 import library_client
 from api_common import (
@@ -83,7 +89,7 @@ def _log_grant_widening_request(room, req, escalate: dict) -> None:
 
 def _entry_dict(e: RoomEntry) -> dict:
     return {
-        "doc_id": e.doc_id, "section": e.section, "position": e.position,
+        "doc_id": e.doc_id, "kind": e.kind, "section": e.section, "position": e.position,
         "note": e.note, "pinned": e.pinned, "source": e.source,
     }
 
@@ -99,28 +105,68 @@ def _room_dict(room: ReadingRoom) -> dict:
 
 # --- shared entry validation --------------------------------------------------
 
+_KINDS = ("doc", "item", "signal")
 
-def _clean_entries(raw, grant: frozenset[str]) -> tuple[list[dict] | None, str | None]:
-    """Validate an entries payload against a member's grant. Returns (entries, None)
-    or (None, error). Every doc_id must be a short string IN the grant — a doc the
-    member isn't entitled to is refused, naming nothing about other docs."""
+
+def _in_scope(product: str, scope: frozenset[str]) -> bool:
+    """Whether `product` is in the member's Library-resolved scope. "*" means
+    every product — the Library's own answer for an administrator, never
+    something this module decides (the same rule `issue_build._in_scope`
+    applies to a Chart House read)."""
+    return "*" in scope or product in scope
+
+
+def _clean_entries(raw, email: str) -> tuple[list[dict] | None, str | None]:
+    """Validate an entries payload against `email`'s live grant. Returns
+    (entries, None) or (None, error).
+
+    Every entry names a `kind` (doc | item | signal — "doc" when omitted, so
+    every existing doc-only caller is unaffected) and a reference in `doc_id`.
+    A `doc` entry is checked against the member's KB entitlement, as before.
+    An `item` or `signal` entry is checked by fetching it from the Library and
+    requiring its product to be in the member's Library-resolved project scope
+    (E19·1) — and, for either, requiring the member's tier to be "full": a
+    contractor's grant admits neither kind at all, so the check never reaches
+    the Library for a contractor's entry.
+
+    ONE REFUSAL ANSWERS BOTH an out-of-scope reference and one that does not
+    exist, within a kind. `library_client.get_issue_item`/`get_signal` already
+    collapse "missing" and "out of this credential's scope" into the same
+    None, and the scope check below reads identically whether the record came
+    back out of scope or not at all — naming nothing about whether a rejected
+    id is real."""
     if not isinstance(raw, list):
         return None, "entries must be a list"
     if len(raw) > MAX_ENTRIES:
         return None, "too many entries"
+    scope = library_client.person_scope(email)
+    doc_grant = room_entitlement(email, scope)
+    tier = access_identity.tier_for(email)
     out = []
     seen = set()
     for e in raw:
         if not isinstance(e, dict):
             return None, "each entry must be an object"
+        kind = e.get("kind", "doc")
+        if kind not in _KINDS:
+            return None, f"kind must be one of {_KINDS}"
         doc_id = e.get("doc_id")
         if not _nonempty(doc_id) or len(doc_id) > MAX_DOC_ID:
             return None, "each entry needs a valid doc_id"
-        if doc_id in seen:
-            return None, f"duplicate doc_id: {doc_id}"
-        if doc_id not in grant:
-            return None, f"doc_id not in this member's entitlement: {doc_id}"
-        seen.add(doc_id)
+        if (kind, doc_id) in seen:
+            return None, f"duplicate {kind} entry: {doc_id}"
+        if kind == "doc":
+            if doc_id not in doc_grant:
+                return None, f"doc_id not in this member's entitlement: {doc_id}"
+        elif kind == "item":
+            item = library_client.get_issue_item(doc_id) if tier == "full" else None
+            if item is None or not _in_scope(item.product, scope):
+                return None, f"item not in this member's entitlement: {doc_id}"
+        else:  # signal
+            sig = library_client.get_signal(doc_id) if tier == "full" else None
+            if sig is None or not _in_scope(sig.product, scope):
+                return None, f"signal not in this member's entitlement: {doc_id}"
+        seen.add((kind, doc_id))
         pinned = e.get("pinned", False)
         position = e.get("position", 0)
         # bool is an int subclass, so reject it explicitly for position (a JSON
@@ -128,6 +174,7 @@ def _clean_entries(raw, grant: frozenset[str]) -> tuple[list[dict] | None, str |
         if not isinstance(pinned, bool) or isinstance(position, bool) or not isinstance(position, int):
             return None, "pinned must be a boolean and position a non-boolean integer"
         out.append({
+            "kind": kind,
             "doc_id": doc_id,
             "section": _clip(e.get("section", ""), MAX_SECTION),
             "position": position,
@@ -161,11 +208,10 @@ async def create_room(request: Request):
     email = email.strip().lower()
     title = _clip(payload.get("title", ""), MAX_TITLE)
     landing_note = _clip(payload.get("landing_note", ""), MAX_TEXT)
-    # The TARGET member's own scope, not the provisioning admin's — a room is
-    # provisioned for `email`, so its grant must be `email`'s, a fresh Library
-    # lookup rather than `ident.products`.
-    entries, e_err = _clean_entries(payload.get("entries", []),
-                                     room_entitlement(email, library_client.person_scope(email)))
+    # The TARGET member's own grant, not the provisioning admin's — a room is
+    # provisioned for `email`, so entries are checked against `email`'s own
+    # live entitlement/scope/tier, resolved fresh inside `_clean_entries`.
+    entries, e_err = _clean_entries(payload.get("entries", []), email)
     if e_err:
         return _json(400, {"error": e_err})
     with session() as s:
@@ -176,9 +222,9 @@ async def create_room(request: Request):
             created_by=ident.actor)
         for e in entries:
             room.entries.append(RoomEntry(
-                doc_id=e["doc_id"], section=e["section"], position=e["position"],
-                note=e["note"], pinned=e["pinned"], source="provision",
-                added_by=ident.actor))
+                kind=e["kind"], doc_id=e["doc_id"], section=e["section"],
+                position=e["position"], note=e["note"], pinned=e["pinned"],
+                source="provision", added_by=ident.actor))
         s.add(room)
         s.flush()
         return _json(201, _room_dict(room))
@@ -222,25 +268,25 @@ async def add_entries(room_id: str, request: Request):
         room = s.get(ReadingRoom, room_id)
         if room is None:
             return _json(404, {"error": "not found"})
-        # The TARGET member's own scope, the same reason create_room resolves
+        # The TARGET member's own grant, the same reason create_room resolves
         # it fresh rather than reusing the curating admin's ident.products.
-        entries, e_err = _clean_entries(
-            payload.get("entries", []),
-            room_entitlement(room.email, library_client.person_scope(room.email)))
+        entries, e_err = _clean_entries(payload.get("entries", []), room.email)
         if e_err:
             return _json(400, {"error": e_err})
-        existing = {e.doc_id: e for e in room.entries}
+        existing = {(e.kind, e.doc_id): e for e in room.entries}
         for e in entries:
-            row = existing.get(e["doc_id"])
-            if row is not None:  # update presentation in place (unique on room_id+doc_id)
+            row = existing.get((e["kind"], e["doc_id"]))
+            if row is not None:  # update presentation in place (unique on room_id+kind+doc_id)
                 row.section, row.position = e["section"], e["position"]
                 row.note, row.pinned = e["note"], e["pinned"]
                 row.source, row.added_by = "steward", ident.actor
             else:
-                room.entries.append(RoomEntry(
-                    doc_id=e["doc_id"], section=e["section"], position=e["position"],
-                    note=e["note"], pinned=e["pinned"], source="steward",
-                    added_by=ident.actor))
+                row = RoomEntry(
+                    kind=e["kind"], doc_id=e["doc_id"], section=e["section"],
+                    position=e["position"], note=e["note"], pinned=e["pinned"],
+                    source="steward", added_by=ident.actor)
+                room.entries.append(row)
+                existing[(e["kind"], e["doc_id"])] = row
         s.flush()
         return _json(200, _room_dict(room))
 
@@ -266,68 +312,103 @@ async def archive_room(room_id: str, request: Request):
         return _json(200, _room_dict(room))
 
 
-# --- the concierge edit loop (ARCH-357 fast-follow) ---------------------------
+# --- the concierge edit loop (ARCH-357 fast-follow, widened CQ·149/E22) ------
 
 
-def _apply_actions(room: ReadingRoom, actions, grant: frozenset[str], actor: str) -> bool:
+def _apply_actions(room: ReadingRoom, actions, doc_grant: frozenset[str],
+                    scope: frozenset[str], tier: str, actor: str
+                    ) -> tuple[bool, dict | None]:
     """Apply the concierge plan to the member's OWN room. Two passes: pre-validate
-    every referenced doc_id against the live grant FIRST (so a single out-of-grant
-    doc refuses the whole plan with no partial mutation), then apply. Returns False
-    on refusal — the caller records a failed request and the transaction commits
-    only the (unchanged) room + audit row."""
+    every referenced entry against the member's live, PER-KIND grant FIRST (so a
+    single out-of-grant entry refuses the whole plan with no partial mutation),
+    then apply.
+
+    Returns `(True, None)` on success, or `(False, denied)` on refusal — the
+    caller records a failed request and the transaction commits only the
+    (unchanged) room + audit row. `denied` is `{"kind", "doc_id"}` naming the
+    entry that failed an entitlement check, so the caller can log it as a
+    grant-widening ask (the model proposing one is exactly a member asking for
+    something outside their entitlement, the case
+    `_log_grant_widening_request` exists for) — or `None` when the refusal is a
+    malformed plan rather than an entitlement question, which is not a request
+    for anything and so names nothing to log.
+
+    `doc_grant` is the member's KB entitlement (kind="doc", unchanged); `scope`
+    is their Library-resolved project scope and `tier` their tier, the same two
+    inputs `_clean_entries` uses to check an `item`/`signal` reference — this is
+    that same per-kind check, reused rather than re-derived."""
     if not isinstance(actions, list):
-        return False
-    # Pass 1 — validate. A malformed action, or an `add` of an out-of-grant doc,
-    # refuses the ENTIRE plan (no partial mutation). Only `add` is grant-gated: it
-    # is the one op that introduces a NEW entry. remove/reorder/annotate act on
-    # EXISTING entries (a no-op if absent) and never widen access — the render
-    # intersects grant ∩ curation regardless — so a member can always clean up or
-    # reorder a doc whose grant later narrowed.
+        return False, None
+    # Pass 1 — validate. A malformed action, or an `add` of an out-of-grant or
+    # nonexistent entry, refuses the ENTIRE plan (no partial mutation). Only
+    # `add` is grant-gated: it is the one op that introduces a NEW entry.
+    # remove/reorder/annotate act on EXISTING entries (a no-op if absent) and
+    # never widen access — the render intersects grant ∩ curation regardless —
+    # so a member can always clean up or reorder an entry whose grant later
+    # narrowed.
     for a in actions:
         if not isinstance(a, dict):
-            return False
+            return False, None
         op = a.get("op")
         if op not in ("add", "remove", "reorder", "annotate", "set_landing_note"):
-            return False
+            return False, None
         if op == "set_landing_note":
             continue
         d = a.get("doc_id")
         if not _nonempty(d):
-            return False
-        if op == "add" and d not in grant:
-            return False
-    # Pass 2 — apply.
-    existing = {e.doc_id: e for e in room.entries}
+            return False, None
+        kind = a.get("kind", "doc")
+        if kind not in _KINDS:
+            return False, None
+        if op == "add":
+            if kind == "doc":
+                if d not in doc_grant:
+                    return False, {"kind": kind, "doc_id": d}
+            elif kind == "item":
+                item = library_client.get_issue_item(d) if tier == "full" else None
+                if item is None or not _in_scope(item.product, scope):
+                    return False, {"kind": kind, "doc_id": d}
+            else:  # signal
+                sig = library_client.get_signal(d) if tier == "full" else None
+                if sig is None or not _in_scope(sig.product, scope):
+                    return False, {"kind": kind, "doc_id": d}
+    # Pass 2 — apply. Keyed on (kind, doc_id), matching RoomEntry's own
+    # uniqueness (models.py) now that the same id text can in principle name a
+    # doc and an item/signal without colliding.
+    existing = {(e.kind, e.doc_id): e for e in room.entries}
     for a in actions:
         op = a["op"]
         if op == "set_landing_note":
             room.landing_note = _clip(a.get("text", ""), MAX_TEXT)
             continue
+        kind = a.get("kind", "doc")
         doc_id = a["doc_id"]
         pos = a.get("position", 0)
         pos = pos if isinstance(pos, int) and not isinstance(pos, bool) else 0
+        key = (kind, doc_id)
         if op == "add":
-            if doc_id not in existing:
+            if key not in existing:
                 e = RoomEntry(
-                    doc_id=doc_id, section=_clip(a.get("section", "") or "Added", MAX_SECTION),
+                    kind=kind, doc_id=doc_id,
+                    section=_clip(a.get("section", "") or "Added", MAX_SECTION),
                     position=pos, source="request", added_by=actor)
                 room.entries.append(e)
-                existing[doc_id] = e
+                existing[key] = e
         elif op == "remove":
-            e = existing.pop(doc_id, None)
+            e = existing.pop(key, None)
             if e is not None:
                 room.entries.remove(e)
         elif op == "reorder":
-            e = existing.get(doc_id)
+            e = existing.get(key)
             if e is not None:
                 if _nonempty(a.get("section")):
                     e.section = _clip(a["section"], MAX_SECTION)
                 e.position = pos
         elif op == "annotate":
-            e = existing.get(doc_id)
+            e = existing.get(key)
             if e is not None:
                 e.note = _clip(a.get("text", ""), MAX_TEXT) or None
-    return True
+    return True, None
 
 
 @router.post("/room/requests")
@@ -356,8 +437,15 @@ async def room_request(request: Request):
         return _json(503, {"error": "concierge unavailable"})
 
     email = ident.actor
-    grant = room_entitlement(email, ident.products)
+    doc_grant = room_entitlement(email, ident.products)
+    # The Library-resolved project scope and tier an `item`/`signal` reference is
+    # checked against — the same two inputs `_clean_entries` uses for the admin
+    # curation API (CQ·147), resolved fresh so a narrowed scope takes effect on
+    # this request rather than a cached one.
+    scope = library_client.person_scope(email)
+    tier = access_identity.tier_for(email)
     # Input-side minimization: the model sees ONLY this member's entitled catalog.
+    # There is no item/signal catalog — see concierge.py's module docstring.
     catalog = concierge.build_catalog(entitled_docs(email, ident.products))
     with session() as s:
         room = s.scalar(select(ReadingRoom).where(
@@ -366,7 +454,7 @@ async def room_request(request: Request):
             return _json(404, {"error": "no room"})
         room_state = {
             "landing_note": room.landing_note,
-            "entries": [{"doc_id": e.doc_id, "section": e.section,
+            "entries": [{"doc_id": e.doc_id, "kind": e.kind, "section": e.section,
                          "position": e.position, "note": e.note or ""} for e in room.entries],
         }
         req = RoomRequest(id=new_room_request_id(), room_id=room.id, actor=email,
@@ -400,9 +488,20 @@ async def room_request(request: Request):
             return _json(200, {"status": "denied", "reply": req.reply})
 
         actions = plan.get("actions") if isinstance(plan, dict) else None
-        if not _apply_actions(room, actions or [], grant, email):
+        ok, denied = _apply_actions(room, actions or [], doc_grant, scope, tier, email)
+        if not ok:
+            # `denied` names an entitlement failure (as opposed to a malformed
+            # plan, which names nothing to log): the model proposed an add the
+            # member is not entitled to, which is itself a grant-widening ask,
+            # logged the same way an explicit `escalate` is above.
+            if denied is not None:
+                _log_grant_widening_request(room, req, {
+                    "reason": "the concierge plan named a reference outside "
+                              "this member's grant",
+                    "wanted": f"{denied['kind']}:{denied['doc_id']}",
+                })
             req.status = "failed"
-            req.reply = "That referenced a document outside your room, so nothing was changed."
+            req.reply = "That referenced something outside your room, so nothing was changed."
             req.resolved_at = utcnow()
             s.add(req)
             s.flush()
