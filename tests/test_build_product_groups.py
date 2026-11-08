@@ -45,42 +45,46 @@ def test_browse_exclusions_name_a_home_that_resolves():
 
 
 def test_full_tier_shows_all_suite_members_even_without_docs():
-    # sous-chef has a doc; hollis/selector have none — full tier still shows all three.
-    data = _payload([_doc("sous-chef/prd/x", "sous-chef")], "full")
+    # epsilon has a doc; gamma/delta have none — full tier still shows all three.
+    data = _payload([_doc("epsilon/prd/x", "epsilon")], "full")
     groups = {g["label"]: g["members"] for g in data["productGroups"]}
-    assert groups["Mobile App Suite"] == ["hollis", "selector", "sous-chef"]
-    assert data["standaloneProducts"] == []          # no vivy/constance docs here
+    assert groups["Mobile App Suite"] == ["gamma", "delta", "epsilon"]
+    assert data["standaloneProducts"] == []          # no alpha/beta docs here
 
 
 def test_contractor_tier_hides_docless_suite_members():
-    # A contractor bundle must not carry hollis/selector (no docs) — only sous-chef.
-    data = _payload([_doc("sous-chef/prd/x", "sous-chef", contractor=True)], "contractor")
+    # A contractor bundle must not carry gamma/delta (no docs) — only epsilon.
+    data = _payload([_doc("epsilon/prd/x", "epsilon", contractor=True)], "contractor")
     groups = {g["label"]: g["members"] for g in data["productGroups"]}
-    assert groups["Mobile App Suite"] == ["sous-chef"]
-    assert "hollis" not in data["projectLabel"]
-    assert "selector" not in data["projectLabel"]
+    assert groups["Mobile App Suite"] == ["epsilon"]
+    assert "gamma" not in data["projectLabel"]
+    assert "delta" not in data["projectLabel"]
 
 
 def test_contractor_drops_a_fully_empty_suite():
     # No mobile-app docs at all → the suite heading doesn't render for a contractor.
-    data = _payload([_doc("vivy/prd/x", "vivy", contractor=True)], "contractor")
+    data = _payload([_doc("alpha/prd/x", "alpha", contractor=True)], "contractor")
     assert data["productGroups"] == []
-    assert data["standaloneProducts"] == ["vivy"]
+    assert data["standaloneProducts"] == ["alpha"]
 
 
 def test_standalone_products_stay_out_of_the_suite():
-    data = _payload([_doc("vivy/prd/x", "vivy"), _doc("constance/prd/y", "constance")], "full")
-    assert data["standaloneProducts"] == ["vivy", "constance"]
+    # Set, not list: PRODUCT_ORDER is registry-derived (CQ-171 ruling 1) and
+    # the pinned fixture mirrors today's real `_products` map order, not the
+    # Bosun's not-yet-landed rearrange — so alpha/beta's relative order
+    # here is a registry-rearrange detail, not the invariant this test pins.
+    data = _payload([_doc("alpha/prd/x", "alpha"), _doc("beta/prd/y", "beta")], "full")
+    assert set(data["standaloneProducts"]) == {"alpha", "beta"}
     members = [m for g in data["productGroups"] for m in g["members"]]
-    assert "vivy" not in members and "constance" not in members
+    assert "alpha" not in members and "beta" not in members
 
 
 def test_project_label_only_ships_referenced_projects():
     # projectLabel must not leak labels for projects the bundle doesn't surface.
-    data = _payload([_doc("vivy/prd/x", "vivy")], "full")
-    # vivy is referenced; the suite members are referenced in full tier; unreferenced
+    data = _payload([_doc("alpha/prd/x", "alpha")], "full")
+    # alpha is referenced; the suite members are referenced in full tier; unreferenced
     # company projects (utility) that have no docs must not appear.
-    assert "vivy" in data["projectLabel"]
+    assert "alpha" in data["projectLabel"]
     assert "utility" not in data["projectLabel"]
 
 

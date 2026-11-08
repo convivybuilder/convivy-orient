@@ -18,7 +18,7 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 # and three periodic builder jobs, two of which (com.convivy.orient-dashboard,
 # com.convivy.code-health, com.convivy.kb-observability) didn't even use it and
 # ran the system python3.11 instead, a live divergence bin/install-orient closes
-# by building every one of the seven jobs' interpreter here.
+# by building every one of the four jobs' interpreter here.
 #
 # That's only true once the cutover has actually happened. This checkout has
 # never had its own .venv — unlike a deploy area, which always has both
@@ -71,7 +71,7 @@ esac
 
 if [ ! -x "$PY" ]; then
     echo "serve: no interpreter at $PY — create it with:" >&2
-    echo "  python3.11 -m venv .venv && .venv/bin/pip install -r requirements.txt" >&2
+    echo "  python3.11 -m venv .venv && .venv/bin/pip install --require-hashes --only-binary :all: --no-build-isolation -r requirements.lock.txt" >&2
     exit 78   # EX_CONFIG
 fi
 
@@ -139,7 +139,7 @@ import os
 import sys
 sys.path.insert(0, os.environ["ORIENT_PREFLIGHT_DIR"])
 missing = []
-for mod in ("server", "github_capture", "build", "control_db"):
+for mod in ("server", "build", "control_db"):
     try:
         __import__(mod)
     except ImportError as e:
@@ -351,6 +351,12 @@ ORIENT_INIT_DB_DIR="$DIR" "$PY" -c "import os, sys; sys.path.insert(0, os.enviro
 # Chart House static fallback (/chart-house, issue_01M2KVHTVFF4MAQF94M2SP6TZ0):
 # the same gap crews_build had — never built, so a Library stall 500'd here too.
 "$PY" "$DIR/chart_house_build.py" || echo "chart_house_build failed (non-fatal); serving without a fresh chart-house fallback" >&2
+# Projects index static fallback (/projects, CQ·160): same gap as chart-house —
+# a live-render throw during a Library stall needs a saved page to serve.
+"$PY" "$DIR/project_build.py" || echo "project_build failed (non-fatal); serving without a fresh projects fallback" >&2
+# Tech debt static fallback (/tech-debt, CQ·164). Live render is primary; this
+# seeds the empty-state fallback served only if a live render throws.
+"$PY" "$DIR/tech_debt_build.py" || echo "tech_debt_build failed (non-fatal); serving without a fresh tech-debt fallback" >&2
 # Record the commit this start IS NOW serving (issue_01M0EERRFC8NJ8QS5Q6EEE87JY):
 # deploy_watch.py compares this against the checkout's HEAD to tell whether the
 # running process ever picked up a pull, independent of whether IT triggered the

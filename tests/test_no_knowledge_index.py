@@ -60,14 +60,14 @@ def test_no_knowledge_surface_opens_the_index(monkeypatch):
     library_fake.patch(monkeypatch)
     for kind in ("decision", "brief", "meeting-notes", "bead"):
         library_fake.seed_reference_doc(
-            id=f"vivy/{kind}/x", title="T", kind=kind, project="vivy",
+            id=f"alpha/{kind}/x", title="T", kind=kind, project="alpha",
             body="A line.\n", audience=["team"])
 
     build.load_docs()
     engineering_build.load_docs()
     ops_reports_build._load_kb_docs(tuple(ops_reports_build._MEMORY_KIND_LABEL))
     kb_index.team_docs()
-    project_build._bead_doc("vivy")
+    project_build._bead_doc("alpha")
 
     assert opened == [], f"a knowledge surface still opens the index: {opened}"
 

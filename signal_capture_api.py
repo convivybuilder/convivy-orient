@@ -48,11 +48,8 @@ customer-class capture from it still refuses.
 **A `dedup_key` collision this caller could have created is success (200,
 `idempotent: true`), not a 409** — the same distinction the deleted
 `signal_api.py` made and the Library's own `POST /signals` still makes
-server-side. Two real callers depend on it: `github_capture.py`'s
-overlap-window poller reads the response status to tell "created" from
-"duplicate" and only advances its cursor once a batch has zero errors, and
-the "Log a signal" form's own double-submit guard expects a resubmit to read
-as success. `library_client.create_signal` returns `(id, idempotent,
+server-side. The "Log a signal" form's own double-submit guard depends on it, expecting a
+resubmit to read as success. `library_client.create_signal` returns `(id, idempotent,
 existing)` rather than a bare id so this proxy can tell the two apart.
 
 **But an `idempotent` hit still needs its OWN visibility check before the id
@@ -166,10 +163,8 @@ async def create_signal(request: Request):
             # dedup_key outcome that reaches this branch: a collision the
             # caller COULD have created is the Library's own 200, which
             # `create_signal` returns as `idempotent=True` below rather than
-            # raising — the distinction two real callers depend on
-            # (`github_capture.py`'s overlap-window poller reads "duplicate"
-            # vs "created" off the status; the capture form's own
-            # double-submit guard expects a resubmit to read as success).
+            # raising — the capture form's own double-submit guard
+            # expects a resubmit to read as success.
             return _json(409, {"error": "dedup_key already in use"})
         if e.code == 403:
             if acting_human is not None:

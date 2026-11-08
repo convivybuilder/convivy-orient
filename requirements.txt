@@ -8,6 +8,13 @@
 # from this file gets the byte-identical versions reviewed here (WS0.1 sign-off).
 # To bump, change the pin in a PR and re-run the review/security cycle.
 #
+# Installs never read this file directly. They install requirements.lock.txt,
+# its hash-pinned transitive closure for every platform (markers gate the
+# platform-specific packages, such as greenlet on Linux), regenerated with uv:
+#   uv pip compile --universal --python-version 3.11 --generate-hashes \
+#       --emit-build-options --no-emit-index-url requirements.txt \
+#       -o requirements.lock.txt
+#
 # Until WS0.4 the app is still the stdlib server; these are installed ahead of
 # the FastAPI shell swap so the venv is the serving interpreter from WS0.2 on.
 
@@ -40,12 +47,17 @@ fastembed==0.8.0
 #
 # So we take only the crypto that genuinely cannot be hand-rolled — py-vapid signs
 # the VAPID JWT, http_ece does RFC-8188 payload encryption — and send the POST with
-# stdlib urllib. That follows this codebase's own precedent: `github_capture.py`
-# is stdlib-only rather than pulling in a client SDK.
+# stdlib urllib rather than pulling in a client SDK.
 #
 # cryptography/cffi/pycparser are transitive and unavoidable (real elliptic-curve
 # crypto). Pinned exactly, like everything else here.
 py-vapid==1.9.4
+# http_ece publishes no wheel, only an sdist, so it is the one package exempt
+# from the --only-binary :all: every install passes (bin/install-orient, CI).
+# Those installs also pass --no-build-isolation, so its build uses the venv's
+# own setuptools (from python3.11's ensurepip) and needs nothing else.
+# uv's --emit-build-options carries this option into requirements.lock.txt.
+--no-binary http-ece
 http_ece==1.2.1
 cryptography==49.0.0
 cffi==2.1.0

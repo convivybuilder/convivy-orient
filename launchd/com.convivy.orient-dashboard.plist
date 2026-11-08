@@ -8,7 +8,7 @@
 
   <!-- Regenerate site/dashboard.html from the scorecard ledgers. The running
        orient server reads the file per request, so no restart is needed. Fires
-       at 07:40, after the 07:30 model-scorecard + 07:35 PA scorecard.
+       at 07:40, after the 07:30 model-scorecard.
 
        Deploy-area cutover (ADR-0059, bin/install-orient): this used to exec
        the SYSTEM /opt/homebrew/bin/python3.11 against a checkout script — a

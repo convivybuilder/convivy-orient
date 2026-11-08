@@ -34,7 +34,6 @@ from paths import STATE_ROOT
 
 SITE = STATE_ROOT / "site"
 
-ORG = "convivy"
 _GH_TIMEOUT = 20
 _CACHE_TTL = 180  # seconds; a merge queue a few minutes stale is fine
 _PR_LIST_FIELDS = ("number,title,url,isDraft,createdAt,updatedAt,author,reviewDecision,"
@@ -69,15 +68,15 @@ def _gh(args: list[str]) -> list | dict | None:
 def _repos_with_open_prs() -> list[str]:
     """One org-wide search for the repos that currently have an open PR, so the
     per-repo enrichment only hits repos that need it."""
-    data = _gh(["search", "prs", "--owner", ORG, "--state", "open", "--limit", "200",
-                "--json", "repository"])
+    data = _gh(["search", "prs", "--owner", crew_registry.DEFAULT_GITHUB_ORG, "--state", "open",
+                "--limit", "200", "--json", "repository"])
     if not isinstance(data, list):
         return []
     return sorted({p.get("repository", {}).get("name", "") for p in data} - {""})
 
 
 def _open_prs_for_repo(repo: str) -> list[dict]:
-    data = _gh(["pr", "list", "--repo", f"{ORG}/{repo}", "--state", "open",
+    data = _gh(["pr", "list", "--repo", f"{crew_registry.repo_github_owner(repo)}/{repo}", "--state", "open",
                 "--limit", "100", "--json", _PR_LIST_FIELDS])
     if not isinstance(data, list):
         return []

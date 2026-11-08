@@ -51,7 +51,7 @@ def client(tmp_path, monkeypatch):
         "operator@example.com": {"role": "admin", "products": ["*"]},
         "adm@example.com": {"role": "admin", "products": ["*"]},
         "mem@example.com": {"role": "member", "products": ["*"]},
-        "scoped@example.com": {"role": "admin", "products": ["vivy"]},
+        "scoped@example.com": {"role": "admin", "products": ["alpha"]},
     }))
     monkeypatch.setattr(authz, "ROLES", roles)
     # The project scope now comes from the Library (E19·1,
@@ -170,7 +170,7 @@ def test_a_holder_scoped_to_another_product_is_refused(client, written):
 def test_the_same_scoped_holder_sets_a_model_in_their_own_product(client, written, monkeypatch):
     """The positive control for the test above: an unscoped `authorize` call
     refuses everyone, so the refusal alone cannot show the scoping works."""
-    monkeypatch.setattr(library_client, "get_issue_item", lambda _id: _item(product="vivy"))
+    monkeypatch.setattr(library_client, "get_issue_item", lambda _id: _item(product="alpha"))
     assert _post(client, _human("scoped@example.com")).status_code == 200
 
 

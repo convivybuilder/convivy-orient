@@ -86,7 +86,7 @@ def _passed_within(entry: library_client.CourseEntry, days: int, now: dt.datetim
 # helping deliver. Whether the steward is also a *part* is unsettled and
 # nothing here depends on it: this set groups CREWS, which is the axis the operator
 # confirmed. Everything else in a Course's `product` is a product built with
-# Builder (vivy, selector, placard, ...), not named here since that set grows
+# Builder, not named here since that set grows
 # without this module changing.
 BUILDER_CREWS = frozenset({
     "steward", "library", "bosun", "convivy-orient", "convivy-deck", "shipwright",

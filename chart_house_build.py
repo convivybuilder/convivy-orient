@@ -8,7 +8,7 @@ not-yet-specified). The operator's own framing: "The Chart House is for understa
 the path of a project and how it is progressing... Crew mechanics — rosters,
 models, dispatch counts — do not belong on this page." This replaces the
 prior two-section layout (a Course-progress table above a flat table of
-every `project_build.KNOWN_PROJECTS` entry with its open-PR count) with the
+every `project_build.known_projects()` entry with its open-PR count) with the
 single unified table the mockup shows; the flat all-projects/open-PR table is
 retired (see the PR body for why).
 
@@ -58,7 +58,7 @@ Reads five sources:
   or absent, it returns `None`, which this page renders as "PR feed
   unavailable," not as an empty queue.
 - Merge counts over the trailing week, from `changelog`-kind signals with
-  `source=github` — one per merged PR (`github_capture.signal_from_merge`),
+  `source=github` — one per merged PR (the Keel's `github-activity-capture`),
   read live over `library_client.list_signals`. Uncaught on failure, for the
   same reason the Course read is.
 """
@@ -73,6 +73,7 @@ import build
 # A terminal epic is not awaiting anything, whatever its `maturity` still
 # says — the same state-then-maturity priority `_step_class` applies.
 from control_db import ISSUE_TERMINAL
+import crew_registry
 import design_system as ds
 import issue_build
 import library_client
@@ -105,32 +106,76 @@ def _cost_rollup() -> dict[str, dict]:
     return library_client.cost_rollup_by_project(library_client.list_finished_runs(since))
 
 
-# Known cases where a Course's `product` key doesn't match the cost ledger's
+# The products whose Course `product` key doesn't match the cost ledger's
 # canonicalized product name 1:1 (review finding, PR #190), from the era when
 # `_cost_rollup` read `dashboard_build.normalize()`'s display-folded names
-# ("Hollis", the per-property NYH split) rather than a signal's own `product`.
-# The Library's `product` tag is already the run's canonical project (CQ·154,
-# issue_01M4ZBBQK0KFH9YQ16MNK75HJT) — not proven to still need any of these —
-# so `_cost_for` below always tries the literal name FIRST regardless of this
-# table, and this is now a set of EXTRA candidates for whatever of the old
-# display names might still show up, kept rather than deleted on an
-# unconfirmed guess about which, if any, no longer occur.
-_COST_ALIASES = {
-    "hollis": ("Hollis",),
-    "selector": ("selector-backend",),
-    "nyh-studio": ("NYH Arch Tools", "East Texas Circle", "Park Villa"),
-}
+# rather than a signal's own `product`. The Library's `product` tag is
+# already the run's canonical project (CQ·154, issue_01M4ZBBQK0KFH9YQ16MNK75HJT)
+# — not proven to still need any of these — so `_cost_for` below always tries
+# the literal name FIRST regardless of this set, and the registry below
+# supplies EXTRA candidates for whatever of the old display names might still
+# show up. WHICH products need this is a judgment call the registry now
+# carries as each unit's or `_products` entry's own `rollup` field (CQ-171
+# revise round 2): a project can have several repos, or share a commercial
+# product with sibling projects, with no extra cost-ledger alias needed at
+# all, so this reads `rollup` rather than naming the keys here.
+
+
+def _cost_alias_keys() -> tuple[str, ...]:
+    """Unit and `_products` keys whose own `rollup` field lists "cost" — the
+    products that fold into Chart House's cost rollup, read fresh from the
+    registry rather than named here. An unreadable registry answers no
+    keys."""
+    try:
+        return tuple(crew_registry.unit_rollup_keys("cost")) + \
+            tuple(crew_registry.product_rollup_keys("cost"))
+    except crew_registry.RegistryUnavailable:
+        return ()
+
+
+def _cost_aliases() -> dict[str, tuple[str, ...]]:
+    """Extra cost-ledger names for `_cost_alias_keys()`, read from the
+    registry. A key that is its own project unit maps to that unit's own
+    extra `repos` entry when it has one (a unit whose project spans a second
+    repo), else to its own `display` (a unit whose pre-rename ledger spelling
+    happens to still be its current display). A key that is a `_products`
+    entry several sibling projects build together, with no unit of its own
+    (an umbrella product with no unit of its own), maps to each sibling's own
+    `display`. An unreadable registry answers the empty dict, so `_cost_for`
+    falls back to trying a project's own name only, never a stale copy of
+    this table."""
+    try:
+        unit_map = crew_registry.units()
+        names = crew_registry.display_names()
+    except crew_registry.RegistryUnavailable:
+        return {}
+    out: dict[str, tuple[str, ...]] = {}
+    for key in _cost_alias_keys():
+        unit = unit_map.get(key)
+        if unit is not None:
+            extra_repos = tuple(r for r in (unit.get("repos") or ()) if r != key)
+            if extra_repos:
+                out[key] = extra_repos
+            elif key in names:
+                out[key] = (names[key],)
+            continue
+        siblings = tuple(
+            names[slug] for slug, sib in unit_map.items()
+            if slug in names and key in (sib.get("products") or ()))
+        if siblings:
+            out[key] = siblings
+    return out
 
 
 def _cost_for(name: str, rollup: dict) -> dict | None:
     """A project's cost row, summed across its own name plus every extra
-    ledger name it's known to have reported under (`_COST_ALIASES`). None
+    ledger name it's known to have reported under (`_cost_aliases`). None
     (not a zeroed row) when none of them appear in the rollup, so the page
     can still say "no data" rather than a misleading "$0.00" for a project
     that simply had no runs this window."""
     total = {"cost_usd": 0.0, "runs": 0}
     found = False
-    for n in (name, *_COST_ALIASES.get(name, ())):
+    for n in (name, *_cost_aliases().get(name, ())):
         row = rollup.get(n)
         if row:
             found = True
@@ -246,7 +291,7 @@ def _course_rows() -> list[dict]:
 #
 # A NAMING MISMATCH. The Library's Course `product` key and its
 # reference-document `project` key are two independent vocabularies for the same
-# real-world project, confirmed live 2026-08-28 — the same shape `_COST_ALIASES`
+# real-world project, confirmed live 2026-08-28 — the same shape `_cost_aliases`
 # above documents for the cost ledger's own product spelling:
 #   - "bosun" is the Course's product key (what the operator dispatches to); its bead
 #     is filed under the agent-platform repo's project key.
@@ -266,12 +311,28 @@ def _course_rows() -> list[dict]:
 # while Deck resolved the same crew correctly.
 #
 # A product not listed here is looked up under its own Course product key
-# directly, which is already correct for convivy-orient/library/selector/vivy.
-_BEAD_PROJECT_ALIASES = {
-    "bosun": "agent-platform",
-    "convivy-deck": "deck",
-    "shipwright": "company",
-}
+# directly, which is already correct for the other products this was checked against.
+# WHICH products need an entry is the same judgment call `_cost_aliases` and
+# `_repo_aliases` make for the same reason — the registry has no field for
+# "this crew's Course key disagrees with its KB project" on its own, and at
+# least one other project with a mismatched `kb_project` (the steward's own
+# unit) builds no Course for a mismatch to ever bite. The keys stay literal;
+# only the KB project each maps to is read fresh from the registry's own
+# `kb_project` field rather than retyped.
+_BEAD_PROJECT_ALIAS_KEYS = ("bosun", "convivy-deck", "shipwright")
+
+
+def _bead_project_aliases() -> dict[str, str]:
+    """Each of `_BEAD_PROJECT_ALIAS_KEYS`' own registry `kb_project`. An
+    unreadable registry, or a key the registry has lost, answers the empty
+    dict, so `_bead_href` falls back to looking a product up under its own
+    name rather than a stale copy of this table."""
+    try:
+        unit_map = crew_registry.units()
+    except crew_registry.RegistryUnavailable:
+        return {}
+    return {key: unit_map[key]["kb_project"] for key in _BEAD_PROJECT_ALIAS_KEYS
+            if key in unit_map and isinstance(unit_map[key].get("kb_project"), str)}
 
 
 def _bead_ids() -> dict[str, str]:
@@ -291,9 +352,9 @@ def _bead_href(product: str, bead_ids: dict[str, str]) -> str | None:
 
     **None means "nothing found", not "this project is meant to have none".**
     A crew that deliberately works another project's bead belongs in
-    `_BEAD_PROJECT_ALIASES` above and resolves to a link here; shipwright is
+    `_BEAD_PROJECT_ALIAS_KEYS` above and resolves to a link here; shipwright is
     the case that taught us the difference."""
-    doc_id = bead_ids.get(_BEAD_PROJECT_ALIASES.get(product, product))
+    doc_id = bead_ids.get(_bead_project_aliases().get(product, product))
     # safe="/" keeps a doc id's own hierarchical slashes readable in the URL
     # while still escaping anything else (same convention as home_build.py's
     # identical /reference/doc/ href).
@@ -305,25 +366,47 @@ def _bead_href(product: str, bead_ids: dict[str, str]) -> str | None:
 # tables above document the same split for cost and bead lookups):
 #   - "bosun" dispatches against the agent-platform repo — confirmed live
 #     2026-08-28 (its one open PR is agent-platform#464).
-#   - "selector" spans two real GitHub repos, the same pair _COST_ALIASES
-#     documents for the run ledger — its open PRs and merges are split across
-#     both and must be summed, not read from "selector" alone.
+#   - one product spans two real GitHub repos, the same pair `_cost_aliases`
+#     carries for the run ledger — its open PRs and merges are split across
+#     both and must be summed, not read from that product's own key alone.
 # A product absent here is looked up under its own Course product key, already
-# correct for convivy-orient/library/convivy-deck/vivy.
-_REPO_ALIASES = {
-    "bosun": ("agent-platform",),
-    "selector": ("selector", "selector-backend"),
-}
+# correct for the other products this was checked against. WHICH products need
+# this split is now each unit's own `rollup` field (CQ-171 revise round 2):
+# the registry has no field for the OTHER repo names themselves, and several
+# other multi-repo projects need no entry at all, but `rollup` says which
+# units fold.
+
+
+def _repo_alias_keys() -> tuple[str, ...]:
+    """Unit slugs whose own `rollup` field lists "repos" — the products that
+    fold into Chart House's repo/merge counts, read fresh from the registry
+    rather than named here. An unreadable registry answers no keys."""
+    try:
+        return tuple(crew_registry.unit_rollup_keys("repos"))
+    except crew_registry.RegistryUnavailable:
+        return ()
+
+
+def _repo_aliases() -> dict[str, tuple[str, ...]]:
+    """Each of `_repo_alias_keys()`' own registry `repos`. An unreadable
+    registry answers the empty dict, so `_repo_names_for` falls back to its
+    own default (the product's bare name) rather than a stale copy."""
+    try:
+        unit_map = crew_registry.units()
+    except crew_registry.RegistryUnavailable:
+        return {}
+    return {key: tuple(unit_map[key]["repos"]) for key in _repo_alias_keys()
+            if key in unit_map and unit_map[key].get("repos")}
 
 
 def _repo_names_for(product: str) -> tuple[str, ...]:
-    return _REPO_ALIASES.get(product, (product,))
+    return _repo_aliases().get(product, (product,))
 
 
 def _merge_counts_by_repo() -> dict[str, int]:
     """{repo: merges in the trailing MERGE_WINDOW_DAYS}, from `changelog`-kind
     signals with `source=github` — one per merged PR
-    (`github_capture.signal_from_merge`), keyed by repo the same way that
+    (the Keel's `github-activity-capture`), keyed by repo the same way that
     writer sets `product`. Uncaught on a Library failure, like every other read
     on this page (module docstring): a broken feed must raise, not report a
     quiet zero.
@@ -437,8 +520,8 @@ def _state_chip(done: int, approved: int, awaiting_signoff: int, proposed_unspec
        proposed with no specification written yet: blocked on the crew
        writing it, not on the operator — say so rather than going silent about it.
     5. Nothing charted at all (no done, approved or proposed step) but real
-       spend this window: "running uncharted" — the anomaly the mockup's
-       vivy row names, work happening against a plan that was never written.
+       spend this window: "running uncharted" — the anomaly the mockup's own
+       example row names, work happening against a plan that was never written.
     6. Nothing charted and no spend either: genuinely idle."""
     if awaiting_signoff:
         return "chip-warn", "awaits your sign-off"
@@ -457,7 +540,7 @@ def _state_chip(done: int, approved: int, awaiting_signoff: int, proposed_unspec
 
 
 def _join_and(items: list[str]) -> str:
-    """["Deck", "Bosun", "Selector"] -> "Deck, Bosun and Selector"."""
+    """["Deck", "Bosun", "Alpha"] -> "Deck, Bosun and Alpha"."""
     if len(items) == 1:
         return items[0]
     return ", ".join(items[:-1]) + " and " + items[-1]
@@ -790,7 +873,7 @@ def _footnote_html(rows: list[dict]) -> str:
     {MERGE_WINDOW_DAYS} days, throughput already behind the ship. The two are different
     kinds of number and are never drawn to a shared scale. When the feed cannot be read,
     the ribbon says <em>PR feed unavailable</em> rather than a zero.</p>
-    <p>Cost and runs come from local run ledgers under <code>~/Convivy/agent-runs</code>,
+    <p>Cost and runs come from the Library&rsquo;s finished-run records,
     trailing {WINDOW_DAYS} days. The course version counts approved revisions of the plan.
     Each track draws the Course at true scale &mdash; one cell per step &mdash; so a wide
     empty cell is a short, unspecified plan, not a rendering quirk. A project name links to

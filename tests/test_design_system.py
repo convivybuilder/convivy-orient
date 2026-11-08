@@ -222,6 +222,35 @@ def test_render_stamp_css_ships_in_components():
     assert ".render-stamp" in ds.COMPONENTS_CSS
 
 
+# --- the saved-copy banner (CQ·163, issue_01M57NS03XATJRWY5Q7H8W90DS) --------
+# A page served from a stale fallback says so on the page. server.py inserts
+# this through `_serve_page`, the one step that also sets the response header.
+
+
+def test_saved_copy_banner_states_when_the_copy_was_rendered():
+    html = ds.saved_copy_banner("2026-01-01 00:00 MST")
+    assert 'class="saved-copy-banner"' in html
+    assert "saved copy" in html
+    assert 'data-saved-copy="2026-01-01 00:00 MST"' in html
+
+
+def test_saved_copy_banner_without_a_stamp_still_says_it_is_a_copy():
+    # A saved page that carries no render stamp (a hand-written fallback) still
+    # gets the banner; it just has no date to name.
+    html = ds.saved_copy_banner()
+    assert "saved copy" in html
+    assert "data-saved-copy" not in html
+
+
+def test_saved_copy_banner_escapes_its_input():
+    """The time comes off a file on disk and lands in a full-tier page."""
+    assert "<script>" not in ds.saved_copy_banner("<script>alert(1)</script>")
+
+
+def test_saved_copy_banner_css_ships_in_components():
+    assert ".saved-copy-banner" in ds.COMPONENTS_CSS
+
+
 # --- the PWA nav cluster: back / forward / refresh, in the shared shell ------
 # (issue_01M1517CYMAV0GAEB2FYQQKF4N) — a PWA installed as `display:standalone`
 # (assets/site.webmanifest) has no browser chrome, so this control is the only
@@ -1020,11 +1049,15 @@ def _stranded_dashboards(subnav, only_paths, card_body):
     return sorted((in_subnav | set(only_paths)) - in_subnav - carded)
 
 
-def test_no_full_tier_dashboard_is_reachable_only_by_typing_its_url():
+def test_no_full_tier_dashboard_is_reachable_only_by_typing_its_url(monkeypatch):
     """The invariant behind the test above, as the property it protects rather
     than a list of labels: every dashboard route has SOME way in, either its
     own sub-strip entry or a card on /overview."""
+    import library_client
     import overview_build
+    # The Tech Debt card (CQ·164) reads the Library live; stubbed here so this
+    # structural test never reaches the real one.
+    monkeypatch.setattr(library_client, "list_issue_items", lambda: [])
     stranded = _stranded_dashboards(
         ds._DASHBOARD_SUBNAV, ds._DASHBOARD_ONLY_PATHS,
         overview_build._build_body())

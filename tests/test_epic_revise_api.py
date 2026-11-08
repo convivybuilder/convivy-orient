@@ -45,7 +45,7 @@ def client(tmp_path, monkeypatch):
     roles.write_text(json.dumps({
         "operator@example.com": {"role": "admin", "products": ["*"]},
         "obs@example.com": {"role": "observer", "products": ["*"]},
-        "scoped@example.com": {"role": "admin", "products": ["vivy"]},
+        "scoped@example.com": {"role": "admin", "products": ["alpha"]},
     }))
     monkeypatch.setattr(authz, "ROLES", roles)
     # The project scope now comes from the Library (E19·1,
@@ -168,7 +168,7 @@ def test_the_capability_is_checked_against_the_epics_own_product(client, monkeyp
     lib = _Library(monkeypatch, _epic())
     assert _post(client, _human("scoped@example.com")).status_code == 404
     assert lib.calls == []
-    lib = _Library(monkeypatch, _epic(product="vivy"))
+    lib = _Library(monkeypatch, _epic(product="alpha"))
     assert _post(client, _human("scoped@example.com")).status_code == 200
 
 
@@ -284,10 +284,10 @@ def test_another_holders_lease_is_named_and_nothing_is_released(client, monkeypa
     """A refused checkout holds nothing, so releasing would hand back somebody
     else's claim — the one call here that must not happen."""
     lib = _Library(monkeypatch, _epic())
-    lib.refuse["checkout_item"] = "held by co-selector until 18:00"
+    lib.refuse["checkout_item"] = "held by co-delta until 18:00"
     r = _post(client, _human())
     assert r.status_code == 409
-    assert r.json()["error"] == "held by co-selector until 18:00"
+    assert r.json()["error"] == "held by co-delta until 18:00"
     assert lib.names() == ["checkout_item"]
 
 

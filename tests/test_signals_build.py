@@ -32,7 +32,7 @@ def db(tmp_path, monkeypatch):
 def _mk(**kw):
     base = dict(id=control_db.new_signal_id(), source="github_review",
                 kind="pr_comment", actor="reviewer", ingested_by="github-capture",
-                product="vivy", body="a finding")
+                product="alpha", body="a finding")
     base.update(kw)
     return base
 
@@ -68,16 +68,16 @@ def test_detail_breadcrumb_reads_archives(db):
 
 
 def test_browse_renders_recent_with_counts(db):
-    library_fake.seed_signal(**_mk(body="FIRST-BODY", stream="vivy#12",
+    library_fake.seed_signal(**_mk(body="FIRST-BODY", stream="alpha#12",
                                    embedded_at=dt.datetime(2026, 7, 16)))
-    library_fake.seed_signal(**_mk(body="SECOND-BODY", product="constance", source="note"))
+    library_fake.seed_signal(**_mk(body="SECOND-BODY", product="beta", source="note"))
     html = signals_build.live_html(frozenset(), True)
     assert "FIRST-BODY" in html and "SECOND-BODY" in html
-    assert "vivy#12" in html
+    assert "alpha#12" in html
     assert '<span class="count">2</span>' in html
     # per-source tallies in the lede + product chips
     assert "github_review 1" in html and "note 1" in html
-    assert 'data-prod="vivy"' in html and 'data-prod="constance"' in html
+    assert 'data-prod="alpha"' in html and 'data-prod="beta"' in html
     # embed coverage: 1 of 2 → 50%
     assert "50% embedded" in html
 
@@ -86,21 +86,21 @@ def test_browse_renders_recent_with_counts(db):
 
 
 def test_browse_scoped_to_viewer_hides_other_projects(db):
-    library_fake.seed_signal(**_mk(body="IN-SCOPE-BODY", product="vivy"))
-    library_fake.seed_signal(**_mk(body="OUT-OF-SCOPE-BODY", product="constance"))
-    html = signals_build.live_html(frozenset({"vivy"}), False)
+    library_fake.seed_signal(**_mk(body="IN-SCOPE-BODY", product="alpha"))
+    library_fake.seed_signal(**_mk(body="OUT-OF-SCOPE-BODY", product="beta"))
+    html = signals_build.live_html(frozenset({"alpha"}), False)
     assert "IN-SCOPE-BODY" in html
     assert "OUT-OF-SCOPE-BODY" not in html
-    assert ">constance<" not in html
-    assert 'data-prod="constance"' not in html
+    assert ">beta<" not in html
+    assert 'data-prod="beta"' not in html
 
 
 def test_a_whole_fleet_viewer_sees_every_project(db):
-    library_fake.seed_signal(**_mk(body="VIVY-BODY", product="vivy"))
-    library_fake.seed_signal(**_mk(body="CONSTANCE-BODY", product="constance"))
-    html = signals_build.live_html(frozenset({"vivy"}), True)
-    assert "VIVY-BODY" in html
-    assert "CONSTANCE-BODY" in html
+    library_fake.seed_signal(**_mk(body="ALPHA-BODY", product="alpha"))
+    library_fake.seed_signal(**_mk(body="BETA-BODY", product="beta"))
+    html = signals_build.live_html(frozenset({"alpha"}), True)
+    assert "ALPHA-BODY" in html
+    assert "BETA-BODY" in html
 
 
 def test_scoped_browse_reports_no_embedded_coverage(db):
@@ -108,20 +108,20 @@ def test_scoped_browse_reports_no_embedded_coverage(db):
     so a scoped viewer cannot be served its whole-table embedded-count
     aggregate without it naming every project's rows regardless of scope —
     this reads as unknown rather than a fabricated number."""
-    library_fake.seed_signal(**_mk(product="vivy", embedded_at=dt.datetime(2026, 7, 16)))
-    html = signals_build.live_html(frozenset({"vivy"}), False)
+    library_fake.seed_signal(**_mk(product="alpha", embedded_at=dt.datetime(2026, 7, 16)))
+    html = signals_build.live_html(frozenset({"alpha"}), False)
     assert "— embedded" in html
 
 
 def test_main_seeds_an_empty_fallback_not_real_data(tmp_path, monkeypatch, db):
     """signals.html is served to ANY viewer's failed render, scoped or not —
     a snapshot naming a real signal would leak to a scoped viewer."""
-    library_fake.seed_signal(**_mk(product="vivy", body="LEAKY-SIGNAL-BODY"))
+    library_fake.seed_signal(**_mk(product="alpha", body="LEAKY-SIGNAL-BODY"))
     monkeypatch.setattr(signals_build, "SITE", tmp_path)
     signals_build.main()
     html = (tmp_path / "signals.html").read_text(encoding="utf-8")
     assert "LEAKY-SIGNAL-BODY" not in html
-    assert 'data-prod="vivy"' not in html
+    assert 'data-prod="alpha"' not in html
     assert "Live view unavailable" in html
 
 
@@ -259,7 +259,7 @@ def test_search_js_sends_no_kind_or_source_or_product_params(db):
 
 def test_attribute_context_escaping(db):
     # A product with a quote must not break out of data-prod="..." (quote=True).
-    evil = 'vivy" onmouseover="alert(1)'
+    evil = 'alpha" onmouseover="alert(1)'
     library_fake.seed_signal(**_mk(product=evil))
     html = signals_build.live_html(frozenset(), True)
     assert 'onmouseover="alert(1)' not in html
@@ -267,11 +267,11 @@ def test_attribute_context_escaping(db):
 
 
 def test_url_ref_links_but_non_http_does_not(db):
-    library_fake.seed_signal(**_mk(body="linked", refs={"pr": 9, "url": "https://github.com/convivy/vivy/pull/9"}))
+    library_fake.seed_signal(**_mk(body="linked", refs={"pr": 9, "url": "https://github.com/convivy/alpha/pull/9"}))
     # a javascript: url must never become an href
     library_fake.seed_signal(**_mk(body="unlinked", refs={"url": "javascript:alert(1)"}))
     html = signals_build.live_html(frozenset(), True)
-    assert 'href="https://github.com/convivy/vivy/pull/9"' in html
+    assert 'href="https://github.com/convivy/alpha/pull/9"' in html
     assert 'href="javascript:' not in html
 
 
@@ -311,14 +311,14 @@ def test_review_stamp_is_stripped_and_the_prose_after_it_renders(db):
 
 
 def test_stamp_only_body_shows_a_reason_not_a_blank_paragraph(db):
-    sig = _mk(body=_REVIEW_STAMP, product="vivy", kind="pr_comment", stream="vivy#320")
+    sig = _mk(body=_REVIEW_STAMP, product="alpha", kind="pr_comment", stream="alpha#320")
     library_fake.seed_signal(**sig)
     html = signals_build.live_html(frozenset(), True)
     assert "agentctl-review" not in html
     assert '<p class="body"></p>' not in html
     # the card is still a real signal — product, kind, stream, permalink render
-    assert 'data-prod="vivy"' in html
-    assert "vivy#320" in html
+    assert 'data-prod="alpha"' in html
+    assert "alpha#320" in html
     assert f'/archives/{sig["id"]}' in html
     # and it says WHY the body is empty, rather than leaving it blank
     assert 'class="body body-empty"' in html
@@ -385,14 +385,14 @@ def test_customer_rows_never_render_server_side(db):
     # rows must never render server-side (neither content nor counts); they are
     # reachable only via search, which the API gates per-identity.
     library_fake.seed_signal(**_mk(body="pilot feedback", privacy_class="customer", source="pilot_note",
-                                   product="constance-pilots"))
+                                   product="beta-pilots"))
     library_fake.seed_signal(**_mk(body="internal finding"))
     html = signals_build.live_html(frozenset(), True)
     assert "pilot feedback" not in html
     assert "internal finding" in html
     assert '<span class="count">1</span>' in html      # total excludes customer rows
     assert "pilot_note" not in html                     # source tallies exclude them
-    assert "constance-pilots" not in html               # no chip reveals the product
+    assert "beta-pilots" not in html               # no chip reveals the product
 
 
 def test_a_credential_holding_signal_customer_would_leak_the_page(db, monkeypatch):
@@ -410,7 +410,7 @@ def test_a_credential_holding_signal_customer_would_leak_the_page(db, monkeypatc
     reason — and so the blast radius of a token misprovision is written down in a
     test rather than in a reviewer's head (security review, PR #170)."""
     library_fake.seed_signal(**_mk(body="pilot feedback", privacy_class="customer", source="pilot_note",
-                                   product="constance-pilots"))
+                                   product="beta-pilots"))
     library_fake.seed_signal(**_mk(body="internal finding"))
     monkeypatch.setattr(library_fake, "FAKE_CAPABILITIES",
                         {"signal.read", "signal.customer"})
@@ -429,11 +429,11 @@ def test_chip_counts_match_the_rendered_view(db):
     new = dt.datetime(2026, 7, 16)
     for i in range(signals_build._BROWSE_LIMIT + 1):   # one more than fits
         library_fake.seed_signal(**_mk(body=f"old-{i}", ingested_at=old))
-    library_fake.seed_signal(**_mk(body="newest", product="constance", ingested_at=new))
+    library_fake.seed_signal(**_mk(body="newest", product="beta", ingested_at=new))
     html = signals_build.live_html(frozenset(), True)
-    # the view = 1 constance + (limit-1) vivy; each chip counts what it filters to
-    assert f'data-prod="vivy" aria-pressed="false">vivy <span class="n">{signals_build._BROWSE_LIMIT - 1}</span>' in html
-    assert 'data-prod="constance" aria-pressed="false">constance <span class="n">1</span>' in html
+    # the view = 1 beta + (limit-1) alpha; each chip counts what it filters to
+    assert f'data-prod="alpha" aria-pressed="false">alpha <span class="n">{signals_build._BROWSE_LIMIT - 1}</span>' in html
+    assert 'data-prod="beta" aria-pressed="false">beta <span class="n">1</span>' in html
 
 
 # --- filter state across the shell's refresh control (issue_01M1517CYMAV0GAEB2FYQQKF4N) --
@@ -491,13 +491,13 @@ def test_capture_datalist_lists_internal_products_only(db):
     # window), but a product whose only signals are customer-class must not
     # leak into it — same wall as the chips and tallies.
     old = dt.datetime(2026, 7, 1)
-    library_fake.seed_signal(**_mk(body="recent", product="vivy"))
-    library_fake.seed_signal(**_mk(body="quiet old product", product="hollis", ingested_at=old))
-    library_fake.seed_signal(**_mk(body="pilot", product="constance-pilots", privacy_class="customer"))
+    library_fake.seed_signal(**_mk(body="recent", product="alpha"))
+    library_fake.seed_signal(**_mk(body="quiet old product", product="gamma", ingested_at=old))
+    library_fake.seed_signal(**_mk(body="pilot", product="beta-pilots", privacy_class="customer"))
     html = signals_build.live_html(frozenset(), True)
-    assert '<option value="vivy">' in html
-    assert '<option value="hollis">' in html          # beyond any recency window
-    assert "constance-pilots" not in html             # customer-only product hidden
+    assert '<option value="alpha">' in html
+    assert '<option value="gamma">' in html          # beyond any recency window
+    assert "beta-pilots" not in html             # customer-only product hidden
 
 
 def test_capture_datalist_escapes_product_values(db):
@@ -560,7 +560,7 @@ def test_detail_returns_none_for_a_signal_outside_the_viewers_scope(db):
     distinguishable "not in your scope" response, which would confirm the id
     exists (the same existence-oracle reasoning the tier/privacy checks
     already apply)."""
-    sig = _mk(body="in-scope body", product="vivy")
+    sig = _mk(body="in-scope body", product="alpha")
     library_fake.seed_signal(**sig)
     sid = sig["id"]
     assert signals_build.detail_html(
@@ -571,10 +571,10 @@ def test_detail_returns_none_for_a_signal_outside_the_viewers_scope(db):
 
 
 def test_detail_renders_for_a_viewer_whose_scope_holds_the_product(db):
-    sig = _mk(body="in-scope body", product="vivy")
+    sig = _mk(body="in-scope body", product="alpha")
     library_fake.seed_signal(**sig)
     html = signals_build.detail_html(
-        sig["id"], viewer_tier="full", scope=frozenset({"vivy"}), whole_fleet=False)
+        sig["id"], viewer_tier="full", scope=frozenset({"alpha"}), whole_fleet=False)
     assert html is not None
     assert "in-scope body" in html
 
@@ -689,7 +689,7 @@ def test_every_signal_path_moves_with_the_capability_not_just_the_browse_page(db
     So each path is exercised in both capability states. Detail and acks must
     collapse a customer row to absent; facets must not count it in `total`."""
     library_fake.seed_signal(**_mk(id="sig_cust", body="pilot feedback", privacy_class="customer",
-                                   source="pilot_note", product="constance-pilots"))
+                                   source="pilot_note", product="beta-pilots"))
     library_fake.seed_signal(**_mk(id="sig_int", body="internal finding"))
     # The ack row matters: `fake_signal_acks` answers which of the ids given are
     # ACKED, so without one the customer id is absent for a reason that has

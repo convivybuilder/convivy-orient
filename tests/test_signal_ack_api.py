@@ -26,7 +26,7 @@ import library_client
 import library_fake
 import server as srv
 
-AGENT_TOKEN = "tok-agent-vivy"
+AGENT_TOKEN = "tok-agent-alpha"
 
 
 @pytest.fixture
@@ -46,9 +46,9 @@ def client(tmp_path, monkeypatch):
     roles = tmp_path / "roles.json"
     roles.write_text(json.dumps({
         "operator@example.com": {"role": "admin", "products": ["*"]},
-        "mem@example.com": {"role": "member", "products": ["vivy"]},
-        "con@example.com": {"role": "contractor", "products": ["vivy"]},
-        "narrow@example.com": {"role": "signal_reader_no_customer", "products": ["vivy"]},
+        "mem@example.com": {"role": "member", "products": ["alpha"]},
+        "con@example.com": {"role": "contractor", "products": ["alpha"]},
+        "narrow@example.com": {"role": "signal_reader_no_customer", "products": ["alpha"]},
     }))
     monkeypatch.setattr(authz, "ROLES", roles)
     # The project scope now comes from the Library (E19·1,
@@ -60,7 +60,7 @@ def client(tmp_path, monkeypatch):
         lambda email: frozenset(
             json.loads(authz.ROLES.read_text()).get(email, {}).get("products", [])))
     toks = tmp_path / "api-tokens.json"
-    toks.write_text(json.dumps({AGENT_TOKEN: {"name": "agent", "products": ["vivy"]}}))
+    toks.write_text(json.dumps({AGENT_TOKEN: {"name": "agent", "products": ["alpha"]}}))
     monkeypatch.setattr(api_common, "API_TOKENS", toks)
     jwtc = tmp_path / "jwt.json"
     jwtc.write_text(json.dumps({"enforce": False}))
@@ -79,7 +79,7 @@ def _agent():
 
 def _seed(**kw):
     base = dict(id=control_db.new_signal_id(), source="github", kind="review_comment",
-                actor="reviewer", ingested_by="agent", product="vivy", body="looks good",
+                actor="reviewer", ingested_by="agent", product="alpha", body="looks good",
                 privacy_class="internal")
     base.update(kw)
     return library_fake.seed_signal(**base)
@@ -146,7 +146,7 @@ def test_ack_refuses_a_signal_outside_the_actors_product_scope(client):
     one human's own role, so scoping the act to what THIS human can read is
     this file's job — not the Library's, and not free from a local DB row any
     more."""
-    sid = _seed(product="constance")  # mem@ holds signal_read, but only for vivy
+    sid = _seed(product="beta")  # mem@ holds signal_read, but only for alpha
     r = client.post(f"/api/signals/{sid}/ack", headers=_human("mem@example.com"))
     assert r.status_code == 404
     assert library_fake._ACKS == set()

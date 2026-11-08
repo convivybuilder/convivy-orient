@@ -49,8 +49,8 @@ def test_query_stats_empty():
 
 def test_mat_stats_latest_per_profile_wins():
     rows = [
-        {"project": "vivy", "profile": "daytime", "agents": 5, "skills": 8, "total_docs": 30, "outcome": "written", "ts": "2026-06-08T01:00:00Z"},
-        {"project": "vivy", "profile": "daytime", "agents": 6, "skills": 9, "total_docs": 33, "outcome": "noop", "ts": "2026-06-08T05:00:00Z"},
+        {"project": "alpha", "profile": "daytime", "agents": 5, "skills": 8, "total_docs": 30, "outcome": "written", "ts": "2026-06-08T01:00:00Z"},
+        {"project": "alpha", "profile": "daytime", "agents": 6, "skills": 9, "total_docs": 33, "outcome": "noop", "ts": "2026-06-08T05:00:00Z"},
     ]
     m = kb.mat_stats(rows)
     assert m["total"] == 2 and m["by_outcome"] == {"written": 1, "noop": 1}
@@ -75,7 +75,7 @@ def _sample_q():
 
 
 def _sample_m():
-    return kb.mat_stats([{"project": "vivy", "profile": "daytime", "outcome": "ok",
+    return kb.mat_stats([{"project": "alpha", "profile": "daytime", "outcome": "ok",
                           "agents": 3, "skills": 2, "total_docs": 9, "ts": "t1"}])
 
 
@@ -477,9 +477,9 @@ def test_load_audit_asks_the_library_for_the_kb_audit_stream(monkeypatch):
 def test_live_html_filters_materializations_to_scope(monkeypatch, tmp_path):
     mat_log = tmp_path / "kb-materializations.jsonl"
     mat_log.write_text("\n".join([
-        '{"project": "vivy", "profile": "daytime", "outcome": "ok", "agents": 1, '
+        '{"project": "alpha", "profile": "daytime", "outcome": "ok", "agents": 1, '
         '"skills": 1, "total_docs": 2, "ts": "t1"}',
-        '{"project": "constance", "profile": "daytime", "outcome": "ok", "agents": 1, '
+        '{"project": "beta", "profile": "daytime", "outcome": "ok", "agents": 1, '
         '"skills": 1, "total_docs": 2, "ts": "t1"}',
     ]) + "\n")
     monkeypatch.setattr(kb, "MAT_LOG", mat_log)
@@ -489,9 +489,9 @@ def test_live_html_filters_materializations_to_scope(monkeypatch, tmp_path):
     import alert_policy_store
     monkeypatch.setattr(alert_policy_store, "get", lambda key: None)
 
-    html = kb.live_html(frozenset({"vivy"}), False)
-    assert "\">vivy/daytime<" in html
-    assert "\">constance/daytime<" not in html
+    html = kb.live_html(frozenset({"alpha"}), False)
+    assert "\">alpha/daytime<" in html
+    assert "\">beta/daytime<" not in html
 
 
 def test_render_whole_fleet_false_hides_eval_queries_and_audit():
@@ -501,7 +501,7 @@ def test_render_whole_fleet_false_hides_eval_queries_and_audit():
     assert "golden set ·" not in html
     assert "No misses" not in html
     # the materializations panel (already scoped by its caller) still renders
-    assert "vivy/daytime" in html
+    assert "alpha/daytime" in html
 
 
 def test_render_whole_fleet_true_shows_everything_the_old_default_did():
@@ -523,4 +523,4 @@ def test_build_seeds_an_empty_fallback_not_real_data(tmp_path, monkeypatch):
     kb.build()
     html = (tmp_path / "kb.html").read_text(encoding="utf-8")
     assert "Live view unavailable" in html
-    assert '">vivy<' not in html
+    assert '">alpha<' not in html

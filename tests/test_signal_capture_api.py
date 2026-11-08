@@ -35,8 +35,8 @@ import library_client
 import library_fake
 import server as srv
 
-AGENT_TOKEN = "tok-agent-vivy"
-CONSTANCE_TOKEN = "tok-agent-constance"
+AGENT_TOKEN = "tok-agent-alpha"
+BETA_TOKEN = "tok-agent-beta"
 SYSTEM_TOKEN = "tok-system-capture"
 
 
@@ -50,8 +50,8 @@ def client(tmp_path, monkeypatch):
     roles = tmp_path / "roles.json"
     roles.write_text(json.dumps({
         "operator@example.com": {"role": "admin", "products": ["*"]},
-        "mem@example.com": {"role": "member", "products": ["vivy"]},
-        "con@example.com": {"role": "contractor", "products": ["vivy"]},
+        "mem@example.com": {"role": "member", "products": ["alpha"]},
+        "con@example.com": {"role": "contractor", "products": ["alpha"]},
     }))
     monkeypatch.setattr(authz, "ROLES", roles)
     # The project scope now comes from the Library (E19·1,
@@ -66,8 +66,8 @@ def client(tmp_path, monkeypatch):
             json.loads(authz.ROLES.read_text()).get(email, {}).get("products", [])))
     toks = tmp_path / "api-tokens.json"
     toks.write_text(json.dumps({
-        AGENT_TOKEN: {"name": "agent", "products": ["vivy"]},
-        CONSTANCE_TOKEN: {"name": "constance-agent", "products": ["constance"]},
+        AGENT_TOKEN: {"name": "agent", "products": ["alpha"]},
+        BETA_TOKEN: {"name": "beta-agent", "products": ["beta"]},
         SYSTEM_TOKEN: {"name": "system-capture", "products": ["*"], "kind": "system"},
     }))
     monkeypatch.setattr(api_common, "API_TOKENS", toks)
@@ -88,7 +88,7 @@ def _agent(token=AGENT_TOKEN):
 
 def _post(client, headers, **fields):
     body = {"source": "github_review", "kind": "review_comment", "actor": "reviewer",
-            "product": "vivy", "body": "looks good"}
+            "product": "alpha", "body": "looks good"}
     body.update(fields)
     return client.post("/api/signals", json=body, headers=headers)
 
@@ -99,11 +99,11 @@ def test_agent_creates_internal_signal(client):
     d = r.json()
     assert d["id"].startswith("sig_")
     assert library_fake._SIGNALS[d["id"]]["privacy_class"] == "internal"
-    assert library_fake._SIGNALS[d["id"]]["product"] == "vivy"
+    assert library_fake._SIGNALS[d["id"]]["product"] == "alpha"
 
 
 def test_unauthenticated_is_401(client):
-    r = client.post("/api/signals", json={"source": "x", "kind": "y", "actor": "z", "product": "vivy"})
+    r = client.post("/api/signals", json={"source": "x", "kind": "y", "actor": "z", "product": "alpha"})
     assert r.status_code == 401
 
 
@@ -121,7 +121,7 @@ def test_agent_writes_need_no_origin_but_human_does(client):
     # bearer-authed agents are CSRF-exempt; a cookie-authed human needs same-origin
     assert _post(client, _agent()).status_code == 201
     r = client.post("/api/signals",
-                    json={"source": "note", "kind": "market", "actor": "operator@example.com", "product": "vivy"},
+                    json={"source": "note", "kind": "market", "actor": "operator@example.com", "product": "alpha"},
                     headers={srv.EMAIL_HEADER: "operator@example.com"})  # no Origin
     assert r.status_code == 403
 
@@ -132,7 +132,7 @@ def test_human_capture_works_with_origin(client):
 
 
 def test_agent_out_of_scope_product_is_forbidden(client):
-    r = _post(client, _agent(), product="constance")  # agent token is scoped to vivy
+    r = _post(client, _agent(), product="beta")  # agent token is scoped to alpha
     assert r.status_code == 403
 
 
@@ -229,7 +229,7 @@ def test_a_human_without_signal_customer_is_still_refused_customer_class(
     monkeypatch.setitem(authz.ROLE_CAPS, "capturer",
                         frozenset({"read", "signal_read", "signal_write"}))
     authz.ROLES.write_text(json.dumps(
-        {"cap@example.com": {"role": "capturer", "products": ["vivy"]}}))
+        {"cap@example.com": {"role": "capturer", "products": ["alpha"]}}))
 
     ok = _post(client, _human("cap@example.com"))
     assert ok.status_code == 201, ok.text
@@ -287,8 +287,7 @@ def test_dedup_key_collision_is_409(client, monkeypatch):
 
 
 def test_dedup_key_retry_lands_idempotent_not_error(client):
-    """The property both github_capture.py's overlap-window poller and the
-    capture form's own double-submit guard depend on: a resubmit of the same
+    """The property the capture form's own double-submit guard depends on: a resubmit of the same
     dedup_key is SUCCESS (200, the existing row, idempotent=true), not an
     error — a round of review caught this proxy hard-erroring on every
     collision, which would have broken both callers."""
@@ -314,13 +313,13 @@ def test_a_human_collision_into_an_out_of_scope_row_does_not_leak_the_id(client)
     human's own role, so the mechanism is shared rather than duplicated. Pinning
     the human path anyway, because "the mechanism is shared" is a fact about
     today's code and this is the scenario the change makes reachable."""
-    created = _post(client, _agent(CONSTANCE_TOKEN), product="constance",
+    created = _post(client, _agent(BETA_TOKEN), product="beta",
                     dedup_key="human-probe")
     assert created.status_code == 201
     real_id = created.json()["id"]
 
-    # mem@example.com is scoped to vivy and holds no grant on constance.
-    probe = _post(client, _human("mem@example.com"), product="vivy",
+    # mem@example.com is scoped to alpha and holds no grant on beta.
+    probe = _post(client, _human("mem@example.com"), product="alpha",
                   dedup_key="human-probe")
     assert probe.status_code == 409
     assert real_id not in probe.text
@@ -339,17 +338,17 @@ def test_a_human_collision_into_a_customer_row_they_cannot_read_is_refused(
                         frozenset({"read", "signal_read", "signal_write"}))
     authz.ROLES.write_text(json.dumps({
         "operator@example.com": {"role": "admin", "products": ["*"]},
-        "cap@example.com": {"role": "capturer", "products": ["vivy"]},
+        "cap@example.com": {"role": "capturer", "products": ["alpha"]},
     }))
 
     customer = _post(client, _human("operator@example.com"), privacy_class="customer",
-                     product="vivy", source="email", kind="inbound_email",
+                     product="alpha", source="email", kind="inbound_email",
                      actor="alice@bigco.example", dedup_key="customer-probe")
     assert customer.status_code == 201, customer.text
     real_id = customer.json()["id"]
 
     # Same product, so scope alone does not refuse it — the privacy class does.
-    probe = _post(client, _human("cap@example.com"), product="vivy",
+    probe = _post(client, _human("cap@example.com"), product="alpha",
                   dedup_key="customer-probe")
     assert probe.status_code == 409
     assert real_id not in probe.text
@@ -359,15 +358,15 @@ def test_a_human_collision_into_a_customer_row_they_cannot_read_is_refused(
 def test_dedup_key_collision_outside_the_callers_scope_does_not_leak_the_id(client):
     """Security review, PR #179 round 4: an idempotent hit is a match against
     Orient's whole shared store, not against this caller's own scope. A
-    vivy-scoped token guessing (or reusing) a dedup_key that happens to match
-    a constance signal must not learn that signal's real id — the same
+    alpha-scoped token guessing (or reusing) a dedup_key that happens to match
+    a beta signal must not learn that signal's real id — the same
     no-existence-leak property `_ack_visible` holds for the ack path,
     reused here rather than re-derived."""
-    created = _post(client, _agent(CONSTANCE_TOKEN), product="constance", dedup_key="shared-key")
+    created = _post(client, _agent(BETA_TOKEN), product="beta", dedup_key="shared-key")
     assert created.status_code == 201
     real_id = created.json()["id"]
 
-    probe = _post(client, _agent(), product="vivy", dedup_key="shared-key")  # vivy-scoped token
+    probe = _post(client, _agent(), product="alpha", dedup_key="shared-key")  # alpha-scoped token
     assert probe.status_code == 409
     assert real_id not in probe.text
     assert probe.json() == {"error": "dedup_key already in use"}
@@ -406,7 +405,7 @@ def test_an_unrecognised_bearer_token_is_distinguishable_from_no_credential(clie
     return the same body, which is right for the caller and useless for whoever
     has to work out why an integration stopped."""
     r = client.post("/api/signals",
-                    json={"source": "x", "kind": "y", "actor": "z", "product": "vivy"},
+                    json={"source": "x", "kind": "y", "actor": "z", "product": "alpha"},
                     headers={"Authorization": "Bearer not-a-real-token"})
     assert r.status_code == 401
     assert _log_lines("/api/signals")[0][4] == "auth=bearer-unknown"

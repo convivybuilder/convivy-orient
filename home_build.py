@@ -13,13 +13,14 @@ from __future__ import annotations
 
 import pathlib
 import re
-from datetime import date, datetime, timezone
+from datetime import date
 from html import escape
 from urllib.parse import quote
 
 import alerts_build
 import code_health_build
 import crew_registry
+import dashboard_build
 import design_system as ds
 import library_client
 import orient_time
@@ -50,53 +51,41 @@ _AUDIENCE = "team"
 # ---------------------------------------------------------------------------
 
 
-def _spend_as_of() -> str:
-    """The day and time this figure was rendered, e.g. "Mon Sep 28 · as of
-    2:35 PM".
+def _spend_as_of(generated_at) -> str:
+    """The day and time the spend snapshot was taken, e.g. "Mon Sep 28 · as
+    of 2:35 PM".
 
     Named on the figure because a bare "today" read the same on a tab left open
     since the night before (the operator, 2026-09-28: $750 on the computer, $158 on the
-    phone, the first being Sunday's). The figure is a live per-request read now
-    (CQ·154, issue_01M4ZBBQK0KFH9YQ16MNK75HJT, ARCH-182) rather than a
-    cron-refreshed snapshot, so the render's own clock time IS the figure's
-    age — there is no separate "as of" to fall back from."""
-    now = orient_time.now()
-    clock = now.strftime("%I:%M %p").lstrip("0")
-    return f"{now:%a %b} {now.day} · as of {clock}"
-
-
-def _today_window() -> tuple[datetime, datetime]:
-    """Midnight MST to now, converted to the naive-UTC convention every
-    `library_client` timestamp uses: the calendar day Home's agent-run spend
-    covers, matching the day `_spend_as_of` names."""
-    now_mst = orient_time.now()
-    midnight_mst = now_mst.replace(hour=0, minute=0, second=0, microsecond=0)
-    return (midnight_mst.astimezone(timezone.utc).replace(tzinfo=None),
-           now_mst.astimezone(timezone.utc).replace(tzinfo=None))
+    phone, the first being Sunday's). The snapshot's own `generated_at` is the
+    figure's age: agent-cost-report rewrites it every 4h, and its midnight
+    day-close run writes the day that just ended, so the render clock would
+    name the wrong day until the next harvest."""
+    taken = orient_time.to_mst(generated_at)
+    clock = taken.strftime("%I:%M %p").lstrip("0")
+    return f"{taken:%a %b} {taken.day} · as of {clock}"
 
 
 def _today_spend(whole_fleet: bool = True) -> dict | None:
-    """Today's total finished-run spend, summed over every project in the
-    Library's cost rollup (CQ·154, issue_01M4ZBBQK0KFH9YQ16MNK75HJT), or
-    `None` for a scoped (non-whole-fleet) viewer — rule 1, no fleet total to
-    a scoped viewer (E19·3, issue_01M35K5EAZD85FBYXEBQVRKVZV). Reads
-    `library_client.cost_rollup_by_project`, the same rollup the crew view
-    and the dashboards read, so this figure cannot disagree with theirs.
+    """Total spend across every session and every provider, at API-equivalent
+    rates for Anthropic models and actual cost for the gateway and the apps
+    (the operator, 2026-10-25), or `None` for a scoped (non-whole-fleet)
+    viewer — rule 1, no fleet total to a scoped viewer (E19·3,
+    issue_01M35K5EAZD85FBYXEBQVRKVZV). Reads `total` from the same
+    agent-cost-report snapshot /spending's "Spend — all sessions" panel reads,
+    so Home and /spending show one number. That snapshot is account-wide with
+    no per-project dimension, which is why the gate cannot be narrowed to a
+    scope.
 
-    `None` is also what a scoped viewer always got before this read a
-    per-project source — the gate hasn't changed, only what feeds the number
-    behind it. Catches a Library failure and degrades to "unavailable"
-    rather than raising, the same belt every loader in this module wears
-    (module docstring) so one broken source never 500s the whole page —
-    `library_client` itself still raises; this is the layer that decides
-    what a render does with that."""
+    Degrades to "unavailable" on a missing or unreadable snapshot rather than
+    raising, the same belt every loader in this module wears (module
+    docstring) so one broken source never 500s the whole page."""
     if not whole_fleet:
         return None
     try:
-        since, until = _today_window()
-        rollup = library_client.cost_rollup_by_project(library_client.list_finished_runs(since, until))
-        total = sum(row["cost_usd"] for row in rollup.values())
-        return {"value": f"${total:,.2f}", "delta": _spend_as_of()}
+        snap = dashboard_build.load_latest_snapshot()
+        return {"value": f"${float(snap['total']):,.2f}",
+                "delta": _spend_as_of(snap["generated_at"])}
     except Exception:
         return {"value": "—", "delta": "unavailable"}
 
@@ -370,14 +359,15 @@ def _full_body(viewer: str | None = None, scope: frozenset[str] = frozenset(),
         # Each destination is the page the figure is computed on, not a generic
         # index: /overview would make the reader hunt for the number they just
         # clicked.
-        _hero_stat("Today's Agent-Run Spend", spend["value"], spend["delta"], "/spending")
+        _hero_stat("Spend · All Sessions (API-Equivalent)", spend["value"], spend["delta"],
+                   "/spending")
         if spend else None,
         _hero_stat("CI Health", health["value"], health["delta"], "/health"),
         _hero_stat("Waypoints Passed (7d)", velocity["value"], velocity["delta"],
                    "/velocity"),
     ]))
 
-    spend_pill = f'<div class="qmeta"><span class="pill">{spend["value"]} on agent runs today</span></div>' \
+    spend_pill = f'<div class="qmeta"><span class="pill">{spend["value"]} total spend</span></div>' \
         if spend else ""
     quick_links = f"""
 <div class="quick" style="margin-top:0">
@@ -514,7 +504,7 @@ def _contractor_body() -> str:
         {
             "icon": "📦",
             "title": "Products at a glance",
-            "subtitle": "Vivy · Constance · Sous Chef",
+            "subtitle": "What each product is and who it's for",
             "tag": "Products",
         },
         {
@@ -600,7 +590,7 @@ def _contractor_body() -> str:
       <span class="qarrow" aria-hidden="true">→</span>
       <div class="qicon" aria-hidden="true">📦</div>
       <h3>Products</h3>
-      <p>Vivy, Constance, and Sous Chef — what each one is and who it's for.</p>
+      <p>What each product is and who it's for.</p>
       <div class="qmeta"><span class="pill">3 products</span> overviews</div>
     </a>
     <a class="qcard" href="/room">

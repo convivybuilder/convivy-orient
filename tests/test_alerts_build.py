@@ -10,7 +10,6 @@ import json
 
 import alerts_build as ab
 import code_health_build as ch
-import crew_registry
 import dashboard_build as db
 import kb_build as kb
 
@@ -145,11 +144,11 @@ def test_render_empty_state():
 
 def test_render_shows_cards_and_rows():
     alerts = [ab._alert(category="Code Health", metric="CI pass rate (main)",
-                        subject="vivy", severity="bad", value="50%",
-                        detail="vivy's CI is bad.", href="/health")]
+                        subject="alpha", severity="bad", value="50%",
+                        detail="alpha's CI is bad.", href="/health")]
     html = ab.render(alerts)
     assert html.count('class="statcard"') == 3
-    assert "vivy" in html and "CI pass rate (main)" in html
+    assert "alpha" in html and "CI pass rate (main)" in html
     assert 'href="/health"' in html
 
 
@@ -231,7 +230,7 @@ def test_gather_scopes_code_health_alerts_and_whole_fleet_only_sources(tmp_path,
     registry = tmp_path / "projects.json"
     registry.write_text(json.dumps({"_meta": {}, "alpha": {"repos": ["alpha-repo"]},
                                     "beta": {"repos": ["beta-repo"]}}))
-    monkeypatch.setattr(crew_registry, "REGISTRY", registry)
+    monkeypatch.setenv("PROJECTS_JSON", str(registry))
     rows = [{"repo": "alpha-repo", "ci_pass_rate_main": 0.1, "oldest_open_days": None, "reverts_recent": None},
             {"repo": "beta-repo", "ci_pass_rate_main": 0.1, "oldest_open_days": None, "reverts_recent": None}]
     monkeypatch.setattr(ch, "load_snapshot", lambda: ("2026-09-27T00:00:00Z", rows))

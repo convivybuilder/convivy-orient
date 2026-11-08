@@ -75,8 +75,8 @@ def test_no_query_shows_the_prompt_and_never_calls_the_library(monkeypatch, no_r
 
 @pytest.mark.parametrize("query", [
     {"agent": "scout"},
-    {"agent": "scout", "crew": "vivy"},
-    {"agent": " ", "crew": "vivy", "model": "claude-sonnet-5"},
+    {"agent": "scout", "crew": "alpha"},
+    {"agent": " ", "crew": "alpha", "model": "claude-sonnet-5"},
 ])
 def test_partial_triple_shows_the_prompt_and_never_calls_the_library(
         query, monkeypatch, no_roster):
@@ -170,15 +170,15 @@ def test_a_library_failure_propagates_rather_than_rendering_empty(monkeypatch, n
 def test_datalist_suggestions_are_sourced_from_roster_discovery(monkeypatch):
     monkeypatch.setattr(policy_build.roster_build, "load_roster", lambda: {
         "projects": [{
-            "slug": "vivy", "label": "Vivy", "repo": "/x",
+            "slug": "alpha", "label": "Alpha", "repo": "/x",
             "lanes": [{"name": "daytime", "label": "Daytime",
-                       "agents": [{"slug": "vivy-coder", "model": "claude-opus-5"}]}],
+                       "agents": [{"slug": "alpha-coder", "model": "claude-opus-5"}]}],
         }],
         "autonomous": [{"slug": "consultant", "model": "claude-sonnet-5"}],
     })
     html = policy_build.live_html({})
     assert 'id="polAgents"' in html
-    assert '<option value="vivy-coder">' in html
+    assert '<option value="alpha-coder">' in html
     assert '<option value="consultant">' in html
     assert '<option value="claude-opus-5">' in html
     assert '<option value="claude-sonnet-5">' in html
@@ -193,23 +193,23 @@ def test_datalist_suggestions_are_restricted_to_scope(monkeypatch):
     import crew_registry
     monkeypatch.setattr(policy_build.roster_build, "load_roster", lambda: {
         "projects": [
-            {"slug": "vivy-repo", "label": "Vivy", "repo": "/x",
+            {"slug": "alpha-repo", "label": "Alpha", "repo": "/x",
              "lanes": [{"name": "daytime", "label": "Daytime",
-                        "agents": [{"slug": "vivy-coder", "model": "claude-opus-5"}]}]},
-            {"slug": "constance-repo", "label": "Constance", "repo": "/y",
+                        "agents": [{"slug": "alpha-coder", "model": "claude-opus-5"}]}]},
+            {"slug": "beta-repo", "label": "Beta", "repo": "/y",
              "lanes": [{"name": "daytime", "label": "Daytime",
-                        "agents": [{"slug": "constance-coder", "model": "claude-opus-5"}]}]},
+                        "agents": [{"slug": "beta-coder", "model": "claude-opus-5"}]}]},
         ],
         "autonomous": [{"slug": "consultant", "model": "claude-sonnet-5"}],
     })
-    monkeypatch.setattr(crew_registry, "public_crews", lambda: ["vivy-crew", "constance-crew"])
-    monkeypatch.setattr(crew_registry, "repos_in_scope", lambda scope: frozenset({"vivy-repo"}))
-    monkeypatch.setattr(crew_registry, "crews_in_scope", lambda scope: frozenset({"vivy-crew"}))
+    monkeypatch.setattr(crew_registry, "public_crews", lambda: ["alpha-crew", "beta-crew"])
+    monkeypatch.setattr(crew_registry, "repos_in_scope", lambda scope: frozenset({"alpha-repo"}))
+    monkeypatch.setattr(crew_registry, "crews_in_scope", lambda scope: frozenset({"alpha-crew"}))
     html = policy_build.live_html({}, frozenset({"some-project"}), False)
-    assert '<option value="vivy-coder">' in html
-    assert '<option value="constance-coder">' not in html
-    assert '<option value="vivy-crew">' in html
-    assert '<option value="constance-crew">' not in html
+    assert '<option value="alpha-coder">' in html
+    assert '<option value="beta-coder">' not in html
+    assert '<option value="alpha-crew">' in html
+    assert '<option value="beta-crew">' not in html
     # autonomous agents stay unfiltered regardless of scope
     assert '<option value="consultant">' in html
 
@@ -367,7 +367,7 @@ def test_an_unavailable_list_refuses_to_key_a_lookup(monkeypatch, no_roster, lis
         raise AssertionError("looked up a policy key with no model table")
 
     monkeypatch.setattr(library_client, "resolve_policy", boom)
-    html = policy_build.live_html({"agent": "planner", "crew": "vivy", "model": "opus"})
+    html = policy_build.live_html({"agent": "planner", "crew": "alpha", "model": "opus"})
     assert "model list is unavailable" in html
 
 
@@ -376,7 +376,7 @@ def test_an_unavailable_list_refuses_to_key_a_lookup(monkeypatch, no_roster, lis
 
 @pytest.fixture
 def public_crews(monkeypatch):
-    crews = {"value": ["bosun", "deck", "vivy"]}
+    crews = {"value": ["bosun", "deck", "alpha"]}
 
     def load():
         if crews["value"] is None:
@@ -403,10 +403,10 @@ def test_the_write_form_lists_every_crew_one_save_would_write(monkeypatch, no_ro
                                                               public_crews):
     monkeypatch.setattr(policy_build.library_client, "resolve_policy",
                         lambda agent, crew, model: _resolution())
-    html = policy_build.live_html({"agent": "scout", "crew": "vivy", "model": "claude-sonnet-5"})
+    html = policy_build.live_html({"agent": "scout", "crew": "alpha", "model": "claude-sonnet-5"})
     assert 'id="polWriteAll"' in html
     assert "every public crew (3)" in html
-    assert "bosun, deck, vivy" in html
+    assert "bosun, deck, alpha" in html
 
 
 def test_no_every_crew_option_while_the_registry_is_unavailable(monkeypatch, no_roster,
@@ -414,7 +414,7 @@ def test_no_every_crew_option_while_the_registry_is_unavailable(monkeypatch, no_
     public_crews["value"] = None
     monkeypatch.setattr(policy_build.library_client, "resolve_policy",
                         lambda agent, crew, model: _resolution())
-    html = policy_build.live_html({"agent": "scout", "crew": "vivy", "model": "claude-sonnet-5"})
+    html = policy_build.live_html({"agent": "scout", "crew": "alpha", "model": "claude-sonnet-5"})
     assert 'id="polWriteAll"' not in html
     assert 'id="polWriteBtn"' in html
 
@@ -424,14 +424,14 @@ def test_no_every_crew_option_while_the_registry_is_unavailable(monkeypatch, no_
 
 @pytest.fixture
 def two_project_registry(tmp_path, monkeypatch, public_crews):
-    """`vivy` is the viewer's project; `deck` belongs to `convivy-deck`,
+    """`alpha` is the viewer's project; `deck` belongs to `convivy-deck`,
     outside their scope. The real `crews_in_scope` reads this file."""
     reg = tmp_path / "projects.json"
-    reg.write_text(json.dumps({"vivy": {"crew": "vivy"},
+    reg.write_text(json.dumps({"alpha": {"crew": "alpha"},
                                "convivy-deck": {"crew": "deck"},
                                "agent-platform": {"crew": "bosun"}}))
-    monkeypatch.setattr(crew_registry, "REGISTRY", reg)
-    return frozenset({"vivy"})
+    monkeypatch.setenv("PROJECTS_JSON", str(reg))
+    return frozenset({"alpha"})
 
 
 def test_a_scoped_viewer_cannot_resolve_an_out_of_scope_crew(monkeypatch, no_roster,
@@ -457,7 +457,7 @@ def test_a_scoped_viewers_own_crew_resolves_without_naming_any_other_crew(
         monkeypatch, no_roster, two_project_registry):
     monkeypatch.setattr(policy_build.library_client, "resolve_policy",
                         lambda agent, crew, model: _resolution(crew=crew))
-    html = policy_build.live_html({"agent": "scout", "crew": "vivy", "model": "claude-sonnet-5"},
+    html = policy_build.live_html({"agent": "scout", "crew": "alpha", "model": "claude-sonnet-5"},
                                   two_project_registry, False)
     assert 'id="polWriteBtn"' in html
     assert 'id="polWriteAll"' not in html
@@ -465,7 +465,7 @@ def test_a_scoped_viewers_own_crew_resolves_without_naming_any_other_crew(
     assert "bosun" not in html
 
 
-# --- exfiltration-class defaults bind only on private crews ------------------
+# --- the class defaults bind on every crew ----------------------------------
 
 
 def _row_for(html, target):
@@ -473,37 +473,40 @@ def _row_for(html, target):
     return html[start:html.index("</div>", start)]
 
 
-def test_an_exfiltration_builtin_on_a_public_crew_renders_allow(monkeypatch, no_roster,
-                                                                public_crews):
-    """agentctl adds `_EXFIL_DENY` only on a private dispatch; run-ec2be7ff
-    fetched with WebFetch as reviewer on a public crew while this row read
-    "deny" (issue_01M1QY3HJTFHYDY3ZJPQ1PNHE5)."""
+@pytest.mark.parametrize("crew", ["alpha", "iota"])
+def test_an_exfiltration_builtin_renders_deny_on_public_and_other_crews(monkeypatch, no_roster,
+                                                                        public_crews, crew):
+    """agentctl applies the class to every dispatch (platform/decisions/0048).
+    This row read "allow" on `convivy-product` while WebFetch was denied there
+    (issue_01M6ACT7T90P9R81ZSSH5K545N). "alpha" is in `public_crews`, "iota"
+    is not."""
     monkeypatch.setattr(policy_build.library_client, "resolve_policy",
-                        lambda agent, crew, model: _resolution(crew="vivy"))
-    html = policy_build.live_html({"agent": "reviewer", "crew": "vivy", "model": "claude-sonnet-5"})
+                        lambda agent, crew, model: _resolution(crew=crew))
+    html = policy_build.live_html({"agent": "scout", "crew": crew, "model": "claude-sonnet-5"})
     row = _row_for(html, "WebFetch")
-    assert 'class="pill pol-allow"' in row
-    assert "only on private-crew dispatches" in row
-    # Connector servers are denied on every dispatch, public crew included.
+    assert 'class="pill pol-deny"' in row
+    assert "unless an explicit allow exempts it" in row
+    assert "private-crew" not in html
     assert 'class="pill pol-deny"' in _row_for(html, "claude_ai_Gmail")
 
 
-def test_an_exfiltration_builtin_on_a_crew_outside_the_public_list_renders_deny(
-        monkeypatch, no_roster, public_crews):
-    monkeypatch.setattr(policy_build.library_client, "resolve_policy",
-                        lambda agent, crew, model: _resolution(crew="cfo"))
-    html = policy_build.live_html({"agent": "reviewer", "crew": "cfo", "model": "claude-sonnet-5"})
+def test_an_explicit_allow_exempts_an_exfiltration_builtin(monkeypatch, no_roster, public_crews):
+    monkeypatch.setattr(
+        policy_build.library_client, "resolve_policy",
+        lambda agent, crew, model: _resolution(crew="alpha", explicit={"WebFetch": "allow"}))
+    html = policy_build.live_html({"agent": "scout", "crew": "alpha", "model": "claude-sonnet-5"})
     row = _row_for(html, "WebFetch")
-    assert 'class="pill pol-deny"' in row
-    assert "denies it on private-crew dispatches" in row
+    assert 'class="pill pol-allow"' in row
+    assert "explicit override" in row
+    assert 'class="pill pol-deny"' in _row_for(html, "RemoteTrigger")
 
 
 def test_an_exfiltration_builtin_renders_deny_while_the_registry_is_unavailable(
         monkeypatch, no_roster, public_crews):
     public_crews["value"] = None
     monkeypatch.setattr(policy_build.library_client, "resolve_policy",
-                        lambda agent, crew, model: _resolution(crew="vivy"))
-    html = policy_build.live_html({"agent": "reviewer", "crew": "vivy", "model": "claude-sonnet-5"})
+                        lambda agent, crew, model: _resolution(crew="alpha"))
+    html = policy_build.live_html({"agent": "reviewer", "crew": "alpha", "model": "claude-sonnet-5"})
     assert 'class="pill pol-deny"' in _row_for(html, "WebFetch")
 
 
@@ -511,8 +514,8 @@ def test_an_explicit_deny_on_a_public_crew_still_renders_deny(monkeypatch, no_ro
                                                               public_crews):
     monkeypatch.setattr(
         policy_build.library_client, "resolve_policy",
-        lambda agent, crew, model: _resolution(crew="vivy", explicit={"WebFetch": "deny"}))
-    html = policy_build.live_html({"agent": "reviewer", "crew": "vivy", "model": "claude-sonnet-5"})
+        lambda agent, crew, model: _resolution(crew="alpha", explicit={"WebFetch": "deny"}))
+    html = policy_build.live_html({"agent": "reviewer", "crew": "alpha", "model": "claude-sonnet-5"})
     row = _row_for(html, "WebFetch")
     assert 'class="pill pol-deny"' in row
     assert "explicit override" in row
@@ -530,7 +533,7 @@ function el(extra) { return Object.assign({ dataset: {}, value: "", hidden: true
   className: "", textContent: "", disabled: false, _h: null,
   addEventListener(ev, h) { this._h = h; } }, extra); }
 const els = {
-  polWrite: el({ dataset: { canPolicyWrite: "true", agent: "scout", crew: "vivy",
+  polWrite: el({ dataset: { canPolicyWrite: "true", agent: "scout", crew: "alpha",
                             model: "claude-sonnet-5" } }),
   polWriteTarget: el({ value: "WebFetch" }),
   polWriteDecision: el({ value: "allow" }),
@@ -565,5 +568,5 @@ def test_the_script_sends_all_public_crews_instead_of_crew_when_ticked():
 
 def test_the_script_sends_the_looked_up_crew_when_not_ticked():
     body = _run_write_js(all_checked=False)
-    assert body["crew"] == "vivy"
+    assert body["crew"] == "alpha"
     assert "all_public_crews" not in body

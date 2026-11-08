@@ -8,14 +8,19 @@ matching the server: a throwaway 1024-bit test keypair signs JWTs in-process and
 _jwks_key is monkeypatched to the test public key, so no network/real Access app.
 """
 import base64
+import datetime as dt
 import hashlib
+import inspect
 import json
 import re
 import time
+import types
 
 import pytest
 from fastapi.testclient import TestClient
 
+import design_system as ds
+import library_fake
 import server as srv
 # Identity primitives moved to access_identity (WS0.3). They resolve their own
 # module globals (TIERS, JWT_CONFIG, _jwks_cache), so a monkeypatch must target
@@ -378,7 +383,7 @@ def test_tailnet_identity_scope_comes_from_person_scope_called_with_its_login(
 
     def recording_scope(email):
         calls.append(email)
-        return frozenset({"vivy"})
+        return frozenset({"alpha"})
 
     monkeypatch.setattr(srv.library_client, "person_scope", recording_scope)
     _stub_whois(monkeypatch, "teammate@example.com")
@@ -590,12 +595,15 @@ def live_server(tmp_path, monkeypatch):
     monkeypatch.setattr(srv.activity_build, "live_html", lambda scope, whole_fleet: "ACTIVITY-LIVE")
     monkeypatch.setattr(srv.merge_queue_build, "live_html",
                         lambda scope, whole_fleet: "MERGEQUEUE-LIVE")
+    # `requested_product` (CQ·167, issue_01M5C9ZDJ14Y55B54XGM5RW5J6): the
+    # `?product=` query server.py now reads for these two routes and passes
+    # as a third positional argument.
     monkeypatch.setattr(srv.changelog_build, "changelog_live_html",
-                        lambda scope, whole_fleet: "CHANGELOG-LIVE")
+                        lambda scope, whole_fleet, requested_product=None: "CHANGELOG-LIVE")
     monkeypatch.setattr(srv.engineering_e2e_build, "live_html",
                         lambda scope, whole_fleet: "E2E-LIVE")
     monkeypatch.setattr(srv.release_notes_build, "live_html",
-                        lambda scope, whole_fleet: "RELEASENOTES-LIVE")
+                        lambda scope, whole_fleet, requested_product=None: "RELEASENOTES-LIVE")
     monkeypatch.setattr(srv.security_build, "live_html", lambda scope, whole_fleet: "SECURITY-LIVE")
     monkeypatch.setattr(srv.warrant_build, "live_html", lambda scope, whole_fleet: "WARRANT-LIVE")
     # Engineering pages carry __WHOAMI__ in their header (unlike the dashboards), so
@@ -766,10 +774,10 @@ def test_a_known_project_has_a_page_at_its_own_url(live_server, monkeypatch):
         return f"PROJECT-PAGE {name} __WHOAMI__"
 
     monkeypatch.setattr(srv.project_build, "detail_html", _detail)
-    code, text = _get(live_server, "/projects/vivy", "operator@example.com")
+    code, text = _get(live_server, "/projects/alpha", "operator@example.com")
     assert code == 200
-    assert seen["name"] == "vivy"
-    assert "PROJECT-PAGE vivy" in text
+    assert seen["name"] == "alpha"
+    assert "PROJECT-PAGE alpha" in text
     assert "__WHOAMI__" not in text  # identity substituted
 
 
@@ -786,7 +794,7 @@ def test_a_project_page_render_failure_is_a_500_not_a_stale_snapshot(live_server
         raise RuntimeError("gh down")
 
     monkeypatch.setattr(srv.project_build, "detail_html", _boom)
-    code, _ = _get(live_server, "/projects/vivy", "operator@example.com")
+    code, _ = _get(live_server, "/projects/alpha", "operator@example.com")
     assert code == 500
 
 
@@ -795,7 +803,7 @@ def test_a_project_page_leaks_nothing_to_a_contractor(live_server, monkeypatch):
     called = []
     monkeypatch.setattr(srv.project_build, "detail_html",
                         lambda name, scope, whole_fleet: called.append(name) or "PAGE")
-    code, _ = _get(live_server, "/projects/vivy", "emily@example.com")
+    code, _ = _get(live_server, "/projects/alpha", "emily@example.com")
     assert code == 404
     assert called == []
 
@@ -988,7 +996,7 @@ def test_dashboards_gate_fleet_figures_on_scope_not_role(live_server, tmp_path, 
     registry = tmp_path / "projects.json"
     registry.write_text(json.dumps({"_meta": {}, "_products": {}, "_scopes": {},
                                     "alpha": {}, "beta": {}}))
-    monkeypatch.setattr(srv.crew_registry, "REGISTRY", registry)
+    monkeypatch.setenv("PROJECTS_JSON", str(registry))
     scopes = {"admin@example.com": frozenset({"alpha"}),
               "member@example.com": frozenset({"alpha", "beta"})}
     monkeypatch.setattr(srv.library_client, "person_scope", lambda email: scopes[email])
@@ -1275,6 +1283,229 @@ def test_alerts_falls_back_with_the_render_header_too(live_server, monkeypatch):
     assert "RuntimeError: alerts data broken" in log
 
 
+# --- the saved copy says so ON THE PAGE, not only in a header -----------------
+#
+# CQ·163 (issue_01M57NS03XATJRWY5Q7H8W90DS). The header above is invisible to
+# whoever is reading the page: a fallback that failed at 09:00 and one that
+# failed a week ago both answer 200 with the last build's body, and nothing in
+# that body says so. Every route that can serve a saved copy now answers
+# through `server._serve_page`, which adds the banner and sets the header from
+# the same `stale` flag, so the two cannot disagree.
+
+SAVED_PAGE_STAMP = "2026-10-18 09:41 MST"
+# The banner element itself, not the bare class name: the class also appears
+# in COMPONENTS_CSS, which every page inlines, so a live page would match it.
+SAVED_COPY_BANNER = '<div class="saved-copy-banner"'
+
+# path -> the saved file that route serves when its live render throws. These
+# are the routes `handle_get` answers in a block of their own, which nothing
+# else in the server knows the fallback filename of.
+OWN_BLOCK_FALLBACK_ROUTES = (
+    ("/", "home.full.html"),
+    ("/engineering/issues", "issues.html"),
+    ("/crews", "crews.html"),
+    ("/archives", "signals.html"),
+    ("/archives/prs", "signals-prs.html"),
+    ("/archives/changelogs", "signals-changelogs.html"),
+    ("/reference", "engineering.html"),
+    ("/engineering/roster", "roster.html"),
+    ("/chart-house", "chart-house.html"),
+    ("/engineering/course", "course.html"),
+    ("/engineering/corrections", "corrections.html"),
+    ("/reference/arch-log", "engineering-arch-log.html"),
+    # CQ·160, issue_01M57NRMZSZW5B5VNWCM4HVZPV: project index
+    ("/projects", "projects.html"),
+)
+
+# The rest come from `server._scoped_pages`, the table the scoped block's own
+# dispatch indexes, so every route in `SCOPED_DASHBOARDS` and `SCOPED_ROUTES`
+# arrives here with its saved file and a route added to either tuple is walked
+# without anyone remembering to add it. Round 1 of this review left all
+# fifteen out, because the walk was kept by hand beside a count of
+# `stale = True` and neither could see them.
+FALLBACK_ROUTES = OWN_BLOCK_FALLBACK_ROUTES + tuple(
+    (path, page)
+    for path, (page, _render) in srv._scoped_pages(frozenset(), False).items())
+
+
+def test_every_scoped_route_has_a_saved_file_to_fall_back_to():
+    """The scoped block decides membership from the two tuples and then indexes
+    `_scoped_pages`, so a route in a tuple with no entry there raises KeyError
+    into a 500 on every request. Such a route also has no saved file, which is
+    the second reason the saved-copy walk below reads this table."""
+    assert (set(srv._scoped_pages(frozenset(), False))
+            == set(srv.SCOPED_DASHBOARDS) | set(srv.SCOPED_ROUTES))
+
+
+def _patch_every_live_render(monkeypatch, replacement):
+    """Replace every builder's page render with `replacement`, so each route's
+    live path is decided for all of them at once. Patched module by module
+    rather than route by route, so the walk below does not carry a second copy
+    of server.py's routing table to drift from: whatever renderer a route
+    calls, if it lives in a `*_build` module it is patched."""
+    for name, module in vars(srv).items():
+        if not name.endswith("_build") or not isinstance(module, types.ModuleType):
+            continue
+        for attr in dir(module):
+            if ("live_html" in attr or attr.endswith("_html")) and callable(getattr(module, attr)):
+                monkeypatch.setattr(module, attr, replacement)
+
+
+def _every_live_render_raises(monkeypatch):
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("Library unreachable")
+    _patch_every_live_render(monkeypatch, boom)
+
+
+def _every_live_render_answers(monkeypatch):
+    def page(*_args, **_kwargs):
+        return ds.page_shell(title="live", nav_html="", body="LIVE-PAGE")
+    _patch_every_live_render(monkeypatch, page)
+
+
+def _whole_fleet_scope(tmp_path, monkeypatch):
+    """A scope covering every registry project, so no route in the walk is
+    answered by a gate instead of its own render. `/reference/arch-log` renders
+    only for a whole-fleet scope, and the fixture's `{"*"}` sentinel is not
+    one (`crew_registry.covers_every_project` compares against the registry)."""
+    registry = tmp_path / "projects.json"
+    registry.write_text(json.dumps({"_meta": {}, "alpha": {}, "beta": {}}))
+    monkeypatch.setenv("PROJECTS_JSON", str(registry))
+    monkeypatch.setattr(srv.library_client, "person_scope",
+                        lambda email: frozenset({"alpha", "beta"}))
+
+
+def test_every_fallback_route_shows_the_banner_and_keeps_the_header(
+        live_server, tmp_path, monkeypatch):
+    _whole_fleet_scope(tmp_path, monkeypatch)
+    for _path, page in FALLBACK_ROUTES:
+        (srv.SITE / page).write_text(
+            ds.page_shell(title="saved", nav_html="", body=f"SAVED-{page}",
+                          rendered_at=SAVED_PAGE_STAMP),
+            encoding="utf-8")
+    _every_live_render_raises(monkeypatch)
+    for path, page in FALLBACK_ROUTES:
+        r = live_server.get(path, headers={srv.EMAIL_HEADER: "operator@example.com"})
+        assert r.status_code == 200, path
+        assert r.headers[srv.STALE_FALLBACK_HEADER] == "stale-fallback", path
+        assert f"SAVED-{page}" in r.text, path  # it is the saved page being served
+        assert SAVED_COPY_BANNER in r.text, path
+        # The banner dates the copy from that page's own footer stamp, not from
+        # the moment it was served.
+        assert f'data-saved-copy="{SAVED_PAGE_STAMP}"' in r.text, path
+        # Above the page it is marking, inside the content column.
+        assert r.text.index(SAVED_COPY_BANNER) < r.text.index(f"SAVED-{page}"), path
+
+
+def test_a_live_render_shows_no_saved_copy_banner(live_server, tmp_path, monkeypatch):
+    _whole_fleet_scope(tmp_path, monkeypatch)
+    _every_live_render_answers(monkeypatch)
+    for path, _page in FALLBACK_ROUTES:
+        r = live_server.get(path, headers={srv.EMAIL_HEADER: "operator@example.com"})
+        assert r.status_code == 200, path
+        assert srv.STALE_FALLBACK_HEADER not in r.headers, path
+        assert SAVED_COPY_BANNER not in r.text, path
+
+
+def test_a_saved_file_with_no_content_column_still_gets_the_banner(live_server, monkeypatch):
+    """The `live_server` fixture's saved files are bare strings, which is the
+    shape a hand-written fallback would have. There is no `page-wrap` for the
+    banner to sit inside, so it goes at the top of the file: a saved copy has
+    to say so however its file is shaped."""
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("home data broken")
+    monkeypatch.setattr(srv.home_build, "live_html", boom)
+    r = live_server.get("/", headers={srv.EMAIL_HEADER: "operator@example.com"})
+    assert r.text.startswith(SAVED_COPY_BANNER)
+    assert r.headers[srv.STALE_FALLBACK_HEADER] == "stale-fallback"
+
+
+class _SavedCopy:
+    """The saved page a route's fallback branch reads, from `_RecordingSite`."""
+
+    def __init__(self, page: str):
+        self.page = page
+
+    def read_text(self, **_kwargs) -> str:
+        return ds.page_shell(title="saved", nav_html="", body=f"SAVED-{self.page}",
+                             rendered_at=SAVED_PAGE_STAMP)
+
+
+class _RecordingSite:
+    """Stands in for `server.SITE` while the check below probes every route: it
+    answers every saved-page read, and records which page each route asked for.
+    A real site/ directory holds a file only for the routes whose build was
+    run, and the question here is which routes reach a fallback read at all, so
+    the answer must not depend on which saved copies a test happened to
+    write."""
+
+    def __init__(self):
+        self.pages: list[str] = []
+
+    def __truediv__(self, page: str) -> _SavedCopy:
+        self.pages.append(page)
+        return _SavedCopy(page)
+
+
+def _routes_handle_get_answers() -> set[str]:
+    """Every route `handle_get` claims as a page: the dispatch tables it
+    consults, plus every literal `path == "/…"` and `path in (...)` comparison
+    in its own source. tests/test_scope_route_walk.py finds routes through the
+    same three sources for the same reason, so a route added later is probed
+    here without being listed. A `path.startswith` prefix is the one shape
+    neither scan sees, and no such route serves a saved copy: every fallback
+    read in `handle_get` hangs off a literal route."""
+    source = inspect.getsource(srv.handle_get)
+    paths = set(srv._full_only_routes()) | set(srv.SCOPED_DASHBOARDS) | set(srv.SCOPED_ROUTES)
+    paths.update(re.findall(r'path == "([^"]+)"', source))
+    for tup in re.findall(r'path in \(([^)]*)\)', source):
+        paths.update(p for p in re.findall(r'"([^"]+)"', tup) if p.startswith("/"))
+    return paths
+
+
+def test_every_route_that_serves_a_saved_copy_is_walked(live_server, tmp_path, monkeypatch):
+    """A route with a fallback branch that is missing from `FALLBACK_ROUTES`
+    serves a saved copy no test in this file ever reads a banner off. Fifteen
+    routes were in that state, because the scoped block's one `stale = True`
+    stood for all fifteen while counting as one.
+
+    Counting the assignments cannot catch that: one branch serves three routes
+    (/archives and its two siblings, through a dict), one serves fifteen, and
+    the dispatcher beside them holds one with an empty table, so the two counts
+    agreed only because those errors cancelled. So this asks the routes
+    instead. Every route `handle_get` claims is probed with every live render
+    throwing and every saved-page read answered; a route that answers with the
+    stale header serves a saved copy, and its saved file must be one
+    `FALLBACK_ROUTES` walks."""
+    _whole_fleet_scope(tmp_path, monkeypatch)
+    site = _RecordingSite()
+    monkeypatch.setattr(srv, "SITE", site)
+    _every_live_render_raises(monkeypatch)
+    served: dict[str, str] = {}
+    for path in sorted(_routes_handle_get_answers()):
+        site.pages.clear()
+        try:
+            r = live_server.get(path, headers={srv.EMAIL_HEADER: "operator@example.com"})
+        except Exception:
+            # A route whose own code raises before reaching a fallback read
+            # (/activity/nodes reads a data file outside any try, for one) has
+            # no saved copy to name. fastapi's TestClient re-raises an unhandled
+            # handler exception rather than answering 500, so this is the one
+            # shape a non-page route takes here.
+            continue
+        if r.headers.get(srv.STALE_FALLBACK_HEADER) == "stale-fallback":
+            served[path] = site.pages[-1]
+    # The probe reaches the fallbacks at all, so an empty `unwalked` below means
+    # the walk is complete rather than that nothing was asked.
+    assert served, "no route answered from a saved copy — the probe is not reaching any fallback"
+    walked = {page for _path, page in FALLBACK_ROUTES}
+    unwalked = {path: page for path, page in served.items() if page not in walked}
+    assert not unwalked, (
+        "these routes serve a saved copy that FALLBACK_ROUTES does not walk, so "
+        "nothing checks its banner: "
+        + ", ".join(f"{path} -> {page}" for path, page in sorted(unwalked.items())))
+
+
 def test_a_no_fallback_render_failure_is_logged_too(live_server, monkeypatch):
     """The pages with no static fallback already answered a visible 500 — this
     pins that the exception itself is now logged too, not just the fact of a
@@ -1418,12 +1649,12 @@ def test_crew_runs_page_renders_live_and_passes_query_params_through(live_server
         return "CREW-RUNS-LIVE __WHOAMI__"
 
     monkeypatch.setattr(srv.crews_build, "runs_html", _runs_html)
-    r = live_server.get("/crews/runs?product=vivy&from=2026-08-01&to=2026-08-05",
+    r = live_server.get("/crews/runs?product=alpha&from=2026-08-01&to=2026-08-05",
                         headers={srv.EMAIL_HEADER: "operator@example.com"})
     assert r.status_code == 200
     assert "CREW-RUNS-LIVE" in r.text
     assert "__WHOAMI__" not in r.text
-    assert seen["query"] == {"product": "vivy", "from": "2026-08-01", "to": "2026-08-05"}
+    assert seen["query"] == {"product": "alpha", "from": "2026-08-01", "to": "2026-08-05"}
 
 
 def test_crew_runs_page_404s_for_contractor(live_server):
@@ -1456,12 +1687,12 @@ def test_policy_page_renders_live_and_passes_query_params_through(live_server, m
         return "POLICY-LIVE __WHOAMI__"
 
     monkeypatch.setattr(srv.policy_build, "live_html", _live_html)
-    r = live_server.get("/engineering/policy?agent=scout&crew=vivy&model=claude-sonnet-5",
+    r = live_server.get("/engineering/policy?agent=scout&crew=alpha&model=claude-sonnet-5",
                         headers={srv.EMAIL_HEADER: "operator@example.com"})
     assert r.status_code == 200
     assert "POLICY-LIVE" in r.text
     assert "__WHOAMI__" not in r.text
-    assert seen["query"] == {"agent": "scout", "crew": "vivy", "model": "claude-sonnet-5"}
+    assert seen["query"] == {"agent": "scout", "crew": "alpha", "model": "claude-sonnet-5"}
 
 
 def test_policy_page_404s_for_contractor(live_server):
@@ -1478,7 +1709,7 @@ def test_policy_page_render_failure_is_a_500_with_no_static_fallback(
     def boom(query, scope, whole_fleet):
         raise RuntimeError("Library unreachable")
     monkeypatch.setattr(srv.policy_build, "live_html", boom)
-    r = live_server.get("/engineering/policy?agent=scout&crew=vivy&model=claude-sonnet-5",
+    r = live_server.get("/engineering/policy?agent=scout&crew=alpha&model=claude-sonnet-5",
                         headers={srv.EMAIL_HEADER: "operator@example.com"})
     assert r.status_code == 500
     log = srv.ACCESS_LOG.read_text(encoding="utf-8")
@@ -1513,14 +1744,69 @@ def test_render_log_cannot_be_forged_with_embedded_control_characters(live_serve
     assert "boom\tINJECTED" not in log
 
 
-def test_tech_debt_route_is_gone(live_server):
-    # The tech-debt dashboard was retired (issue_01M2HY3K2SWV10VGZFRWJD34RS):
-    # its source counted open GitHub issues, which no longer exist now that
-    # work items live in the Library queue, so 404 for every tier, not just
-    # the contractor bundle.
-    for email in ("operator@example.com", "emily@example.com"):
-        code, body = _get(live_server, "/tech-debt", email=email)
-        assert code == 404 and "LIVE" not in body
+def _seed_two_debt_projects(monkeypatch):
+    """A stubbed Library with one open correction per project, the second
+    project's named so a leak is unmistakable. Ages are relative to now, so a
+    fixed past date cannot drift out of the page's own age bands."""
+    library_fake.patch(monkeypatch)
+    library_fake.seed_corrections_queue("alpha")
+    library_fake.seed_corrections_queue("beta")
+    now = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+    library_fake.seed_issue(
+        id="issue_alpha_high", product="alpha", title="Alpha high correction",
+        severity="high", parent_id="alpha",
+        created_at=now - dt.timedelta(days=40))
+    library_fake.seed_issue(
+        id="issue_alpha_low", product="alpha", title="Alpha low correction",
+        severity="low", parent_id="alpha",
+        created_at=now - dt.timedelta(days=2))
+    library_fake.seed_issue(
+        id="issue_beta_high", product="beta", title="Beta high correction",
+        severity="high", parent_id="beta",
+        created_at=now - dt.timedelta(days=5))
+
+
+def test_tech_debt_route_reports_the_librarys_open_corrections(live_server, monkeypatch):
+    """CQ·164 (issue_01M57NS4ZPTBGG1QCMXX5YCPXF): the dashboard the retired
+    GitHub-issue page left 404ing, rebuilt on the Library's corrections queue.
+    The figures are asserted against a stubbed Library — the figures, the
+    named oldest item, and the render time — and the contractor still gets a
+    plain 404, since a queue count names projects."""
+    _seed_two_debt_projects(monkeypatch)
+    library_fake.seed_person_scope("operator@example.com", frozenset({"alpha"}))
+    code, body = _get(live_server, "/tech-debt", email="operator@example.com")
+    assert code == 200, body[:200]
+    assert "2 open" in body
+    assert "Alpha high correction" in body          # the oldest is named
+    assert "Alpha low correction" not in body       # the rest are counted, not listed
+    assert "/engineering/issues/issue_alpha_high" in body
+    assert "40d" in body                            # ... with its age
+    assert re.search(r'data-rendered-at="\d{4}-\d{2}-\d{2} \d{2}:\d{2} MST"', body), (
+        "a live page must state when it rendered")
+    code, body = _get(live_server, "/tech-debt", email="emily@example.com")
+    assert code == 404 and "correction" not in body.lower()
+
+
+def test_tech_debt_route_is_scoped_to_the_viewers_projects(live_server, monkeypatch):
+    """A project outside the viewer's scope is absent from the figures and
+    from the page. The second half is the positive control: the SAME route,
+    rendered for a viewer whose scope now covers both projects, does show the
+    second one — so the absence above is the scope filter at work."""
+    _seed_two_debt_projects(monkeypatch)
+    library_fake.seed_person_scope("operator@example.com", frozenset({"alpha"}))
+    code, body = _get(live_server, "/tech-debt", email="operator@example.com")
+    assert code == 200
+    assert "Alpha high correction" in body
+    assert "2 open" in body
+    assert "Beta high correction" not in body
+    assert "issue_beta_high" not in body
+    assert "3 open" not in body
+
+    library_fake.seed_person_scope("operator@example.com", frozenset({"alpha", "beta"}))
+    code, body = _get(live_server, "/tech-debt", email="operator@example.com")
+    assert code == 200
+    assert "Beta high correction" in body
+    assert "3 open" in body
 
 
 def test_split_dashboards_hidden_from_contractor(live_server):
@@ -1607,7 +1893,7 @@ def test_an_administrators_resolved_scope_is_whatever_the_library_returns_for_th
 
     def recording_scope(email):
         calls.append(email)
-        return frozenset({"vivy", "constance", "convivy-orient"})  # "every project"
+        return frozenset({"alpha", "beta", "convivy-orient"})  # "every project"
 
     monkeypatch.setattr(srv.library_client, "person_scope", recording_scope)
     code, _ = _get(live_server, "/", email="operator@example.com")
@@ -1624,7 +1910,7 @@ def test_scope_line_shows_the_viewers_own_projects_sorted(live_server, tmp_path,
     registry project, since their scope doesn't cover "gamma" too."""
     registry = tmp_path / "projects.json"
     registry.write_text(json.dumps({"alpha": {}, "beta": {}, "gamma": {}}))
-    monkeypatch.setattr(srv.crew_registry, "REGISTRY", registry)
+    monkeypatch.setenv("PROJECTS_JSON", str(registry))
     monkeypatch.setattr(srv.library_client, "person_scope",
                         lambda email: frozenset({"beta", "alpha"}))
     monkeypatch.setattr(srv.chart_house_build, "live_html",
@@ -1639,7 +1925,7 @@ def test_scope_line_reads_all_projects_when_scope_covers_the_registry(
         live_server, tmp_path, monkeypatch):
     registry = tmp_path / "projects.json"
     registry.write_text(json.dumps({"alpha": {}, "beta": {}}))
-    monkeypatch.setattr(srv.crew_registry, "REGISTRY", registry)
+    monkeypatch.setenv("PROJECTS_JSON", str(registry))
     monkeypatch.setattr(srv.library_client, "person_scope",
                         lambda email: frozenset({"alpha", "beta"}))
     monkeypatch.setattr(srv.chart_house_build, "live_html",
@@ -1714,7 +2000,7 @@ def test_scope_line_is_filled_on_every_full_tier_route(live_server, tmp_path, mo
     construction rather than by remembering to wire it."""
     registry = tmp_path / "projects.json"
     registry.write_text(json.dumps({"alpha": {}, "beta": {}, "gamma": {}}))
-    monkeypatch.setattr(srv.crew_registry, "REGISTRY", registry)
+    monkeypatch.setenv("PROJECTS_JSON", str(registry))
     monkeypatch.setattr(srv.library_client, "person_scope",
                         lambda email: frozenset({"alpha", "beta"}))
     stub = "PAGE __WHOAMI__ __SCOPE_LINE__"
@@ -1745,6 +2031,7 @@ def test_scope_line_is_filled_on_every_full_tier_route(live_server, tmp_path, mo
         (srv.velocity_build, "live_html"),
         (srv.code_health_build, "live_html"),
         (srv.alerts_build, "live_html"),
+        (srv.tech_debt_build, "live_html"),
         (srv.chart_house_build, "live_html"),
         (srv.issue_build, "live_html"),
         (srv.issue_build, "live_html_course"),
@@ -1786,6 +2073,7 @@ def test_empty_scope_gets_the_dedicated_page_on_every_full_tier_route(live_serve
         (srv.release_notes_build, "live_html"), (srv.crews_build, "live_html"),
         (srv.dashboard_build, "spending_live_html"), (srv.velocity_build, "live_html"),
         (srv.code_health_build, "live_html"), (srv.alerts_build, "live_html"),
+        (srv.tech_debt_build, "live_html"),
         (srv.chart_house_build, "live_html"), (srv.issue_build, "live_html"),
         (srv.issue_build, "live_html_course"), (srv.issue_build, "live_html_blockers"),
         (srv.issue_build, "live_html_corrections"), (srv.crews_build, "runs_html"),
@@ -1804,7 +2092,7 @@ def test_scope_line_is_filled_on_every_dynamic_id_page(live_server, monkeypatch)
     "the item page" the spec calls out by name) sit outside both canonical
     route tables, so the walk above can't reach them; pinned here instead."""
     monkeypatch.setattr(srv.library_client, "person_scope",
-                        lambda email: frozenset({"alpha", "beta"}))
+                        lambda email: frozenset({"placeholder-one", "placeholder-two"}))
     stub = "ITEM-PAGE __WHOAMI__ __SCOPE_LINE__"
     monkeypatch.setattr(srv.issue_build, "detail_html", lambda item_id, scope: stub)
     monkeypatch.setattr(srv.signals_build, "detail_html", lambda signal_id, **kw: stub)
@@ -1814,11 +2102,11 @@ def test_scope_line_is_filled_on_every_dynamic_id_page(live_server, monkeypatch)
                         lambda name, scope, whole_fleet: stub)
 
     for path in ("/engineering/issues/issue_01ABC", "/archives/sig_01ABC",
-                 "/reference/doc/proj/kind/doc-1", "/projects/vivy"):
+                 "/reference/doc/proj/kind/doc-1", "/projects/alpha"):
         code, text = _get(live_server, path, "operator@example.com")
         assert code == 200, path
         assert "__SCOPE_LINE__" not in text, f"{path} left the scope token unsubstituted"
-        assert "alpha, beta" in text, f"{path} did not show the viewer's scope"
+        assert "placeholder-one, placeholder-two" in text, f"{path} did not show the viewer's scope"
 
 
 def test_no_identity_refused(live_server):
@@ -2027,13 +2315,20 @@ _MOVED_OUT_OF_FULL_ONLY_ROUTES = {"/spending", "/velocity", "/health", "/alerts"
                                   "/engineering/e2e", "/engineering/changelog",
                                   "/engineering/merge-queue",
                                   "/products/release-notes", "/reference/briefings",
+                                  # CQ·164, issue_01M57NS4ZPTBGG1QCMXX5YCPXF:
+                                  "/tech-debt",
                                   # Pre-existing gap this set never closed (E19·2,
                                   # issue_01M35K5AB4PRTJ71DMQW7Q4D3B, noted but not
                                   # fixed in PR #375's own body): these four left
                                   # `_full_only_routes()` for the same reason at
                                   # E19·2, but were never added here.
                                   "/engineering/issues", "/chart-house",
-                                  "/engineering/course", "/engineering/corrections"}
+                                  "/engineering/course", "/engineering/corrections",
+                                  # CQ·160, issue_01M57NRMZSZW5B5VNWCM4HVZPV: both
+                                  # left `_full_only_routes()` for the same reason
+                                  # as the entries above — each needs the viewer's
+                                  # own scope, which that dispatcher can't pass.
+                                  "/projects", "/crews/runs"}
 
 
 def _overview_card_hrefs():
@@ -2095,6 +2390,21 @@ def test_nav_component_contractor_dashboards_and_chart_house_substrips():
         for leaked in ("/spending", "/velocity", "/kb",
                        "/products/release-notes", "/overview"):
             assert f'href="{leaked}"' not in html, f"contractor nav leaked {leaked} on {page}"
+
+
+def test_cq160_nav_entries_appear_in_their_subnavs_for_a_full_tier_viewer():
+    """CQ·160 (revise round 2): the two nav entries this change added —
+    "Projects" in the Chart House subnav and "Past runs" in the Crews
+    subnav — had no test pinning them. Reverting just the two tuples passed
+    the whole suite. This test renders each subnav for a full-tier viewer
+    and asserts each entry's href and label are present."""
+    import design_system as ds
+    chart_html = ds.nav_component("/chart-house", "full")
+    assert 'href="/projects"' in chart_html
+    assert ">Projects</a>" in chart_html
+    crews_html = ds.nav_component("/crews", "full")
+    assert 'href="/crews/runs"' in crews_html
+    assert ">Past runs</a>" in crews_html
 
 
 def test_no_full_only_route_ever_appears_in_a_contractor_nav():
@@ -2566,7 +2876,7 @@ def test_arch_log_renders_only_for_a_whole_fleet_scope(live_server, tmp_path, mo
     A partial scope gets the contractor's 404, body included."""
     registry = tmp_path / "projects.json"
     registry.write_text(json.dumps({"_meta": {}, "alpha": {}, "beta": {}}))
-    monkeypatch.setattr(srv.crew_registry, "REGISTRY", registry)
+    monkeypatch.setenv("PROJECTS_JSON", str(registry))
     contractor = live_server.get("/reference/arch-log", headers={srv.EMAIL_HEADER: "emily@example.com"})
     assert contractor.status_code == 404
 

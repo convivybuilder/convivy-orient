@@ -58,7 +58,7 @@ def _no_courses(monkeypatch):
 
 
 def _mk(**kw):
-    base = dict(id=control_db.new_issue_id(), product="vivy", title="t", body="",
+    base = dict(id=control_db.new_issue_id(), product="alpha", title="t", body="",
                 created_by="overnight-orchestrator")
     base.update(kw)
     return base
@@ -107,7 +107,7 @@ def test_active_unworked_before_outcomes_oldest_first(db):
     # human view. All three items are plain bugs with no parent, so all three
     # are corrections in the same product.
     library_fake.seed_issue(**_mk(title="PROPEN-0600", state="pr-open", created_at=dt.datetime(2026, 7, 16, 6),
-              refs={"pr": 5, "url": "https://github.com/convivy/vivy/pull/5"}))
+              refs={"pr": 5, "url": "https://github.com/convivy/alpha/pull/5"}))
     library_fake.seed_issue(**_mk(title="OPEN-0800", state="open", created_at=dt.datetime(2026, 7, 16, 8)))
     library_fake.seed_issue(**_mk(title="CLAIMED-1000", state="claimed", claimed_by="agent-x",
               created_at=dt.datetime(2026, 7, 16, 10)))
@@ -121,10 +121,10 @@ def test_active_unworked_before_outcomes_oldest_first(db):
 
 def test_outcome_banner_links(db):
     library_fake.seed_issue(**_mk(title="PR-BUG", state="pr-open",
-              refs={"pr": 42, "url": "https://github.com/convivy/vivy/pull/42"}))
+              refs={"pr": 42, "url": "https://github.com/convivy/alpha/pull/42"}))
     html = issue_build.live_html_corrections()
     assert "PR open" in html
-    assert '<a href="https://github.com/convivy/vivy/pull/42"' in html and "PR #42" in html
+    assert '<a href="https://github.com/convivy/alpha/pull/42"' in html and "PR #42" in html
 
 
 def test_human_action_is_wontdo_not_claim(db):
@@ -181,7 +181,7 @@ def test_agent_free_text_is_escaped(db):
 
 
 def test_attribute_context_escaping(db):
-    evil = 'vivy" onmouseover="alert(1)'
+    evil = 'alpha" onmouseover="alert(1)'
     library_fake.seed_issue(**_mk(product=evil, title="attr-ctx"))
     html = issue_build.live_html_corrections()
     assert 'onmouseover="alert(1)' not in html
@@ -189,10 +189,10 @@ def test_attribute_context_escaping(db):
 
 
 def test_url_ref_renders_a_link_but_text_ref_does_not(db):
-    library_fake.seed_issue(**_mk(title="withrefs", refs={"pr": "https://github.com/convivy/vivy/pull/9",
+    library_fake.seed_issue(**_mk(title="withrefs", refs={"pr": "https://github.com/convivy/alpha/pull/9",
                                       "file": "server.py"}))
     html = issue_build.live_html_corrections()
-    assert 'href="https://github.com/convivy/vivy/pull/9"' in html
+    assert 'href="https://github.com/convivy/alpha/pull/9"' in html
     assert "file: server.py" in html
 
 
@@ -250,11 +250,11 @@ def test_outcome_banner_pr_url_with_control_character_renders_no_link(db):
 
 
 def test_product_chips_reflect_open_and_claimed(db):
-    library_fake.seed_issue(**_mk(product="vivy", title="v1"))
-    library_fake.seed_issue(**_mk(product="vivy", title="v2"))
-    library_fake.seed_issue(**_mk(product="constance", title="c1"))
+    library_fake.seed_issue(**_mk(product="alpha", title="v1"))
+    library_fake.seed_issue(**_mk(product="alpha", title="v2"))
+    library_fake.seed_issue(**_mk(product="beta", title="c1"))
     html = issue_build.live_html_corrections()
-    assert 'data-prod="vivy"' in html and 'data-prod="constance"' in html
+    assert 'data-prod="alpha"' in html and 'data-prod="beta"' in html
 
 
 def test_page_carries_log_issue_form_and_gate(db):
@@ -310,10 +310,10 @@ def test_nav_marks_current_page(db):
 
 def test_a_live_claim_shows_who_holds_it_and_when_it_frees(db):
     library_fake.seed_issue(**_mk(title="held", state=control_db.ISSUE_CLAIMED,
-              claimed_by="co-vivy-0930", claimed_at=control_db.utcnow()))
+              claimed_by="co-alpha-0930", claimed_at=control_db.utcnow()))
     html = issue_build.live_html_corrections()
     assert "In flight" in html
-    assert "co-vivy-0930" in html
+    assert "co-alpha-0930" in html
     assert "frees in" in html
 
 
@@ -503,7 +503,7 @@ def test_every_diagnosis_survives_truncation(db):
 # under it the bug is invisible.
 
 
-def _fill_active(n, product="vivy", state="open"):
+def _fill_active(n, product="alpha", state="open"):
     for i in range(n):
         library_fake.seed_issue(**_mk(title=f"ISSUE-{i:04d}", product=product, state=state,
                   created_at=dt.datetime(2026, 7, 16) + dt.timedelta(minutes=i)))
@@ -552,11 +552,11 @@ def test_per_product_chip_counts_are_not_short_when_the_queue_is_capped(db):
     fell past the cap silently showed a smaller number with nothing saying so.
     Both counts here are under _QUEUE_LIMIT, so neither project's own queue is
     capped — the chip and the per-project section header must still agree."""
-    _fill_active(80, product="vivy")
-    _fill_active(40, product="sous-chef")
+    _fill_active(80, product="alpha")
+    _fill_active(40, product="epsilon")
     html = issue_build.live_html_corrections()
-    assert ">vivy <span class=\"n\">80</span>" in html
-    assert ">sous-chef <span class=\"n\">40</span>" in html
+    assert ">alpha <span class=\"n\">80</span>" in html
+    assert ">epsilon <span class=\"n\">40</span>" in html
 
 
 def test_under_the_cap_nothing_changes(db):
@@ -930,34 +930,34 @@ def _click_chip(html: str, target_prod: str) -> dict:
 
 
 def test_the_chip_filter_hides_a_project_it_stranded_on_epics(db):
-    library_fake.seed_issue(**_mk(title="EPIC-vivy", type="epic", product="vivy", state="open"))
-    library_fake.seed_issue(**_mk(title="EPIC-selector", type="epic", product="selector", state="open"))
-    result = _click_chip(issue_build.live_html(), "selector")
+    library_fake.seed_issue(**_mk(title="EPIC-alpha", type="epic", product="alpha", state="open"))
+    library_fake.seed_issue(**_mk(title="EPIC-delta", type="epic", product="delta", state="open"))
+    result = _click_chip(issue_build.live_html(), "delta")
     groups = {g["prod"]: g["hidden"] for g in result["projGroups"]}
-    assert groups == {"selector": False, "vivy": True}, (
-        "filtering to selector must hide vivy's whole section — header and "
+    assert groups == {"delta": False, "alpha": True}, (
+        "filtering to delta must hide alpha's whole section — header and "
         f"all — not just its cards: {result}")
 
 
 def test_the_chip_filter_hides_a_project_it_stranded_on_corrections(db):
-    library_fake.seed_issue(**_mk(title="CORR-vivy", product="vivy", state="open"))
-    library_fake.seed_issue(**_mk(title="CORR-selector", product="selector", state="open"))
-    result = _click_chip(issue_build.live_html_corrections(), "selector")
+    library_fake.seed_issue(**_mk(title="CORR-alpha", product="alpha", state="open"))
+    library_fake.seed_issue(**_mk(title="CORR-delta", product="delta", state="open"))
+    result = _click_chip(issue_build.live_html_corrections(), "delta")
     groups = {g["prod"]: g["hidden"] for g in result["projGroups"]}
-    assert groups == {"selector": False, "vivy": True}, (
-        "filtering to selector must hide vivy's whole section — header and "
+    assert groups == {"delta": False, "alpha": True}, (
+        "filtering to delta must hide alpha's whole section — header and "
         f"all — not just its cards: {result}")
 
 
 def test_the_chip_filter_leaves_the_matching_project_fully_visible(db):
     """The fix must not over-hide: a matching project's cards stay shown, and
     switching to "all" must un-hide everything again."""
-    library_fake.seed_issue(**_mk(title="EPIC-vivy", type="epic", product="vivy", state="open"))
-    library_fake.seed_issue(**_mk(title="EPIC-selector", type="epic", product="selector", state="open"))
+    library_fake.seed_issue(**_mk(title="EPIC-alpha", type="epic", product="alpha", state="open"))
+    library_fake.seed_issue(**_mk(title="EPIC-delta", type="epic", product="delta", state="open"))
     html = issue_build.live_html()
     result = _click_chip(html, "all")
     groups = {g["prod"]: g["hidden"] for g in result["projGroups"]}
-    assert groups == {"selector": False, "vivy": False}
+    assert groups == {"delta": False, "alpha": False}
 
 
 # --- the two lanes ---------------------------------------------------------------
@@ -986,7 +986,7 @@ def _lane_sample():
         _mk(title="LANE-plainfeature", type="feature", needs="agent", state="open"),
         _mk(title="LANE-operatorfeature", type="feature", needs="operator", state="open"),
         _mk(title="LANE-operatorbug", type="bug", needs="operator", state="pr-open",
-            refs={"pr": 1, "url": "https://github.com/convivy/vivy/pull/1"}),
+            refs={"pr": 1, "url": "https://github.com/convivy/alpha/pull/1"}),
         _mk(title="LANE-nullcolumns", type=None, needs=None, state="open"),
     ]
 
@@ -1080,11 +1080,11 @@ def test_terminal_issues_are_in_no_lane(db):
 
 
 def test_lane_pages_carry_a_render_stamp_and_product_chips(db):
-    library_fake.seed_issue(**_mk(title="LANE-operatortask", product="sous-chef", type="task",
+    library_fake.seed_issue(**_mk(title="LANE-operatortask", product="epsilon", type="task",
               needs="operator", state="open"))
     html = issue_build.live_html_blockers()
     assert 'class="render-stamp"' in html
-    assert "sous-chef" in html
+    assert "epsilon" in html
 
 
 def test_empty_lane_says_so(db):
@@ -1174,15 +1174,15 @@ def test_a_work_item_whose_parent_is_its_corrections_queue_is_a_correction(db):
     The order assertion is what fails without the queue lookup: the dangling-
     parent fallback would still file QUEUED-work under Corrections, but after
     every member, so the older item would sort last."""
-    library_fake.seed_corrections_queue("cq_vivy")
-    library_fake.seed_issue(**_mk(title="QUEUED-work", state="open", parent_id="cq_vivy",
+    library_fake.seed_corrections_queue("cq_alpha")
+    library_fake.seed_issue(**_mk(title="QUEUED-work", state="open", parent_id="cq_alpha",
                                   created_at=dt.datetime(2026, 7, 1)))
     library_fake.seed_issue(**_mk(title="NULL-work", state="open",
                                   created_at=dt.datetime(2026, 7, 2)))
     corrections = issue_build.live_html_corrections()
     epics = issue_build.live_html()
     assert "QUEUED-work" in corrections and "NULL-work" in corrections
-    assert "QUEUED-work" not in epics and "cq_vivy" not in epics
+    assert "QUEUED-work" not in epics and "cq_alpha" not in epics
     _, children_by_parent, queued = issue_build._epic_and_correction_groups(
         library_client.list_issue_items())
     assert children_by_parent == {}
@@ -1242,22 +1242,22 @@ def test_a_child_whose_parent_id_names_a_non_epic_falls_back_to_corrections(db):
 
 
 def test_epics_are_grouped_by_project(db):
-    library_fake.seed_issue(**_mk(title="EPIC-vivy", type="epic", product="vivy", state="open"))
-    library_fake.seed_issue(**_mk(title="EPIC-selector", type="epic", product="selector", state="open"))
+    library_fake.seed_issue(**_mk(title="EPIC-alpha", type="epic", product="alpha", state="open"))
+    library_fake.seed_issue(**_mk(title="EPIC-delta", type="epic", product="delta", state="open"))
     html = issue_build.live_html()
-    assert '<h2 class="proj-head">vivy' in html
-    assert '<h2 class="proj-head">selector' in html
+    assert '<h2 class="proj-head">alpha' in html
+    assert '<h2 class="proj-head">delta' in html
     # each epic sits after its own project's header, not the other one's
-    assert html.index('<h2 class="proj-head">vivy') < html.index("EPIC-vivy")
-    assert html.index('<h2 class="proj-head">selector') < html.index("EPIC-selector")
+    assert html.index('<h2 class="proj-head">alpha') < html.index("EPIC-alpha")
+    assert html.index('<h2 class="proj-head">delta') < html.index("EPIC-delta")
 
 
 def test_corrections_are_grouped_by_project(db):
-    library_fake.seed_issue(**_mk(title="CORR-vivy", product="vivy", state="open"))
-    library_fake.seed_issue(**_mk(title="CORR-selector", product="selector", state="open"))
+    library_fake.seed_issue(**_mk(title="CORR-alpha", product="alpha", state="open"))
+    library_fake.seed_issue(**_mk(title="CORR-delta", product="delta", state="open"))
     html = issue_build.live_html_corrections()
-    assert '<h2 class="proj-head">vivy' in html
-    assert '<h2 class="proj-head">selector' in html
+    assert '<h2 class="proj-head">alpha' in html
+    assert '<h2 class="proj-head">delta' in html
 
 
 def test_an_epic_with_no_active_children_says_so(db):
@@ -1277,23 +1277,23 @@ def _epic_toggle(html: str) -> str:
 
 
 def test_a_cross_product_relation_renders_under_its_epic_and_is_counted(db):
-    epic_id = library_fake.seed_issue(**_mk(title="EPIC-ledger", type="epic", product="vivy", state="open"))
-    library_fake.seed_issue(**_mk(title="SAME-child", product="vivy", parent_id=epic_id, state="open"))
-    other_id = library_fake.seed_issue(**_mk(title="XPROD-related", product="selector", state="open"))
+    epic_id = library_fake.seed_issue(**_mk(title="EPIC-ledger", type="epic", product="alpha", state="open"))
+    library_fake.seed_issue(**_mk(title="SAME-child", product="alpha", parent_id=epic_id, state="open"))
+    other_id = library_fake.seed_issue(**_mk(title="XPROD-related", product="delta", state="open"))
     library_fake.seed_related_item(epic_id=epic_id, item_id=other_id)
     toggle = _epic_toggle(issue_build.live_html())
     assert "SAME-child" in toggle
     assert "XPROD-related" in toggle
     assert "2 work items" in toggle
-    assert '<span class="badge xprod">from selector</span>' in toggle
+    assert '<span class="badge xprod">from delta</span>' in toggle
     # the same-product child is not marked as from another product
     assert toggle.count("badge xprod") == 1
 
 
 def test_a_same_product_relation_does_not_list_its_item_twice(db):
-    epic_id = library_fake.seed_issue(**_mk(title="EPIC-ledger", type="epic", product="vivy", state="open"))
-    same_id = library_fake.seed_issue(**_mk(title="SAME-child", product="vivy", parent_id=epic_id, state="open"))
-    other_id = library_fake.seed_issue(**_mk(title="XPROD-related", product="selector", state="open"))
+    epic_id = library_fake.seed_issue(**_mk(title="EPIC-ledger", type="epic", product="alpha", state="open"))
+    same_id = library_fake.seed_issue(**_mk(title="SAME-child", product="alpha", parent_id=epic_id, state="open"))
+    other_id = library_fake.seed_issue(**_mk(title="XPROD-related", product="delta", state="open"))
     library_fake.seed_related_item(epic_id=epic_id, item_id=same_id)
     library_fake.seed_related_item(epic_id=epic_id, item_id=other_id)
     toggle = _epic_toggle(issue_build.live_html())
@@ -1302,10 +1302,10 @@ def test_a_same_product_relation_does_not_list_its_item_twice(db):
 
 
 def test_a_cross_product_item_takes_its_lane_place_among_the_children(db):
-    epic_id = library_fake.seed_issue(**_mk(title="EPIC-ledger", type="epic", product="vivy", state="open"))
-    library_fake.seed_issue(**_mk(title="SAME-newer", product="vivy", parent_id=epic_id, state="open",
+    epic_id = library_fake.seed_issue(**_mk(title="EPIC-ledger", type="epic", product="alpha", state="open"))
+    library_fake.seed_issue(**_mk(title="SAME-newer", product="alpha", parent_id=epic_id, state="open",
                                   created_at=dt.datetime(2026, 7, 2)))
-    other_id = library_fake.seed_issue(**_mk(title="XPROD-older", product="selector", state="open",
+    other_id = library_fake.seed_issue(**_mk(title="XPROD-older", product="delta", state="open",
                                              created_at=dt.datetime(2026, 6, 1)))
     library_fake.seed_related_item(epic_id=epic_id, item_id=other_id)
     toggle = _epic_toggle(issue_build.live_html())
@@ -1313,8 +1313,8 @@ def test_a_cross_product_item_takes_its_lane_place_among_the_children(db):
 
 
 def test_a_failed_relation_read_says_the_cross_product_list_is_unavailable(db, monkeypatch):
-    epic_id = library_fake.seed_issue(**_mk(title="EPIC-ledger", type="epic", product="vivy", state="open"))
-    library_fake.seed_issue(**_mk(title="SAME-child", product="vivy", parent_id=epic_id, state="open"))
+    epic_id = library_fake.seed_issue(**_mk(title="EPIC-ledger", type="epic", product="alpha", state="open"))
+    library_fake.seed_issue(**_mk(title="SAME-child", product="alpha", parent_id=epic_id, state="open"))
 
     def library_down(epic):
         raise OSError("library unreachable")
@@ -1327,7 +1327,7 @@ def test_a_failed_relation_read_says_the_cross_product_list_is_unavailable(db, m
 
 def test_a_read_that_starts_inside_the_budget_runs_and_the_next_does_not_start(db, monkeypatch):
     for name in ("EPIC-a", "EPIC-b", "EPIC-c"):
-        library_fake.seed_issue(**_mk(title=name, type="epic", product="vivy", state="open"))
+        library_fake.seed_issue(**_mk(title=name, type="epic", product="alpha", state="open"))
     now = [0.0]
     reads = []
 
@@ -1348,8 +1348,8 @@ def test_a_read_that_starts_inside_the_budget_runs_and_the_next_does_not_start(d
 
 
 def test_a_stalled_library_stops_starting_relation_reads_after_one_timeout(db, monkeypatch):
-    library_fake.seed_issue(**_mk(title="EPIC-a", type="epic", product="vivy", state="open"))
-    library_fake.seed_issue(**_mk(title="EPIC-b", type="epic", product="vivy", state="open"))
+    library_fake.seed_issue(**_mk(title="EPIC-a", type="epic", product="alpha", state="open"))
+    library_fake.seed_issue(**_mk(title="EPIC-b", type="epic", product="alpha", state="open"))
     now = [0.0]
     reads = []
 
@@ -1367,8 +1367,8 @@ def test_a_stalled_library_stops_starting_relation_reads_after_one_timeout(db, m
 
 
 def test_an_item_that_names_the_epic_in_its_body_is_not_related_to_it(db):
-    epic_id = library_fake.seed_issue(**_mk(title="EPIC-ledger", type="epic", product="vivy", state="open"))
-    library_fake.seed_issue(**_mk(title="MENTIONER", product="selector", state="open",
+    epic_id = library_fake.seed_issue(**_mk(title="EPIC-ledger", type="epic", product="alpha", state="open"))
+    library_fake.seed_issue(**_mk(title="MENTIONER", product="delta", state="open",
                                   body=f"this belongs to {epic_id}"))
     toggle = _epic_toggle(issue_build.live_html())
     assert "No open work items" in toggle
@@ -1409,7 +1409,7 @@ def _entry(issue_id, state, maturity=None, title=None):
 def test_course_page_renders_entries_in_sequence(db, monkeypatch):
     """`entries` order is the one thing a Course carries that its issues do
     not — rendered as given, never re-sorted or grouped."""
-    course = _course("course_1", "vivy", "Vivy's course", entries=[
+    course = _course("course_1", "alpha", "Alpha's course", entries=[
         _entry("issue_a", "fixed", title="FIRST-STEP"),
         _entry("issue_b", "open", maturity="approved", title="SECOND-STEP"),
         _entry("issue_c", "open", maturity="proposed", title="THIRD-STEP"),
@@ -1418,7 +1418,7 @@ def test_course_page_renders_entries_in_sequence(db, monkeypatch):
     monkeypatch.setattr(library_client, "get_course", lambda cid: course)
     html = issue_build.live_html_course()
     assert html.index("FIRST-STEP") < html.index("SECOND-STEP") < html.index("THIRD-STEP")
-    assert '<h2 class="proj-head">vivy' in html
+    assert '<h2 class="proj-head">alpha' in html
     assert 'href="/engineering/issues/issue_a"' in html
 
 
@@ -1427,16 +1427,16 @@ def test_course_section_carries_the_anchor_id_other_pages_link_to(db, monkeypatc
     sign-off" chip, counts line and signals line all resolve their href
     against (issue_01M17W7DRZ3FJNRNYCAQFWHS1F) — this pins the id it depends
     on so the two modules can't drift apart."""
-    course = _course("course_1", "vivy", "Vivy's course", entries=[_entry("issue_a", "open")])
+    course = _course("course_1", "alpha", "Alpha's course", entries=[_entry("issue_a", "open")])
     monkeypatch.setattr(library_client, "list_courses", lambda **k: [course])
     monkeypatch.setattr(library_client, "get_course", lambda cid: course)
     html = issue_build.live_html_course()
-    assert 'id="course-vivy"' in html
-    assert issue_build.course_anchor_href("vivy") == "/engineering/course#course-vivy"
+    assert 'id="course-alpha"' in html
+    assert issue_build.course_anchor_href("alpha") == "/engineering/course#course-alpha"
 
 
 def test_course_step_classes_reflect_state_and_maturity(db, monkeypatch):
-    course = _course("course_1", "vivy", "t", entries=[
+    course = _course("course_1", "alpha", "t", entries=[
         _entry("issue_a", "fixed", title="DONE-STEP"),
         _entry("issue_b", "open", maturity="approved", title="APPROVED-STEP"),
         _entry("issue_c", "open", maturity="proposed", title="PROPOSED-STEP"),
@@ -1452,7 +1452,7 @@ def test_course_step_classes_reflect_state_and_maturity(db, monkeypatch):
 
 
 def test_course_page_has_no_resolve_action(db, monkeypatch):
-    course = _course("course_1", "vivy", "t", entries=[_entry("issue_a", "open")])
+    course = _course("course_1", "alpha", "t", entries=[_entry("issue_a", "open")])
     monkeypatch.setattr(library_client, "list_courses", lambda **k: [course])
     monkeypatch.setattr(library_client, "get_course", lambda cid: course)
     html = issue_build.live_html_course()
@@ -1463,11 +1463,11 @@ def test_course_falls_back_to_the_list_record_when_get_course_races_it_away(db, 
     """`get_course` degrading to the `list_courses` record on its own failure
     is the same discipline `chart_house_build._course_rows` uses — a single
     course's timeout or a delete race must not take the whole page down."""
-    course = _course("course_1", "vivy", "t", entries=[_entry("issue_a", "open")])
+    course = _course("course_1", "alpha", "t", entries=[_entry("issue_a", "open")])
     monkeypatch.setattr(library_client, "list_courses", lambda **k: [course])
     monkeypatch.setattr(library_client, "get_course", lambda cid: None)
     html = issue_build.live_html_course()
-    assert '<h2 class="proj-head">vivy' in html
+    assert '<h2 class="proj-head">alpha' in html
 
 
 def test_course_page_empty_state(db):
@@ -1543,11 +1543,11 @@ def test_an_untyped_work_item_gets_no_type_badge_and_a_typed_one_keeps_its_own(d
 def test_a_correction_in_its_queue_links_to_corrections_not_to_the_queue_id(db):
     """A corrections queue is not an item, so `/engineering/issues/<queue id>`
     would 404 (library/specs/one-home-per-work-item)."""
-    library_fake.seed_corrections_queue("cq_vivy")
-    library_fake.seed_issue(**_mk(id="issue_corr1", title="In the queue", parent_id="cq_vivy"))
+    library_fake.seed_corrections_queue("cq_alpha")
+    library_fake.seed_issue(**_mk(id="issue_corr1", title="In the queue", parent_id="cq_alpha"))
     html = issue_build.detail_html("issue_corr1")
     assert 'in <a href="/engineering/corrections">Corrections</a>' in html
-    assert "/engineering/issues/cq_vivy" not in html
+    assert "/engineering/issues/cq_alpha" not in html
 
 
 def test_an_item_found_during_an_epic_links_to_it_and_the_epic_lists_it(db):
@@ -1834,7 +1834,7 @@ def test_log_swallowed_calls_the_shared_sanitiser(monkeypatch, capsys):
 # --- grouping the corrections queue by area (issue_01M22998K9JYPVYDAHQT0EX3G4)
 
 
-def _topic_heads(html, product="vivy"):
+def _topic_heads(html, product="alpha"):
     """The area headings rendered inside one project's section, in order."""
     m = re.search(rf'<section class="proj-group" data-prod="{product}">(.*?)</section>',
                   html, re.S)
@@ -2181,10 +2181,13 @@ def test_a_proposed_epic_offers_decline_and_approve_and_nothing_else(db):
         assert gone not in row, f"a proposed epic must not offer {gone}"
 
 
-def test_decline_is_the_resolve_routes_wontfix(db):
-    """The Library has no separate decline route, and closing a proposal
-    nobody will build is what `wontfix` records — so Decline reuses the
-    resolve path, outcome note and all, rather than inventing a second one."""
+def test_decline_opens_the_same_outcome_note_panel_the_old_wontfix_flow_did(db):
+    """The button still opens the shared outcome-note directive through
+    `data-act="resolve"`/`data-kind="decline"`, so the reason-collecting UI is
+    unchanged. What changed is where Confirm sends it: library#300 (merged
+    2026-10-20) gave the Library its own decline route, and `_JS` now posts
+    there instead of to `/api/issues/{id}/resolve`'s `wontfix` — see
+    `test_confirming_a_decline_posts_to_the_librarys_decline_route`."""
     library_fake.seed_issue(**_mk(id="issue_prop", title="A proposal", type="epic",
                                   maturity="proposed", specification="spec"))
     row = _card_actions(issue_build.detail_html("issue_prop"))
@@ -2229,15 +2232,18 @@ def test_the_chart_house_and_the_card_read_one_rule():
     assert "issue_build.put_forward(" in open(chart_house_build.__file__).read()
 
 
-def test_approve_on_the_card_is_gated_on_the_viewers_role(db):
-    """`__CAN_APPROVE_EPIC__` is server.py's to fill. The CSS hides Approve for
-    a role without `epic_approve` and leaves Decline, which the resolve route
-    already lets such a role use."""
+def test_approve_and_decline_on_the_card_are_both_gated_on_the_viewers_role(db):
+    """`__CAN_APPROVE_EPIC__` is server.py's to fill. The Library's decline
+    route needs `epic.approve` same as approve (library#300), so the CSS now
+    hides Decline alongside Approve and Edit for a role without the
+    capability — unlike the old resolve-based Decline, which that role could
+    still press."""
     library_fake.seed_issue(**_mk(id="issue_prop", title="A proposal", type="epic",
                                   maturity="proposed", specification="spec"))
     html = issue_build.detail_html("issue_prop")
     assert 'data-can-approve="__CAN_APPROVE_EPIC__"' in _card_actions(html)
-    assert ('.ops .actions[data-can-approve="false"] .btn.approve,\n'
+    assert ('.ops .actions[data-can-approve="false"] .btn.wontfix,\n'
+            '.ops .actions[data-can-approve="false"] .btn.approve,\n'
             '.ops .actions[data-can-approve="false"] .btn.edit{display:none;}') in html
 
 
@@ -2374,13 +2380,14 @@ def test_declining_asks_for_the_reason_the_proposing_crew_will_read(proposed_pag
     assert result["prompt"].startswith("Why it is declined")
 
 
-def test_confirming_a_decline_closes_it_as_wontfix_and_says_declined(proposed_page):
-    """Decline is the resolve route's `wontfix` with the reason attached, and
-    the toast names the act that was pressed rather than "won't do"."""
+def test_confirming_a_decline_posts_to_the_librarys_decline_route(proposed_page):
+    """Decline now posts to `approve_api`'s decline proxy (library#300),
+    carrying the outcome-note panel's text as `reason` — not to
+    `/api/issues/{id}/resolve`'s `wontfix`, which the Library refuses for any
+    epic that is not approved. The toast names the act that was pressed."""
     result = _drive_decline(proposed_page)
-    assert result["calls"] == [{"url": "/api/issues/issue_prop/resolve", "method": "POST",
-                                "body": {"resolution": "wontfix",
-                                         "outcome_note": "nobody will build this"}}]
+    assert result["calls"] == [{"url": "/api/epics/issue_prop/decline", "method": "POST",
+                                "body": {"reason": "nobody will build this"}}]
     assert result["toast"] == "✕ declined"
 
 
@@ -2388,6 +2395,63 @@ def test_an_unreachable_server_is_named_rather_than_left_silent(proposed_page):
     result = _drive_approve(proposed_page, "network")
     assert "reach the server" in result["noteText"]
     assert len(result["buttons"]) == 2
+
+
+def test_a_successful_decline_replaces_the_buttons_with_its_record(proposed_page):
+    """The Library leaves the epic's own `state` open and sets only
+    `maturity`, so the card is not removed the way a resolve removes it —
+    the same reason an approval does not remove it either."""
+    result = _drive_decline(proposed_page)
+    assert result["calls"], "the decline route must have been called"
+
+
+# --- a declined epic: Repropose, and nothing else (library#300) -------------
+#
+# The Library refuses both approve and resolve on a declined epic, so this is
+# the one act left to offer, gated the same way approve and decline are.
+
+
+@pytest.fixture
+def declined_page(db):
+    library_fake.seed_issue(**_mk(id="issue_decl", title="A decline", type="epic",
+                                  maturity="declined", specification="spec"))
+    return issue_build.detail_html("issue_decl")
+
+
+def test_a_declined_epic_offers_repropose_and_nothing_else(declined_page):
+    row = _card_actions(declined_page)
+    assert '<button class="btn approve" data-act="repropose">Repropose</button>' in row
+    for gone in (">Decline<", ">Approve<", ">Fixed<", ">Duplicate<", ">Redirected<", ">Won't do<", ">Edit<"):
+        assert gone not in row, f"a declined epic must not offer {gone}"
+
+
+def test_repropose_is_gated_on_the_viewers_role(declined_page):
+    """Same `__CAN_APPROVE_EPIC__` token and CSS rule Decline and Approve
+    use, because the Library's repropose route needs the same capability."""
+    assert 'data-can-approve="__CAN_APPROVE_EPIC__"' in _card_actions(declined_page)
+
+
+def test_pressing_repropose_posts_to_the_librarys_repropose_route(declined_page):
+    """Reuses the approve driver: the button carries the same `btn approve`
+    class for styling, and `data-act="repropose"` is what the click handler
+    actually branches on."""
+    result = _drive_approve(declined_page, "ok")
+    assert result["calls"] == [{"url": "/api/epics/issue_decl/repropose", "method": "POST",
+                                "body": None}]
+
+
+def test_a_successful_repropose_replaces_the_button_with_its_record(declined_page):
+    result = _drive_approve(declined_page, "ok")
+    assert result["buttons"] == []
+    assert result["noteHidden"] is False
+    assert "Reproposed" in result["noteText"]
+
+
+def test_a_refused_repropose_renders_the_librarys_wording_and_keeps_the_button(declined_page):
+    result = _drive_approve(declined_page, "refused")
+    assert len(result["buttons"]) == 1
+    assert not result["buttons"][0]["disabled"]
+    assert "err" in result["noteClass"]
 
 
 # --- the epic editor (the operator, 2026-09-22) ------------------------------------------
@@ -2841,7 +2905,7 @@ def test_a_pr_with_no_record_says_so(db):
 
 def test_records_of_another_repo_or_pr_do_not_appear(db):
     library_fake.seed_issue(**_mk(id="issue_rv7", refs={"pr": "350", "url": _PR_URL}))
-    library_fake.seed_review_record(repo_identity="github:convivy/vivy", pr=350,
+    library_fake.seed_review_record(repo_identity="github:convivy/alpha", pr=350,
                                     role="reviewer", verdict="APPROVE", reviewed_ref="c" * 40)
     library_fake.seed_review_record(repo_identity=_ORIENT, pr=351,
                                     role="reviewer", verdict="APPROVE", reviewed_ref="d" * 40)
@@ -2890,17 +2954,17 @@ def test_the_client_reads_the_route_by_repo_identity_and_pr(monkeypatch):
 
 
 def _seed_two_projects():
-    """vivy and bosun, each with an epic + child, a correction, a
+    """alpha and bosun, each with an epic + child, a correction, a
     blocker and a live Course — so every Chart House page has one entry per
     project to tell apart."""
-    library_fake.seed_issue(**_mk(id="issue_vivy_epic", product="vivy",
-                                  title="VIVY-EPIC-TITLE", type="epic"))
-    library_fake.seed_issue(**_mk(id="issue_vivy_child", product="vivy",
-                                  title="VIVY-CHILD-TITLE", parent_id="issue_vivy_epic"))
-    library_fake.seed_issue(**_mk(id="issue_vivy_corr", product="vivy",
-                                  title="VIVY-CORRECTION-TITLE"))
-    library_fake.seed_issue(**_mk(id="issue_vivy_block", product="vivy",
-                                  title="VIVY-BLOCKER-TITLE", needs="operator"))
+    library_fake.seed_issue(**_mk(id="issue_alpha_epic", product="alpha",
+                                  title="ALPHA-EPIC-TITLE", type="epic"))
+    library_fake.seed_issue(**_mk(id="issue_alpha_child", product="alpha",
+                                  title="ALPHA-CHILD-TITLE", parent_id="issue_alpha_epic"))
+    library_fake.seed_issue(**_mk(id="issue_alpha_corr", product="alpha",
+                                  title="ALPHA-CORRECTION-TITLE"))
+    library_fake.seed_issue(**_mk(id="issue_alpha_block", product="alpha",
+                                  title="ALPHA-BLOCKER-TITLE", needs="operator"))
 
     library_fake.seed_issue(**_mk(id="issue_bosun_epic", product="bosun",
                                   title="BOSUN-EPIC-TITLE", type="epic"))
@@ -2914,8 +2978,8 @@ def _seed_two_projects():
 
 def _two_project_courses():
     return [
-        _course("course_vivy", "vivy", "Vivy's course",
-               entries=[_entry("issue_vivy_epic", "open", title="VIVY-COURSE-STEP")]),
+        _course("course_alpha", "alpha", "Alpha's course",
+               entries=[_entry("issue_alpha_epic", "open", title="ALPHA-COURSE-STEP")]),
         _course("course_bosun", "bosun", "Bosun's course",
                entries=[_entry("issue_bosun_epic", "open", title="BOSUN-COURSE-STEP")]),
     ]
@@ -2929,9 +2993,9 @@ def test_each_viewer_sees_only_their_own_projects_on_every_chart_house_page(db, 
     courses = _two_project_courses()
     monkeypatch.setattr(library_client, "list_courses", lambda **k: courses)
     monkeypatch.setattr(library_client, "get_course", lambda cid: next(c for c in courses if c.id == cid))
-    library_fake.seed_person_scope("vivy-viewer@example.com", {"vivy"})
+    library_fake.seed_person_scope("alpha-viewer@example.com", {"alpha"})
     library_fake.seed_person_scope("bosun-viewer@example.com", {"bosun"})
-    vivy_scope = library_client.person_scope("vivy-viewer@example.com")
+    alpha_scope = library_client.person_scope("alpha-viewer@example.com")
     bosun_scope = library_client.person_scope("bosun-viewer@example.com")
 
     # Each page's own content, by project — only the needles a correctly
@@ -2940,29 +3004,29 @@ def test_each_viewer_sees_only_their_own_projects_on_every_chart_house_page(db, 
     # another viewer's project.
     pages = {
         "epics": (issue_build.live_html,
-                 ('data-prod="vivy"', "VIVY-EPIC-TITLE", "VIVY-CHILD-TITLE", "issue_vivy_epic"),
+                 ('data-prod="alpha"', "ALPHA-EPIC-TITLE", "ALPHA-CHILD-TITLE", "issue_alpha_epic"),
                  ('data-prod="bosun"', "BOSUN-EPIC-TITLE", "BOSUN-CHILD-TITLE", "issue_bosun_epic")),
         "corrections": (lambda s: issue_build.live_html_corrections(None, s),
-                       ('data-prod="vivy"', "VIVY-CORRECTION-TITLE", "issue_vivy_corr"),
+                       ('data-prod="alpha"', "ALPHA-CORRECTION-TITLE", "issue_alpha_corr"),
                        ('data-prod="bosun"', "BOSUN-CORRECTION-TITLE", "issue_bosun_corr")),
         "course": (issue_build.live_html_course,
-                  ('data-prod="vivy"', "VIVY-COURSE-STEP"),
+                  ('data-prod="alpha"', "ALPHA-COURSE-STEP"),
                   ('data-prod="bosun"', "BOSUN-COURSE-STEP")),
         "blockers": (issue_build.live_html_blockers,
-                    ('data-prod="vivy"', "VIVY-BLOCKER-TITLE", "issue_vivy_block"),
+                    ('data-prod="alpha"', "ALPHA-BLOCKER-TITLE", "issue_alpha_block"),
                     ('data-prod="bosun"', "BOSUN-BLOCKER-TITLE", "issue_bosun_block")),
     }
-    for name, (builder, vivy_needles, bosun_needles) in pages.items():
-        vivy_html = builder(vivy_scope)
-        for needle in vivy_needles:
-            assert needle in vivy_html, (name, needle)
+    for name, (builder, alpha_needles, bosun_needles) in pages.items():
+        alpha_html = builder(alpha_scope)
+        for needle in alpha_needles:
+            assert needle in alpha_html, (name, needle)
         for needle in bosun_needles:
-            assert needle not in vivy_html, (name, needle)
+            assert needle not in alpha_html, (name, needle)
 
         bosun_html = builder(bosun_scope)
         for needle in bosun_needles:
             assert needle in bosun_html, (name, needle)
-        for needle in vivy_needles:
+        for needle in alpha_needles:
             assert needle not in bosun_html, (name, needle)
 
 
@@ -2978,13 +3042,13 @@ def test_an_administrators_resolved_scope_still_sees_every_project(db, monkeypat
     admin_scope = library_client.person_scope("admin@example.com")
 
     epics = issue_build.live_html(admin_scope)
-    assert 'data-prod="vivy"' in epics and 'data-prod="bosun"' in epics
+    assert 'data-prod="alpha"' in epics and 'data-prod="bosun"' in epics
     corrections = issue_build.live_html_corrections(None, admin_scope)
-    assert 'data-prod="vivy"' in corrections and 'data-prod="bosun"' in corrections
+    assert 'data-prod="alpha"' in corrections and 'data-prod="bosun"' in corrections
     course_page = issue_build.live_html_course(admin_scope)
-    assert 'data-prod="vivy"' in course_page and 'data-prod="bosun"' in course_page
+    assert 'data-prod="alpha"' in course_page and 'data-prod="bosun"' in course_page
     blockers = issue_build.live_html_blockers(admin_scope)
-    assert "VIVY-BLOCKER-TITLE" in blockers and "BOSUN-BLOCKER-TITLE" in blockers
+    assert "ALPHA-BLOCKER-TITLE" in blockers and "BOSUN-BLOCKER-TITLE" in blockers
 
 
 def test_an_out_of_scope_item_page_is_none_exactly_like_a_missing_one(db):
@@ -2993,7 +3057,7 @@ def test_an_out_of_scope_item_page_is_none_exactly_like_a_missing_one(db):
     either way, so an id outside scope must not be told apart from one that
     does not exist at all."""
     library_fake.seed_issue(**_mk(id="issue_outscope", product="bosun", title="t"))
-    scope = frozenset({"vivy"})
+    scope = frozenset({"alpha"})
     assert issue_build.detail_html("issue_outscope", scope) is None
     assert issue_build.detail_html("issue_does_not_exist_either", scope) is None
     # The positive control: the same item, read with a scope that covers it.
@@ -3005,15 +3069,15 @@ def test_a_found_during_item_outside_scope_is_dropped_from_the_epic_page(db):
     epic it names (that cross-product case is the feature) — so it leaks that
     other project's title unless filtered on its own, separately from the
     epic's already-checked visibility."""
-    library_fake.seed_issue(**_mk(id="issue_epicfd2", product="vivy",
+    library_fake.seed_issue(**_mk(id="issue_epicfd2", product="alpha",
                                   title="The epic", type="epic"))
     library_fake.seed_issue(**_mk(id="issue_found_outscope", product="bosun",
                                   title="BOSUN-FOUND-TITLE", found_during="issue_epicfd2"))
-    library_fake.seed_issue(**_mk(id="issue_found_inscope", product="vivy",
-                                  title="VIVY-FOUND-TITLE", found_during="issue_epicfd2"))
-    scope = frozenset({"vivy"})
+    library_fake.seed_issue(**_mk(id="issue_found_inscope", product="alpha",
+                                  title="ALPHA-FOUND-TITLE", found_during="issue_epicfd2"))
+    scope = frozenset({"alpha"})
     html = issue_build.detail_html("issue_epicfd2", scope)
-    assert "VIVY-FOUND-TITLE" in html
+    assert "ALPHA-FOUND-TITLE" in html
     assert "BOSUN-FOUND-TITLE" not in html
     assert "Found during this epic · 1" in html
 
@@ -3026,51 +3090,51 @@ def test_a_found_during_link_to_an_epic_outside_scope_is_not_shown(db):
     rather than a missing link."""
     library_fake.seed_issue(**_mk(id="issue_bosun_epic_x", product="bosun",
                                   title="Bosun epic", type="epic"))
-    library_fake.seed_issue(**_mk(id="issue_vivy_found_x", product="vivy",
-                                  title="Vivy item", found_during="issue_bosun_epic_x"))
-    scoped = issue_build.detail_html("issue_vivy_found_x", frozenset({"vivy"}))
+    library_fake.seed_issue(**_mk(id="issue_alpha_found_x", product="alpha",
+                                  title="Alpha item", found_during="issue_bosun_epic_x"))
+    scoped = issue_build.detail_html("issue_alpha_found_x", frozenset({"alpha"}))
     assert "issue_bosun_epic_x" not in scoped
     assert "found during" not in scoped
-    both = issue_build.detail_html("issue_vivy_found_x", frozenset({"vivy", "bosun"}))
+    both = issue_build.detail_html("issue_alpha_found_x", frozenset({"alpha", "bosun"}))
     assert 'found during <a href="/engineering/issues/issue_bosun_epic_x">' in both
 
 
 def test_a_duplicate_of_an_item_outside_scope_names_no_id(db):
     """Review round 2 on PR #372: the resolve API accepts any duplicate_of, so a
-    vivy item can be marked a duplicate of a bosun one. A viewer scoped to vivy
+    alpha item can be marked a duplicate of a bosun one. A viewer scoped to alpha
     must not see that bosun id, on the item's page or in the Corrections
     page's resolved strip. A viewer whose scope covers bosun sees it in both
     places, so the omission is the scope check."""
     library_fake.seed_issue(**_mk(id="issue_bosun_orig_x", product="bosun", title="Bosun original"))
-    library_fake.seed_issue(**_mk(id="issue_vivy_dupe_x", product="vivy", title="Vivy dupe",
+    library_fake.seed_issue(**_mk(id="issue_alpha_dupe_x", product="alpha", title="Alpha dupe",
                                   state="duplicate", resolution="duplicate",
                                   resolved_by="operator@example.com", resolved_at=models_utcnow(),
                                   refs={"duplicate_of": "issue_bosun_orig_x"}))
-    vivy = frozenset({"vivy"})
-    both = frozenset({"vivy", "bosun"})
-    assert "issue_bosun_orig_x" not in issue_build.detail_html("issue_vivy_dupe_x", vivy)
-    assert "issue_bosun_orig_x" not in issue_build.live_html_corrections(None, vivy)
+    alpha = frozenset({"alpha"})
+    both = frozenset({"alpha", "bosun"})
+    assert "issue_bosun_orig_x" not in issue_build.detail_html("issue_alpha_dupe_x", alpha)
+    assert "issue_bosun_orig_x" not in issue_build.live_html_corrections(None, alpha)
     assert 'href="/engineering/issues/issue_bosun_orig_x"' in issue_build.detail_html(
-        "issue_vivy_dupe_x", both)
+        "issue_alpha_dupe_x", both)
     assert "issue_bosun_orig_x" in issue_build.live_html_corrections(None, both)
 
 
 def test_a_prerequisite_in_a_project_outside_scope_names_no_id_or_title(db):
     """Review round 2 on PR #372: a prerequisite can name an item in another
     product (platform/decisions/0074's example is a Deck item waiting on a
-    Bosun item). A viewer scoped to vivy sees the vivy item as blocked by
+    Bosun item). A viewer scoped to alpha sees the alpha item as blocked by
     something they cannot see, with neither the bosun item's id nor its title.
     A viewer whose scope covers bosun sees the title and the link."""
     library_fake.seed_issue(**_mk(id="issue_bosun_pre_x", product="bosun",
                                   title="BOSUN-PREREQ-TITLE"))
     library_fake.seed_issue(**_mk(
-        id="issue_vivy_waits_x", product="vivy", title="Vivy waits", state="open",
+        id="issue_alpha_waits_x", product="alpha", title="Alpha waits", state="open",
         prerequisites=[{"item": "issue_bosun_pre_x", "state": "open",
                         "title": "BOSUN-PREREQ-TITLE"}]))
-    scoped = issue_build.detail_html("issue_vivy_waits_x", frozenset({"vivy"}))
+    scoped = issue_build.detail_html("issue_alpha_waits_x", frozenset({"alpha"}))
     assert "issue_bosun_pre_x" not in scoped
     assert "BOSUN-PREREQ-TITLE" not in scoped
     assert "a project you cannot see" in scoped
-    both = issue_build.detail_html("issue_vivy_waits_x", frozenset({"vivy", "bosun"}))
+    both = issue_build.detail_html("issue_alpha_waits_x", frozenset({"alpha", "bosun"}))
     assert "BOSUN-PREREQ-TITLE" in both
     assert "/engineering/issues/issue_bosun_pre_x" in both

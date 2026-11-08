@@ -26,7 +26,7 @@ global cap afterward — every product keeps its own up-to-N rows.
 
 **PRs are grouped by (product, PR number), not rendered as a flat comment
 feed** (the operator: "pull out PR comments and description, and organize them by PR &
-Product"). `github_capture.signal_from_issue_comment` sets `kind="pr_comment"`
+Product"). the Keel's `github-activity-capture` writes `kind="pr_comment"`
 with `refs={"pr": <int>, "url": ...}` and `product=<repo>` on every row it
 writes — the grouping key is reliably present in every row the current
 capture code produces, so grouping is possible; nothing here should raise if
@@ -37,10 +37,12 @@ list under its own "no resolvable PR reference" section rather than silently
 losing it.
 
 **"description" is the merge-time record, not another comment.**
-`github_capture.signal_from_merge` writes one `kind="changelog",
+The Keel's `github-activity-capture` writes one `kind="changelog",
 source="github"` signal per merged PR, body = title + description, keyed by
-the same `(product, pr)` pair (`dedup_key=f"gh:{repo}:pr{number}:merged"`, so
-at most one per PR). That is the PR's own description; joining it in by
+the same `(product, pr)` pair. Its `dedup_key` is
+`gh:<owner>/<repo>:pr<n>:merged`; Orient's retired capture wrote
+`gh:<repo>:pr<n>:merged`, so a PR both captures saw has two rows with the same
+body. That body is the PR's own description; joining it in by
 `(product, pr)` is what puts it under the same group as its comments. Only
 merged PRs have one — an open PR's group shows only its comments, which is
 correct: nothing has generated its description signal yet.
@@ -50,6 +52,7 @@ from __future__ import annotations
 import datetime as dt
 from html import escape
 
+import crew_registry
 import design_system as ds
 import library_client
 import orient_time
@@ -59,12 +62,6 @@ from url_safety import safe_http_url
 from paths import STATE_ROOT
 
 SITE = STATE_ROOT / "site"
-
-# The GitHub org every `product` (repo) signal comes from
-# (github_capture.ORG) — duplicated as a plain constant rather than importing
-# the capture script into a live-serving builder, which pulls in gh/subprocess
-# plumbing this module has no use for.
-_GH_ORG = "convivy"
 
 # Per-product cap for the fan-out fetch (`fan_out`). Not the page's total
 # render cap — the total is `cap_per_product * len(known products)`, which
@@ -126,7 +123,7 @@ def _sig_time(sig: library_client.SignalRecord) -> dt.datetime:
 
 def _pr_number(sig: library_client.SignalRecord) -> int | None:
     """The PR number a `pr_comment`/`changelog` signal's `refs` names, or None
-    if it isn't there or isn't the shape `github_capture` writes. `bool` is
+    if it isn't there or isn't the shape the Keel's capture writes. `bool` is
     excluded explicitly — it is a subclass of `int` in Python, and True/False
     are not PR numbers even though `isinstance(True, int)` is true."""
     refs = sig.refs if isinstance(sig.refs, dict) else {}
@@ -137,7 +134,7 @@ def _pr_number(sig: library_client.SignalRecord) -> int | None:
 
 
 def _pr_url(product: str, pr: int) -> str:
-    return f"https://github.com/{_GH_ORG}/{product}/pull/{pr}"
+    return f"https://github.com/{crew_registry.repo_github_owner(product)}/{product}/pull/{pr}"
 
 
 def _group_prs(comments, descriptions):
@@ -164,9 +161,8 @@ def _group_prs(comments, descriptions):
         key = (sig.product, pr)
         g = groups.setdefault(key, {"product": sig.product, "pr": pr,
                                     "description": None, "comments": []})
-        # dedup_key gh:{repo}:pr{number}:merged is one signal per PR, so this
-        # assigns at most once per group; a later row (there shouldn't be one)
-        # would just overwrite with an equally-valid description of the same PR.
+        # A PR both captures saw has two rows, one per dedup_key format (module
+        # docstring). Their bodies match, so either can be the description.
         g["description"] = sig
     return groups, unlinked
 

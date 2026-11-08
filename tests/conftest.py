@@ -1,6 +1,7 @@
 """Make the convivy-orient modules (server, build, dashboard_build) importable
 from the tests without a package install — they're top-level scripts in the
 repo root. Stdlib-only project, so no venv assumptions."""
+import json
 import os
 import sys
 from pathlib import Path
@@ -50,12 +51,186 @@ def pytest_runtest_setup(item):
             f"the KB is (agent-platform's bin/check-kb-guards), not in CI")
 
 
+# A trimmed mirror of the install's real project registry (fields this repo's
+# builders actually read: display, repos, aliases, crew, home_dir,
+# agent_prefix, lifecycle, products, overnight, kb_project, plus the `_scopes`
+# map CQ-171 ruling 4 added a reader for), captured 2026-10-22. Backs
+# `_pinned_project_registry` below, so a crew_registry-reading test gets the
+# same answer on a laptop that has ~/Convivy/agent-platform checked out and on
+# a CI runner that has only this repo — see that fixture's docstring. A test
+# asserting the registry-derived tables agree with what main's literals held
+# reads this dict, not the live file, to pin against.
+_PINNED_REGISTRY = {
+    "alpha": {"display": "Alpha", "crew": "alpha", "home_dir": "<root>/alpha",
+              "lifecycle": "active", "aliases": [], "overnight": True,
+              "products": ["alpha"], "code_health": ["alpha"],
+              "repos": ["alpha", "alpha-ownerrez-sandbox-tools", "alpha-commercial", "alpha-landing"]},
+    "beta": {"display": "Beta", "crew": "beta", "home_dir": "<root>/beta",
+                  "lifecycle": "active", "aliases": [], "overnight": True,
+                  "products": ["beta"], "code_health": ["beta"],
+                  "repos": ["beta", "beta-landing", "beta-commercial", "beta-updates"],
+                  "repo_display": {"beta-landing": "Beta Landing"}},
+    "epsilon": {"display": "Epsilon", "crew": "epsilon", "home_dir": "<root>/epsilon",
+                  "lifecycle": "active", "aliases": [], "overnight": True,
+                  "products": ["epsilon"], "code_health": ["epsilon"], "repos": ["epsilon"]},
+    "gamma": {"display": "Gamma", "crew": "gamma", "home_dir": "<root>/gamma",
+               "lifecycle": "active", "aliases": ["mu-assistant"],
+               "overnight": False, "products": ["gamma"], "code_health": ["gamma"],
+               "repos": ["gamma"], "rollup": ["cost"]},
+    "delta": {"display": "Delta", "crew": "delta", "home_dir": "<root>/delta",
+                 "lifecycle": "active", "aliases": [], "overnight": False,
+                 "products": ["delta"], "code_health": ["delta"],
+                 "repos": ["delta", "delta-backend"],
+                 "rollup": ["repos", "cost"]},
+    "bosun": {"display": "Bosun", "crew": "bosun", "home_dir": "<root>/agent-platform",
+              "lifecycle": "active", "aliases": ["keel"], "overnight": False,
+              "products": [], "code_health": ["agent-platform"],
+              "repos": ["agent-platform"], "rollup": ["repos"],
+              "kb_project": "agent-platform"},
+    "convivy-deck": {"display": "Deck", "crew": "deck", "home_dir": "<root>/convivy-deck",
+                     "lifecycle": "active", "aliases": [], "overnight": False,
+                     "products": [], "repos": ["convivy-deck"],
+                     "kb_project": "deck"},
+    "library": {"display": "Library", "crew": "library", "home_dir": "<root>/library",
+                "lifecycle": "active", "aliases": [], "overnight": False,
+                "products": [], "code_health": ["knowledge"],
+                "repos": ["library", "knowledge"]},
+    "steward": {"display": "Steward", "crew": "steward", "home_dir": "<root>/substrate",
+                "lifecycle": "active", "aliases": [], "overnight": False,
+                "products": [], "repos": ["substrate"], "kb_project": "platform"},
+    "convivy-orient": {"display": "Orient", "crew": "convivy-orient", "home_dir": "<root>/convivy-orient",
+                       "lifecycle": "active", "aliases": [], "overnight": False,
+                       "products": [], "code_health": ["convivy-orient"],
+                       "repos": ["convivy-orient", "www"]},
+    "lambda-kit": {"display": "Lambda Kit", "crew": "lambda-kit", "home_dir": "<root>/convivy-app-kit",
+            "lifecycle": "active", "aliases": [], "overnight": False,
+            "products": [], "code_health": ["convivy-app-kit"],
+            "repos": ["convivy-app-kit", "convivy-services"]},
+    "write-better": {"display": "Write Better", "crew": "write-better", "home_dir": "<root>/write-better",
+                     "lifecycle": "active", "aliases": [], "overnight": False,
+                     "products": [], "repos": ["write-better"]},
+    "signals": {"display": "Signals", "crew": "signals", "home_dir": "<root>/signals",
+                "lifecycle": "active", "aliases": [], "overnight": False,
+                "products": [], "repos": ["signals"]},
+    "eta": {"display": "Eta", "crew": "eta", "home_dir": "<root>/eta",
+              "agent_prefix": "eta-", "lifecycle": "active", "aliases": [],
+              "products": ["eta"], "repos": ["eta"]},
+    "shipwright": {"display": "Shipwright", "crew": "shipwright", "home_dir": "<root>/shipwright",
+                   "lifecycle": "active", "aliases": [], "overnight": False,
+                   "products": [], "repos": ["shipwright", "homebrew-tap"],
+                   "kb_project": "company"},
+    "theta": {"display": "Theta", "crew": "theta", "home_dir": "<root>/theta",
+                "lifecycle": "archived", "aliases": [], "overnight": False,
+                "products": [], "repos": ["theta"]},
+    "omega-tools": {"display": "Omega Tools", "crew": "omega-tools",
+                       "home_dir": "<root>/omega/omega-tools", "lifecycle": "active",
+                       "aliases": ["omega-architecture"], "overnight": False,
+                       "products": ["zeta-studio"], "repos": ["omega-tools"]},
+    "omega-etc": {"display": "Omega Circle", "crew": "omega-etc",
+                "home_dir": "<root>/omega/omega-etc", "lifecycle": "active",
+                "aliases": [], "overnight": False,
+                "products": ["zeta-studio"], "repos": ["omega-etc"]},
+    "omega-villa": {"display": "Omega Villa", "crew": "omega-villa",
+                       "home_dir": "<root>/omega/omega-villa", "lifecycle": "active",
+                       "aliases": [], "overnight": False,
+                       "products": ["zeta-studio"], "repos": ["omega-villa"]},
+    "example-commercial": {"display": "Example General", "crew": "example-commercial",
+                           "home_dir": "<root>/example-commercial", "lifecycle": "active",
+                           "aliases": [], "overnight": False,
+                           "products": [], "repos": ["example-commercial"]},
+    # The registry's own `_products` key order is really beta, alpha,
+    # epsilon, gamma, delta, zeta-studio, eta (captured 2026-10-22,
+    # same order `tests/test_build.py`'s PRODUCT_ORDER tests build their own
+    # fixture around). A map-order derivation of PRODUCT_GROUPS over THAT
+    # order would put epsilon before gamma/delta in the "Mobile App
+    # Suite" group, not today's shipped member order — reported in this
+    # slice's PR body. gamma/delta are reordered ahead of epsilon
+    # here only (CQ-171 slice 5, the steward's registry-fields ruling), so
+    # this mirror's derived PRODUCT_GROUPS still matches what main shipped
+    # as a literal.
+    "_products": {
+        "beta": {"display": "Beta", "owner": "convivy"},
+        "alpha": {"display": "Alpha", "owner": "convivy"},
+        "gamma": {"display": "Gamma", "owner": "convivy", "group": "Mobile App Suite"},
+        "delta": {"display": "Delta", "owner": "convivy", "group": "Mobile App Suite"},
+        "epsilon": {"display": "Epsilon", "owner": "convivy", "group": "Mobile App Suite"},
+        "zeta-studio": {"display": "Zeta Studio", "owner": "omega", "rollup": ["cost"]},
+        "eta": {"display": "Eta", "owner": "convivy"},
+    },
+    # `_kb_projects` (CQ-171 revise round 2, the steward's registry-fields
+    # ruling) is a real addition this mirror carries ahead of the live file,
+    # same as the `rollup` fields above: both are needed by every test in this
+    # suite that reads `crew_registry` through the default fixture rather than
+    # building its own, not just the dedicated PRODUCT_ORDER/STANDALONE_PRODUCTS
+    # tests, which still build their own fixture for the `_products` rearrange.
+    # The seven `"section": "engineering"` entries (CQ-171 slice 5) are the
+    # same addition for ENGINEERING_PROJECTS, in the order main shipped that
+    # list in — `_kb_projects` doesn't exist on the live file at all yet, so
+    # there is no captured live order to reorder against, unlike the `group`
+    # reorder above.
+    "_kb_projects": {
+        "platform": {"section": "engineering"},
+        "engineering-practice": {"section": "engineering"},
+        "knowledge": {"section": "engineering"},
+        "convivy-orient": {"section": "engineering"},
+        "keel": {"section": "engineering"},
+        "library": {"section": "engineering"},
+        "write-better": {"section": "engineering"},
+        "zeta-studio": {"standalone": True},
+        "eta": {"standalone": True},
+        "agent-platform": {"standalone": True},
+        "convivy-app-kit": {"standalone": True},
+        "convivy-services": {"standalone": True},
+        "deck": {"standalone": True},
+        "theta": {"standalone": True},
+        "substrate": {"standalone": True},
+        # A fictional key, not the real repo's name (CQ-171 slice 6 closed the
+        # gap that used to require the real name here: `beta`'s own
+        # `repo_display` below now supplies this entry's PROJECT_LABEL value,
+        # so nothing here depends on this spelling matching a real repo).
+        "beta-landing": {"standalone": True},
+        "signals": {"standalone": True},
+        "shipwright": {"standalone": True},
+    },
+    "_scopes": {
+        "company": {"display": "Convivy"},
+        "platform": {"display": "Platform"},
+        "commercial": {"display": "Commercial"},
+        "engineering-practice": {"display": "Engineering Practice"},
+        "keel": {"display": "Keel"},
+    },
+}
+
+
+@pytest.fixture(autouse=True)
+def _pinned_project_registry(monkeypatch, tmp_path_factory):
+    """Point `$PROJECTS_JSON` at `_PINNED_REGISTRY` above by default.
+
+    Autouse and unconditional, for the reason `_no_real_library_credentials`
+    below is: a crew_registry-reading builder (chart_house_build,
+    dashboard_build) otherwise takes two code paths depending on whether the
+    machine running the suite has `~/Convivy/agent-platform` checked out —
+    and CI, which checks out convivy-orient alone, does not. `_PINNED_REGISTRY`
+    is a trimmed mirror of the real install's registry, not an empty one, so
+    a test asserting a registry-derived table still matches today's shipped
+    behaviour needs no monkeypatching of its own to get it.
+
+    `monkeypatch.setenv("PROJECTS_JSON", ...)` inside a test — this repo's own
+    convention, see tests/test_crew_registry.py — simply wins over this one,
+    for a test that wants a made-up registry or an unreadable one.
+    """
+    path = tmp_path_factory.mktemp("pinned-registry") / "projects.json"
+    path.write_text(json.dumps(_PINNED_REGISTRY))
+    monkeypatch.setenv("PROJECTS_JSON", str(path))
+    yield
+
+
 @pytest.fixture(autouse=True)
 def _no_real_library_credentials(monkeypatch, tmp_path_factory):
     """No test may read a real Library credential off the machine running it.
 
-    Autouse and unconditional, for the reason the `_pinned_project_registry`
-    fixture above is: the alternative is a suite that takes two code paths
+    Autouse and unconditional, for the reason `_pinned_project_registry`
+    above is: the alternative is a suite that takes two code paths
     depending on which machine ran it. This one is not hypothetical — PR #172's
     first CI run failed on exactly it. `library_client._human_reserved_token`
     falls back to `~/.orient-control/library-client-token`, so a test that
@@ -114,7 +289,7 @@ def _access_log_goes_to_a_temp_file(request, monkeypatch, tmp_path_factory):
 def _shared_control_db(tmp_path_factory):
     """One control.db, migrated to head once per test session — the fallback
     a test lands on when it does not bring its own `db`-style fixture
-    (test_blog_store.py's pattern).
+    (test_control_db.py's pattern).
 
     Added for issue_01M17W6XGXVHNDWCFRTQ38Y2RK: a handful of previously-pure
     builders (`code_health_build`/`kb_build`'s `live_html()`, `alerts_build.
@@ -149,7 +324,7 @@ def _no_real_control_db(_shared_control_db, monkeypatch):
     no per-test migration cost. A test that WRITES through control_db still
     brings its own isolated `db` fixture, an explicitly-requested fixture that
     runs after this autouse one and simply repoints CONTROL_DB again — same
-    precedence `test_blog_store.py`'s `db` fixture already relies on.
+    precedence `test_control_db.py`'s `db` fixture already relies on.
     """
     import control_db
 

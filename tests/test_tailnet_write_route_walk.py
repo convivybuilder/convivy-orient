@@ -175,8 +175,11 @@ ROUTE_EXPECTATIONS: dict[tuple[str, str], tuple[int, str]] = {
     # approve_api.py / epic_revise_api.py: authorize("epic.approve"/"epic.
     # revise") on a real (seeded) epic — an unseeded id 404s for ANY
     # identity at the `item is None` branch and proves nothing, so EPIC_ID is
-    # seeded below as an epic-typed item.
+    # seeded below as an epic-typed item. Decline and repropose (library#300)
+    # gate on the same capability, the same way.
     ("POST", "/api/epics/{issue_id:path}/approve"): (404, "not found"),
+    ("POST", "/api/epics/{issue_id:path}/decline"): (404, "not found"),
+    ("POST", "/api/epics/{issue_id:path}/repropose"): (404, "not found"),
     ("POST", "/api/epics/{issue_id:path}/revise"): (404, "not found"),
     # model_override_api.py / issue_write_api.py: authorize("item.model"/
     # "issue.resolve") on a real (seeded) issue, same reasoning as the epics.
@@ -226,6 +229,8 @@ EXCLUDED: dict[tuple[str, str], str] = {
 _PATH_PARAMS: dict[str, dict[str, str]] = {
     "/api/signals/{signal_id}/ack": {"signal_id": SIGNAL_ID},
     "/api/epics/{issue_id:path}/approve": {"issue_id": EPIC_ID},
+    "/api/epics/{issue_id:path}/decline": {"issue_id": EPIC_ID},
+    "/api/epics/{issue_id:path}/repropose": {"issue_id": EPIC_ID},
     "/api/epics/{issue_id:path}/revise": {"issue_id": EPIC_ID},
     "/api/items/{issue_id:path}/model": {"issue_id": ISSUE_ID},
     "/api/issues/{issue_id:path}/resolve": {"issue_id": ISSUE_ID},

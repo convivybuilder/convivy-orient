@@ -6,7 +6,70 @@ ordering, XSS-escaping, empty state) against a monkeypatched fetch. No `gh` runs
 """
 from __future__ import annotations
 
+import json
+
 import merge_queue_build as m
+
+
+# --- the GitHub org comes from the install's registry (ORG) ----------------
+
+
+def test_repos_with_open_prs_queries_the_registrys_org(monkeypatch):
+    seen = {}
+
+    def _gh(args):
+        seen["owner"] = args[args.index("--owner") + 1]
+        return []
+
+    monkeypatch.setattr(m, "_gh", _gh)
+    m._repos_with_open_prs()
+    assert seen["owner"] == "convivy"
+
+
+def test_open_prs_for_repo_queries_the_registrys_org(monkeypatch):
+    seen = {}
+
+    def _gh(args):
+        seen["repo_arg"] = args[args.index("--repo") + 1]
+        return []
+
+    monkeypatch.setattr(m, "_gh", _gh)
+    m._open_prs_for_repo("alpha")
+    assert seen["repo_arg"] == "convivy/alpha"
+
+
+def test_open_prs_for_repo_uses_the_repos_own_unit_github_owner(tmp_path, monkeypatch):
+    """No Convivy name: the org queried comes from `alpha`'s own unit's
+    `github_owner`, not from `_products`' business-ownership `owner` field
+    (which is never read for this)."""
+    path = tmp_path / "projects.json"
+    path.write_text(json.dumps({
+        "alpha-co": {"repos": ["alpha"], "github_owner": "acme"},
+        "_products": {"widget": {"display": "Widget", "owner": "omega"}},
+    }))
+    monkeypatch.setenv("PROJECTS_JSON", str(path))
+    seen = {}
+
+    def _gh(args):
+        seen["repo_arg"] = args[args.index("--repo") + 1]
+        return []
+
+    monkeypatch.setattr(m, "_gh", _gh)
+    m._open_prs_for_repo("alpha")
+    assert seen["repo_arg"] == "acme/alpha"
+
+
+def test_open_prs_for_repo_falls_back_to_convivy_on_an_unreadable_registry(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROJECTS_JSON", str(tmp_path / "absent.json"))
+    seen = {}
+
+    def _gh(args):
+        seen["repo_arg"] = args[args.index("--repo") + 1]
+        return []
+
+    monkeypatch.setattr(m, "_gh", _gh)
+    m._open_prs_for_repo("alpha")
+    assert seen["repo_arg"] == "convivy/alpha"
 
 
 # --- CI rollup ---------------------------------------------------------------
@@ -44,10 +107,10 @@ def test_ci_status_none_when_empty():
 
 
 def _pr(**kw):
-    base = dict(number=1, title="t", url="https://github.com/convivy/vivy/pull/1",
+    base = dict(number=1, title="t", url="https://github.com/convivy/alpha/pull/1",
                 isDraft=False, createdAt="2026-07-17T00:00:00Z", author={"login": "u"},
                 reviewDecision="REVIEW_REQUIRED", mergeable="MERGEABLE",
-                statusCheckRollup=[{"conclusion": "SUCCESS"}], repo="vivy")
+                statusCheckRollup=[{"conclusion": "SUCCESS"}], repo="alpha")
     base.update(kw)
     return base
 
@@ -98,7 +161,7 @@ def _rows(monkeypatch, prs):
 def test_fetch_sorts_most_recent_activity_first(monkeypatch):
     # _fetch_open_prs sorts by updated_at desc (the operator 2026-07-17: most-recent at top),
     # regardless of cleared/blocked status.
-    monkeypatch.setattr(m, "_repos_with_open_prs", lambda: ["vivy"])
+    monkeypatch.setattr(m, "_repos_with_open_prs", lambda: ["alpha"])
     monkeypatch.setattr(m, "_open_prs_for_repo", lambda repo: [
         _pr(number=1, title="OLD-ACTIVITY", updatedAt="2026-07-10T00:00:00Z"),
         _pr(number=2, title="NEW-ACTIVITY", updatedAt="2026-07-17T00:00:00Z",

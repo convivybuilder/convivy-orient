@@ -117,16 +117,21 @@ def seed_issue_comment(*, item_id, id, actor, body, kind="note", run_id=None,
 
 def seed_signal(*, id, source, kind, actor, ingested_by, product, stream=None,
                 refs=None, body="", meta=None, privacy_class="internal",
-                dedup_key=None, produced_at=None, ingested_at=None,
+                content=None, dedup_key=None, produced_at=None, ingested_at=None,
                 embedded_at=None, acting_human=None) -> str:
     """Register one signal row, in the shape `fake_get_signal`/
     `fake_list_signals` serve. Defaults mirror the removed `Signal` model's
-    column defaults."""
+    column defaults.
+
+    `content` is the separate blob `fake_get_signal_blob` serves — stored on
+    the row for this fake's convenience, but never part of `meta` and never
+    returned by `_signal_record`, matching the real wire's separate
+    `GET /signals/{id}/blob` route."""
     _SIGNALS[id] = dict(
         id=id, source=source, kind=kind, actor=actor, ingested_by=ingested_by,
         product=product, stream=stream, refs=refs if refs is not None else {},
         body=body, meta=meta if meta is not None else {},
-        privacy_class=privacy_class, dedup_key=dedup_key,
+        privacy_class=privacy_class, content=content, dedup_key=dedup_key,
         produced_at=produced_at, ingested_at=ingested_at or utcnow(),
         embedded_at=embedded_at, acting_human=acting_human)
     return id
@@ -137,11 +142,19 @@ def seed_ack(*, signal_id, identity) -> None:
 
 
 def fake_create_signal(*, source, kind, actor, product, body="", stream=None,
-                       refs=None, meta=None, privacy_class=None,
-                       dedup_key=None, acting_human=None,
+                       refs=None, meta=None, privacy_class=None, content=None,
+                       dedup_key=None, produced_at=None, acting_human=None,
+                       human_reserved=False,
                        ) -> tuple[str, bool, "library_client.SignalRecord | None"]:
     """Stands in for `library_client.create_signal`. Returns `(id, idempotent,
     existing)`.
+
+    **`kind: post_draft` REQUIRES `human_reserved` (or `acting_human`, which
+    implies it)**, modelling the real Library's `signal.post_draft` wall
+    (ADR-0038): the agent credential never holds that capability, full stop,
+    so a write under it refuses rather than landing a draft an unprivileged
+    reader could then list. `_may_see` below is the read side of the same
+    wall.
 
     **WHICH CREDENTIAL WENT OUT IS MODELLED BY `acting_human`, because that is
     how the real client decides it** and the difference is a capability rather
@@ -176,15 +189,23 @@ def fake_create_signal(*, source, kind, actor, product, body="", stream=None,
         raise ValueError("acting_human was passed but is empty")
     if privacy_class == "customer" and acting_human is None:
         raise urllib.error.HTTPError(None, 403, "forbidden: signal.create_customer", None, None)
+    human_reserved = human_reserved or acting_human is not None
+    if kind == "post_draft" and not human_reserved:
+        raise urllib.error.HTTPError(None, 403, "forbidden: signal.post_draft", None, None)
     if dedup_key:
         for sid, row in _SIGNALS.items():
             if row.get("dedup_key") == dedup_key:
                 return sid, True, _signal_record(row)
     sid = new_signal_id()
+    # `produced_at` arrives as the RFC-3339 string the wire carries (matching
+    # what `create_signal` actually sends); parsed here into the naive-UTC
+    # datetime every other row in this store holds, the same conversion the
+    # real Library does on the way in.
     seed_signal(id=sid, source=source, kind=kind, actor=actor, ingested_by="fake-agent",
                product=product, body=body, stream=stream, refs=refs, meta=meta,
-               privacy_class=privacy_class or "internal", dedup_key=dedup_key,
-               acting_human=acting_human)
+               privacy_class=privacy_class or "internal", content=content,
+               dedup_key=dedup_key,
+               produced_at=library_client._iso(produced_at), acting_human=acting_human)
     return sid, False, None
 
 
@@ -314,25 +335,34 @@ FAKE_CAPABILITIES = {"signal.read"}
 _PRIVACY_CUSTOMER = "customer"
 
 
-def _may_see(row: dict) -> bool:
-    """The customer wall for ONE row, evaluated against `FAKE_CAPABILITIES`.
+def _may_see(row: dict, *, human_reserved: bool = False) -> bool:
+    """The customer wall and the post_draft wall for ONE row.
 
     Every path that can return a signal goes through this — the list, the facets,
     the detail route and the ack read — so a capability flip moves all four
     together. Applying it to only the browse path would leave the detail and ack
     routes asserting the OUTCOME of a capability check while claiming to model
     it, which is the very thing this indirection was added to stop (reviewer,
-    PR #170 round 2)."""
+    PR #170 round 2).
+
+    **`post_draft` has no capability toggle, unlike `signal.customer`.** The
+    agent credential never holds `signal.post_draft` — ADR-0038 reserves it for
+    the approved-client credential outright, not conditionally — so this is a
+    flat `human_reserved` check rather than a second entry in
+    `FAKE_CAPABILITIES`: there is no deployment where flipping a flag would
+    change the answer."""
+    if row["kind"] == "post_draft" and not human_reserved:
+        return False
     if "signal.customer" in FAKE_CAPABILITIES:
         return True
     return row["privacy_class"] != _PRIVACY_CUSTOMER
 
 
-def _visible_signals() -> list[dict]:
+def _visible_signals(*, human_reserved: bool = False) -> list[dict]:
     """Every signal row this credential's capabilities allow — the customer
     wall `GET /signals` and `GET /signals/facets` both apply (`_customer_wall` in
     the Library repo), evaluated against `FAKE_CAPABILITIES` rather than assumed."""
-    return [r for r in _SIGNALS.values() if _may_see(r)]
+    return [r for r in _SIGNALS.values() if _may_see(r, human_reserved=human_reserved)]
 
 
 # `order=` → the sort key `GET /signals` computes for it (`SIGNAL_ORDER_CLAUSES`
@@ -345,24 +375,33 @@ _SIGNAL_ORDER_KEYS = {
 }
 
 
-def fake_list_signals(*, source=None, kind=None, product=None, order=None, cap=None):
-    """Reproduces `GET /signals`'s filtering (`source`/`kind` IN-lists, the
-    `product` PRE-filter, the customer wall, the whitelisted `order` clauses)
-    against the in-memory store rather than the wire — the same trick
+def fake_list_signals(*, source=None, kind=None, stream=None, product=None, order=None,
+                      cap=None, human_reserved=False):
+    """Reproduces `GET /signals`'s filtering (`source`/`kind`/`stream` IN-lists,
+    the `product` PRE-filter, the customer wall, the whitelisted `order`
+    clauses) against the in-memory store rather than the wire — the same trick
     `fake_list_issue_items` plays for issues. `cap` slices the sorted result,
     standing in for the real route's pagination: the fake reads every matching
     row at once, so there is no MAX_PAGE clamp to loop past here.
 
-    `product` is applied BEFORE `cap`, same ordering as `source`/`kind` — a
-    caller asking for `cap=5` product-scoped rows gets 5 rows of that product,
-    not 5 rows of anything with the wrong ones filtered out afterward. That
-    distinction is the whole reason `list_signals` grew a `product` param
-    instead of reusing the post-filtering search route."""
-    rows = _visible_signals()
+    `product` is applied BEFORE `cap`, same ordering as `source`/`kind`/
+    `stream` — a caller asking for `cap=5` product-scoped rows gets 5 rows of
+    that product, not 5 rows of anything with the wrong ones filtered out
+    afterward. That distinction is the whole reason `list_signals` grew a
+    `product` param instead of reusing the post-filtering search route."""
+    rows = _visible_signals(human_reserved=human_reserved)
     if source:
         rows = [r for r in rows if r["source"] in source]
     if kind:
         rows = [r for r in rows if r["kind"] in kind]
+    if stream:
+        # `stream`, unlike `source`/`kind`, is routinely passed as a bare
+        # string by a caller naming one slug (`blog_api.py`) rather than a
+        # list — and `r["stream"] in stream` for a bare string is substring
+        # matching, not the membership test every other filter here performs.
+        # Normalized to a list so both calling conventions check equality.
+        wanted = [stream] if isinstance(stream, str) else stream
+        rows = [r for r in rows if r["stream"] in wanted]
     if product:
         rows = [r for r in rows if r["product"] == product]
     rows.sort(key=_SIGNAL_ORDER_KEYS[order], reverse=True)
@@ -376,6 +415,17 @@ def fake_get_signal(signal_id: str):
     if row is None or not _may_see(row):
         return None
     return _signal_record(row)
+
+
+def fake_get_signal_blob(signal_id: str, *, human_reserved: bool = False):
+    """Stands in for `library_client.get_signal_blob` — `GET
+    /signals/{id}/blob`. Behind the same `_may_see` wall as every other read:
+    a `post_draft` row's blob is invisible without `human_reserved`, matching
+    the row itself rather than being a second, separately-gated route."""
+    row = _SIGNALS.get(signal_id)
+    if row is None or not _may_see(row, human_reserved=human_reserved):
+        return None
+    return row.get("content")
 
 
 def fake_signal_facets(*, source=None, kind=None):
@@ -587,11 +637,17 @@ def fake_get_reference_document(doc_id: str, *, audience: str):
 def fake_signal_acks(signal_ids, *, acting_human: str):
     """Mirrors `_ack_visible`: an id that is missing or customer-class is simply
     absent from the answer, the same collapse `fake_get_signal` gives a single
-    id."""
+    id.
+
+    `human_reserved=True` on the visibility check, matching
+    `library_client.signal_acks`'s own `_request(..., human_reserved=True)` —
+    this read already goes out under the approved-client credential, not the
+    agent one."""
     if not signal_ids:
         return set()
     visible = {sid for sid in signal_ids
-              if (row := _SIGNALS.get(sid)) is not None and _may_see(row)}
+              if (row := _SIGNALS.get(sid)) is not None
+              and _may_see(row, human_reserved=True)}
     if not visible:
         return set()
     return {sid for sid in visible if (sid, acting_human) in _ACKS}
@@ -652,6 +708,7 @@ def patch(monkeypatch) -> None:
     monkeypatch.setattr(library_client, "corrections_queue_ids", fake_corrections_queue_ids)
     monkeypatch.setattr(library_client, "list_signals", fake_list_signals)
     monkeypatch.setattr(library_client, "get_signal", fake_get_signal)
+    monkeypatch.setattr(library_client, "get_signal_blob", fake_get_signal_blob)
     monkeypatch.setattr(library_client, "signal_facets", fake_signal_facets)
     monkeypatch.setattr(library_client, "search_signals", fake_search_signals)
     monkeypatch.setattr(library_client, "signal_acks", fake_signal_acks)

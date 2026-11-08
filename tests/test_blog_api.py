@@ -19,12 +19,36 @@ import access_identity
 import api_common
 import authz
 import blog_api
-import blog_store
 import control_db
 import library_client
+import library_fake
 import server as srv
 
 AGENT_TOKEN = "agent-secret-xyz"
+
+
+def _archive_revisions(slug):
+    """Every Archives entry for `slug`, oldest first — the same read
+    `blog_api._slug_entries` does, so a test can check what a route actually
+    wrote through the Library, the only store a post has (CQ·168, CQ·170)."""
+    posts = library_client.list_signals(product=blog_api.PRODUCT, kind=[blog_api.KIND_POST],
+                                        stream=slug)
+    drafts = library_client.list_signals(product=blog_api.PRODUCT, kind=[blog_api.KIND_DRAFT],
+                                         stream=slug, human_reserved=True)
+    sigs = sorted([*posts, *drafts], key=lambda s: s.produced_at or s.ingested_at)
+    return sigs
+
+
+def _archive_latest(slug):
+    sigs = _archive_revisions(slug)
+    return sigs[-1] if sigs else None
+
+
+def _archive_body(slug):
+    sig = _archive_latest(slug)
+    if sig is None:
+        return None
+    return library_client.get_signal_blob(sig.id, human_reserved=(sig.kind == blog_api.KIND_DRAFT))
 
 
 @pytest.fixture
@@ -33,14 +57,15 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(control_db, "_engine", None)
     monkeypatch.setattr(control_db, "_engine_url", None)
     control_db.init_db()
+    library_fake.patch(monkeypatch)
 
     roles = tmp_path / "roles.json"
     roles.write_text(json.dumps({
         "operator@example.com": {"role": "admin", "products": ["*"]},
-        "mem@example.com": {"role": "member", "products": ["vivy"]},
+        "mem@example.com": {"role": "member", "products": ["alpha"]},
         "obs@example.com": {"role": "observer", "products": ["*"]},
-        "con@example.com": {"role": "contractor", "products": ["vivy"]},
-        "ctb@example.com": {"role": "contributor", "products": ["vivy"]},
+        "con@example.com": {"role": "contractor", "products": ["alpha"]},
+        "ctb@example.com": {"role": "contributor", "products": ["alpha"]},
     }))
     monkeypatch.setattr(authz, "ROLES", roles)
     # The project scope now comes from the Library (E19·1,
@@ -54,7 +79,7 @@ def client(tmp_path, monkeypatch):
             json.loads(authz.ROLES.read_text()).get(email, {}).get("products", [])))
 
     toks = tmp_path / "api-tokens.json"
-    toks.write_text(json.dumps({AGENT_TOKEN: {"name": "an-agent", "products": ["vivy"]}}))
+    toks.write_text(json.dumps({AGENT_TOKEN: {"name": "an-agent", "products": ["alpha"]}}))
     monkeypatch.setattr(api_common, "API_TOKENS", toks)
 
     jwtc = tmp_path / "jwt.json"
@@ -94,9 +119,10 @@ def test_the_author_is_the_verified_identity_not_the_request_body(client):
                     headers=_human("mem@example.com"))
     assert r.status_code == 201
     assert r.json()["author"] == "mem@example.com"
-    stored = blog_store.get("a-post")
-    assert stored.author == "mem@example.com"
-    assert "someone@else.example" not in (stored.author + stored.title + stored.body)
+    sig = _archive_latest("a-post")
+    assert sig.actor == "mem@example.com"
+    title = sig.meta.get("title", "")
+    assert "someone@else.example" not in (sig.actor + title + _archive_body("a-post"))
 
 
 def test_authorship_human_cannot_be_claimed_only_observed(client):
@@ -115,8 +141,15 @@ def test_authorship_human_cannot_be_claimed_only_observed(client):
     assert r2.json()["authorship"] == "human"
 
 
-def test_a_later_save_cannot_rewrite_the_attested_author(client):
-    """Otherwise the attestation holds only until the second request."""
+def test_a_save_attests_its_own_writer_and_never_an_earlier_entrys(client):
+    """Rule 1 still holds — the author comes from the verified identity, never
+    from the request body — but with the Archives as the store, each revision
+    carries its OWN attested author rather than one frozen at creation: E26's
+    spec calls it "its author, taken from the identity Orient verified for the
+    person writing" for EACH entry, and `operator@example.com` genuinely wrote
+    this one. Saving still never rewrites an EARLIER entry's own attestation,
+    which stays `mem@example.com` below — append-only, not "immutable
+    forever"."""
     client.post("/api/blog/drafts", json={"slug": "p", "title": "T", "body": "one"},
                 headers=_human("mem@example.com"))
     r = client.put("/api/blog/drafts/p",
@@ -124,10 +157,13 @@ def test_a_later_save_cannot_rewrite_the_attested_author(client):
                          "authorship": "human"},
                    headers=_human("operator@example.com"))
     assert r.status_code == 200
-    stored = blog_store.get("p")
-    assert stored.author == "mem@example.com", "the original author was overwritten"
-    assert stored.authorship == "human"
-    assert "someone@else.example" not in (stored.author + stored.body)
+    sig = _archive_latest("p")
+    assert sig.actor == "operator@example.com", "the real writer was not attested"
+    assert sig.meta["authorship"] == "human"
+    assert "someone@else.example" not in (sig.actor + _archive_body("p"))
+
+    first = _archive_revisions("p")[0]
+    assert first.actor == "mem@example.com", "an earlier entry's attestation was rewritten"
 
 
 def test_a_title_cannot_forge_the_author(client):
@@ -148,13 +184,13 @@ def test_a_title_cannot_forge_the_author(client):
                     headers=_human("mem@example.com"))
     assert r.status_code == 201
 
-    stored = blog_store.get("inject")
-    assert stored.author == "mem@example.com"
-    assert stored.authorship == "human"
-    assert stored.title == evil[:blog_api.MAX_TITLE], "the title was not stored verbatim"
+    sig = _archive_latest("inject")
+    assert sig.actor == "mem@example.com"
+    assert sig.meta["authorship"] == "human"
+    assert sig.meta["title"] == evil[:blog_api.MAX_TITLE], "the title was not stored verbatim"
 
 def test_a_title_cannot_forge_the_author_on_save_either(client):
-    """The same property on the other write path. `blog_store.save` takes no
+    """The same property on the other write path. `save_draft` takes no
     author parameter at all, so this is now structural rather than defended."""
     client.post("/api/blog/drafts", json={"slug": "s", "title": "T", "body": "one"},
                 headers=_human("mem@example.com"))
@@ -162,9 +198,9 @@ def test_a_title_cannot_forge_the_author_on_save_either(client):
                json={"title": 'X"\nauthor: someone@else.example\ny: "', "body": "two"},
                headers=_human("mem@example.com"))
 
-    stored = blog_store.get("s")
-    assert stored.author == "mem@example.com"
-    assert stored.body == "two"
+    sig = _archive_latest("s")
+    assert sig.actor == "mem@example.com"
+    assert _archive_body("s") == "two"
 
 def test_a_body_round_trips_exactly_including_a_horizontal_rule(client):
     """`---` on its own line is a markdown horizontal rule, which prose plausibly
@@ -178,7 +214,7 @@ def test_a_body_round_trips_exactly_including_a_horizontal_rule(client):
     client.put("/api/blog/drafts/hr", json={"body": prose},
                headers=_human("mem@example.com"))
 
-    assert blog_store.get("hr").body == prose
+    assert _archive_body("hr") == prose
 # --- the gate ----------------------------------------------------------------
 
 
@@ -197,7 +233,7 @@ def test_read_tier_roles_may_not_author(client, email):
     r = client.post("/api/blog/drafts", json={"slug": "nope", "body": "x"},
                     headers=_human(email))
     assert r.status_code == 403
-    assert blog_store.get("nope") is None
+    assert _archive_latest("nope") is None
 
 def test_an_agent_token_may_not_author(client):
     """The surface publishes to a PUBLIC-facing site, so no automated caller
@@ -206,7 +242,7 @@ def test_an_agent_token_may_not_author(client):
     r = client.post("/api/blog/drafts", json={"slug": "by-agent", "body": "x"},
                     headers={"Authorization": f"Bearer {AGENT_TOKEN}"})
     assert r.status_code in (401, 403)
-    assert blog_store.get("by-agent") is None
+    assert _archive_latest("by-agent") is None
 
 
 def test_an_unauthenticated_caller_gets_401(client):
@@ -217,7 +253,7 @@ def test_a_cross_origin_post_is_refused(client):
     r = client.post("/api/blog/drafts", json={"slug": "csrf", "body": "x"},
                     headers=_human("mem@example.com", origin="http://evil.example"))
     assert r.status_code == 403
-    assert blog_store.get("csrf") is None
+    assert _archive_latest("csrf") is None
 
 
 # --- listing ------------------------------------------------------------------
@@ -258,9 +294,9 @@ def test_list_is_empty_rather_than_erroring_before_any_draft_exists(client):
     assert r.status_code == 200 and r.json()["drafts"] == []
 
 
-# --- listing published posts, now from Orient's own store ---------------------
+# --- listing published posts, now from the Library's Archives ----------------
 #
-# These read `blog_store` rather than `convivy-lab`'s git HEAD
+# These read the Archives rather than `convivy-lab`'s git HEAD
 # (issue_01M0N650ZJHPQYPF54HD22RJEH). The properties are the ones the git-backed
 # version held; only the source changed. The two that did NOT survive are the
 # ones about tracking a commit, because there is no commit any more.
@@ -275,6 +311,77 @@ def _publish(client, slug, *, title, author="The operator", authorship="human"):
     r = client.post(f"/api/blog/drafts/{slug}/publish", headers=_human("mem@example.com"))
     assert r.status_code == 200, r.text
     return r
+
+
+def test_list_posts_never_asks_the_library_for_a_draft_row(client, monkeypatch):
+    """DoD: a draft must not appear to a viewer without Writing Desk write
+    access on any Orient page OR ANY LIBRARY READ ORIENT MAKES ON THEIR
+    BEHALF. Proven by making a `human_reserved` call raise outright — if
+    `list_posts` ever asked for a `kind=post_draft` row, this errors rather
+    than merely showing an empty field that could pass for the right reason
+    by accident."""
+    client.post("/api/blog/drafts", json={"slug": "secret", "title": "Secret", "body": "x"},
+                headers=_human("mem@example.com"))
+
+    real_list_signals = library_client.list_signals
+
+    def _guarded(*, human_reserved=False, **kw):
+        if human_reserved:
+            raise AssertionError("list_posts asked the Library for a post_draft row")
+        return real_list_signals(human_reserved=human_reserved, **kw)
+
+    monkeypatch.setattr(library_client, "list_signals", _guarded)
+    r = client.get("/api/blog/posts", headers=_human("obs@example.com"))
+    assert r.status_code == 200
+    assert r.json()["posts"] == []
+
+
+def test_a_migrated_posts_current_entry_is_latest_until_a_new_save(client):
+    """Mirrors `bin/copy_posts_to_archives.py`'s own shapes: a real revision
+    `1` plus one `reason="current"` mirror carrying no number, dated after it.
+    The mirror is latest — and reachable with no `?revision=` at all — until a
+    post-deploy save gives the slug an entry dated later still, continuing the
+    numbering from the real revision rather than from the mirror."""
+    import datetime as dt
+    library_fake.seed_signal(
+        id="sig_rev1", source="blog_migration", kind=blog_api.KIND_POST,
+        actor="writer@example.com", ingested_by="migration", product=blog_api.PRODUCT,
+        stream="old-post", body="Old Post",
+        meta={"title": "Old Post", "revision": 1, "authorship": "human", "reason": "publish"},
+        content="original text", produced_at=dt.datetime(2026, 1, 1))
+    library_fake.seed_signal(
+        id="sig_current", source="blog_migration", kind=blog_api.KIND_POST,
+        actor="writer@example.com", ingested_by="migration", product=blog_api.PRODUCT,
+        stream="old-post", body="Old Post",
+        meta={"title": "Old Post", "revision": "current", "authorship": "human",
+              "reason": "current"},
+        content="current text", produced_at=dt.datetime(2026, 2, 1))
+
+    r = client.get("/api/blog/drafts/old-post", headers=_human("mem@example.com"))
+    assert r.status_code == 200
+    assert r.json()["body"] == "current text"
+    assert r.json()["revision"] is None
+    assert r.json()["revisions"] == [1]
+
+    client.put("/api/blog/drafts/old-post", json={"body": "post-deploy edit"},
+               headers=_human("mem@example.com"))
+    r2 = client.get("/api/blog/drafts/old-post", headers=_human("mem@example.com"))
+    assert r2.json()["body"] == "post-deploy edit"
+    assert r2.json()["revision"] == 2
+    assert r2.json()["revisions"] == [1, 2]
+
+    r3 = client.get("/api/blog/drafts/old-post?revision=1", headers=_human("mem@example.com"))
+    assert r3.json()["body"] == "original text"
+
+
+def test_a_malformed_or_unknown_revision_is_refused(client):
+    created = client.post("/api/blog/drafts", json={"slug": "p", "title": "P", "body": "text"},
+                          headers=_human("mem@example.com"))
+    assert created.status_code == 201
+    r = client.get("/api/blog/drafts/p?revision=abc", headers=_human("mem@example.com"))
+    assert r.status_code == 400
+    r2 = client.get("/api/blog/drafts/p?revision=99", headers=_human("mem@example.com"))
+    assert r2.status_code == 404
 
 
 def test_list_posts_returns_published_posts_newest_first(client):
@@ -419,8 +526,8 @@ def test_a_hostile_or_malformed_slug_writes_nothing(client, slug, tmp_path):
     # **This assertion used to be vacuous and `reviewer` caught it** (PR #197):
     # it checked that nothing appeared under a temp lab directory the fixture no
     # longer creates, so it passed regardless of what the route did. There is no
-    # filesystem to inspect now; the store is where a hostile slug would land.
-    assert blog_store.get(slug) is None, "a hostile slug reached the store"
+    # filesystem to inspect now; the Archives are where a hostile slug would land.
+    assert _archive_latest(slug) is None, "a hostile slug reached the Archives"
 
 
 def test_mixed_case_is_normalized_rather_than_refused(client):
@@ -429,7 +536,7 @@ def test_mixed_case_is_normalized_rather_than_refused(client):
     r = client.post("/api/blog/drafts", json={"slug": "Mixed-Case", "body": "x"},
                     headers=_human("mem@example.com"))
     assert r.status_code == 201 and r.json()["slug"] == "mixed-case"
-    assert blog_store.get("mixed-case") is not None
+    assert _archive_latest("mixed-case") is not None
 
 def test_a_duplicate_slug_is_refused_rather_than_silently_overwriting(client):
     client.post("/api/blog/drafts", json={"slug": "dupe", "body": "first"},
@@ -437,7 +544,7 @@ def test_a_duplicate_slug_is_refused_rather_than_silently_overwriting(client):
     r = client.post("/api/blog/drafts", json={"slug": "dupe", "body": "second"},
                     headers=_human("operator@example.com"))
     assert r.status_code == 409
-    assert blog_store.get("dupe").body == "first", "the loser overwrote the winner"
+    assert _archive_body("dupe") == "first", "the loser overwrote the winner"
 
 
 # --- publishing, which now writes the store and pushes the corpus to the journal --
@@ -450,15 +557,14 @@ def test_a_duplicate_slug_is_refused_rather_than_silently_overwriting(client):
 # removed rather than one that broke. What replaces them is below.
 
 
-def test_publish_writes_the_store_and_pushes_the_corpus_to_the_journal(client, monkeypatch):
+def test_publish_writes_the_archives_and_pushes_the_corpus_to_the_journal(client, monkeypatch):
     """**The defect this closes.** Publish used to write `convivy-lab` while the
-    corpus route read `blog_store`, so a newly published post reached neither the
-    store nor the site — the posts on the old site were there purely from the
-    one-time import, and both halves looked like they worked.
+    corpus route read Orient's own store, so a newly published post reached
+    neither the store nor the site — the posts on the old site were there
+    purely from the one-time import, and both halves looked like they worked.
 
     The publish calls `journal_push.push_corpus` with no arguments and returns
     its result, site build included, as `journal`."""
-    import blog_store
     import journal_push
     calls = []
 
@@ -480,49 +586,47 @@ def test_publish_writes_the_store_and_pushes_the_corpus_to_the_journal(client, m
                                    "site_build": {"dispatched": True, "reason": None}}
     assert "rebuild" not in r.json()
 
-    post = blog_store.get("a-post")
-    assert post is not None and post.status == blog_store.PUBLISHED
-    assert post.body.strip() == "words"
+    latest = _archive_latest("a-post")
+    assert latest is not None and latest.kind == blog_api.KIND_POST
+    assert _archive_body("a-post").strip() == "words"
 
 
 def test_publish_records_the_attested_publisher_on_the_revision(client):
     """A publication with nobody attached is the thing that must not be possible.
     `ingest` carries no actor because an imported post predates the store; this
     path has a verified identity and must record it."""
-    import blog_store
     client.post("/api/blog/drafts",
                 json={"slug": "a-post", "title": "A Post", "body": "words"},
                 headers=_human("mem@example.com"))
     client.post("/api/blog/drafts/a-post/publish", headers=_human("mem@example.com"))
 
-    rev = blog_store.revisions("a-post")[-1]
-    assert rev.reason == "publish"
+    rev = _archive_revisions("a-post")[-1]
+    assert rev.meta["reason"] == "publish"
     assert rev.actor == "mem@example.com"
 
 
 def test_publishing_an_edit_keeps_the_original_publication_date(client):
     """A blog is ordered by when a piece went out. Fixing a typo must not lift a
     two-month-old post to the top of the site."""
-    import blog_store
     client.post("/api/blog/drafts",
                 json={"slug": "a-post", "title": "A Post", "body": "first"},
                 headers=_human("mem@example.com"))
-    client.post("/api/blog/drafts/a-post/publish", headers=_human("mem@example.com"))
-    first_date = blog_store.get("a-post").published_at
+    r1 = client.post("/api/blog/drafts/a-post/publish", headers=_human("mem@example.com"))
+    first_date = r1.json()["published_at"]
 
     client.put("/api/blog/drafts/a-post",
                json={"title": "A Post", "body": "second"},
                headers=_human("mem@example.com"))
-    client.post("/api/blog/drafts/a-post/publish", headers=_human("mem@example.com"))
+    r2 = client.post("/api/blog/drafts/a-post/publish", headers=_human("mem@example.com"))
 
-    post = blog_store.get("a-post")
-    assert post.published_at == first_date
-    assert post.body.strip() == "second"
-    # publish, then the PUT save (now itself revision-bearing,
-    # issue_01M0RAVDCH4DQVXDGXXVQ24J71), then publish again.
-    revs = blog_store.revisions("a-post")
-    assert len(revs) == 3
-    assert revs[1].reason == "save" and revs[1].body.strip() == "first"
+    assert r2.json()["published_at"] == first_date
+    assert _archive_body("a-post").strip() == "second"
+    # create, the first publish, the PUT save, then the second publish — four
+    # Archives entries, oldest first.
+    revs = _archive_revisions("a-post")
+    assert [r.meta.get("reason") for r in revs] == ["create", "publish", "save", "publish"]
+    assert library_client.get_signal_blob(
+        revs[1].id, human_reserved=(revs[1].kind == blog_api.KIND_DRAFT)).strip() == "first"
     assert revs[1].actor == "mem@example.com"
 
 
@@ -549,17 +653,22 @@ def test_a_failed_journal_push_does_not_fail_the_publish(client, monkeypatch):
 def test_publishing_a_post_with_no_attested_author_is_refused(client):
     """**The reachable case changed and the guard still matters.** It used to be
     a hand-written file with no frontmatter; there are no files now, so nobody
-    can hand-write a draft. What remains is the imported corpus: `greetings` came
-    out of `convivy-lab` with no `author` in its frontmatter, and `ingest`
-    deliberately stored it empty rather than inferring the obvious answer.
+    can hand-write a draft. What remains is a row the Archives migration itself
+    cannot produce any more (its own `--authorless-actor` fills every empty
+    author in before the write), but a signal with an empty `actor` is still a
+    shape this module cannot rule out by construction, so the guard stays and
+    this seeds one straight into the Archives the way the migration no longer
+    can.
 
     Publishing such a post would put an unattributed piece on a public site under
     a provenance label nobody attested, so it is refused until somebody saves it
     through the Writing Desk and an identity is attached."""
-    import datetime as dt
-    blog_store.ingest(slug="imported", title="Imported", body="body",
-                      author="", authorship="human",
-                      published_at=dt.datetime(2026, 7, 1), status=blog_store.DRAFT)
+    library_fake.seed_signal(
+        id="sig_imported", source="blog_migration", kind=blog_api.KIND_DRAFT,
+        actor="", ingested_by="migration", product=blog_api.PRODUCT, stream="imported",
+        body="Imported", meta={"title": "Imported", "revision": 1,
+                               "authorship": "human", "reason": "ingest"},
+        content="body")
     r = client.post("/api/blog/drafts/imported/publish",
                     headers=_human("mem@example.com"))
     assert r.status_code == 409
@@ -571,7 +680,7 @@ def test_publishing_an_empty_post_is_refused(client):
                 headers=_human("mem@example.com"))
     r = client.post("/api/blog/drafts/empty/publish", headers=_human("mem@example.com"))
     assert r.status_code == 400
-    assert blog_store.get("empty").status == blog_store.DRAFT, "it was published anyway"
+    assert _archive_latest("empty").kind == blog_api.KIND_DRAFT, "it was published anyway"
 
 
 # --- the listing agrees with the parse the read/write paths use ----------------
@@ -598,7 +707,7 @@ def test_a_quoted_title_lists_exactly_as_it_was_saved(client, title):
 
 def test_a_published_post_can_still_be_loaded_into_the_editor(client):
     """**A regression this PR introduced, caught by `reviewer`.** The first cut
-    404'd `get_draft` whenever the post was published — but `blog_store.save`
+    404'd `get_draft` whenever the post was published — but `save_draft`
     deliberately writes to a published row, because editing a live post and
     re-publishing is the normal correction path. So the Writing Desk could save a
     post it could not open. Nothing else fills the gap: `/blog/posts` omits the
@@ -618,44 +727,7 @@ def test_a_published_post_can_still_be_loaded_into_the_editor(client):
     client.put("/api/blog/drafts/live", json={"body": "corrected"},
                headers=_human("mem@example.com"))
     client.post("/api/blog/drafts/live/publish", headers=_human("mem@example.com"))
-    assert blog_store.get("live").body == "corrected"
-
-
-def test_create_does_not_look_before_it_inserts(client):
-    """**The previous version of this test was theatre and `reviewer` proved it**
-    (PR #197). It planted a row before calling the real `create`, so ANY
-    implementation refused at that point — including a `get()`-then-`add()`, which
-    it was written to catch. It verified "create refuses a taken slug", which was
-    never in doubt.
-
-    The property that matters cannot be observed from outside: it is that the
-    refusal comes from the INSERT rather than from a prior lookup, because a
-    check-then-write lets two concurrent creates both pass the check and the
-    loser's row overwrite the winner while its author receives a 201 — the draft
-    gone, attributed to somebody else (code review, #114).
-
-    So this asserts the mechanism directly: `create` must not read the row it is
-    about to write. A future refactor to `get()`-then-`add()` fails here.
-    """
-    import sqlalchemy.orm
-
-    real_get = sqlalchemy.orm.Session.get
-    looked = []
-
-    def _spy(self, entity, ident, *a, **kw):
-        looked.append(getattr(entity, "__name__", str(entity)))
-        return real_get(self, entity, ident, *a, **kw)
-
-    sqlalchemy.orm.Session.get = _spy
-    try:
-        blog_store.create(slug="fresh", title="T", body="b",
-                          author="mem@example.com", authorship="human")
-    finally:
-        sqlalchemy.orm.Session.get = real_get
-
-    assert "BlogPost" not in looked, (
-        "create looked the slug up before inserting; the 409 must be the "
-        "primary key's decision, not a prior check's")
+    assert _archive_body("live") == "corrected"
 
 
 def test_a_duplicate_create_is_still_refused_with_the_winner_intact(client):
@@ -669,9 +741,45 @@ def test_a_duplicate_create_is_still_refused_with_the_winner_intact(client):
                      headers=_human("operator@example.com"))
 
     assert r1.status_code == 201 and r2.status_code == 409
-    survivor = blog_store.get("raced")
-    assert survivor.body == "first"
-    assert survivor.author == "mem@example.com", "attributed to the wrong writer"
+    assert _archive_body("raced") == "first"
+    assert _archive_latest("raced").actor == "mem@example.com", "attributed to the wrong writer"
+
+
+def test_create_refuses_a_slug_the_migration_left_with_no_numbered_revision(client):
+    """A migrated draft that was created but never saved copies with only a
+    `reason="current"` mirror and no `post:<slug>:1` key — the one shape the
+    `dedup_key` collision cannot catch on its own, so the route's own
+    pre-check is what refuses a second create here."""
+    import datetime as dt
+    library_fake.seed_signal(
+        id="sig_only_current", source="blog_migration", kind=blog_api.KIND_DRAFT,
+        actor="writer@example.com", ingested_by="migration", product=blog_api.PRODUCT,
+        stream="never-saved", body="Never Saved",
+        meta={"title": "Never Saved", "revision": "current", "authorship": "human",
+              "reason": "current"},
+        content="original", produced_at=dt.datetime(2026, 3, 1))
+    r = client.post("/api/blog/drafts", json={"slug": "never-saved", "body": "new text"},
+                    headers=_human("mem@example.com"))
+    assert r.status_code == 409
+
+
+def test_create_refuses_via_the_librarys_own_dedup_even_when_the_pre_check_misses_it(client):
+    """The route's own pre-check cannot catch two truly concurrent creates —
+    both would read "no entry yet" before either had written. `create_signal`'s
+    `dedup_key="post:<slug>:1"` is what resolves that race to one winner;
+    this forces the collision directly, the way two requests racing through
+    the pre-check at once would, rather than relying on request timing."""
+    r1 = client.post("/api/blog/drafts", json={"slug": "race2", "body": "first"},
+                     headers=_human("mem@example.com"))
+    assert r1.status_code == 201
+
+    _, idempotent, existing = library_client.create_signal(
+        source=blog_api.SOURCE, kind=blog_api.KIND_DRAFT, actor="operator@example.com",
+        product=blog_api.PRODUCT, stream="race2", body="second", content="second",
+        meta={"title": "race2", "revision": 1, "authorship": "human", "reason": "create"},
+        dedup_key="post:race2:1", human_reserved=True)
+    assert idempotent is True
+    assert existing.actor == "mem@example.com"
 
 
 # --- the access log (issue_01M1Z882KE85C88GBSB2CS1XJ5) -----------------------
@@ -723,3 +831,149 @@ def test_the_role_never_reaches_the_log(client):
     assert "admin" not in log
 
 
+
+
+# --- a save or publish that loses a race is told so ---------------------------
+
+def _race(monkeypatch, slug):
+    """Another writer lands revision 2 between this route's read and its
+    write: the route still computes 2 from its stale read."""
+    import library_client
+    library_client.create_signal(
+        source=blog_api.SOURCE, kind=blog_api.KIND_DRAFT, actor="other@example.com",
+        product=blog_api.PRODUCT, stream=slug, body="THEIRS", content="THEIRS",
+        meta={"title": "T", "revision": 2, "authorship": "human", "reason": "save"},
+        dedup_key=f"post:{slug}:2", human_reserved=True)
+    monkeypatch.setattr(blog_api, "_next_revision_number", lambda revs: 2)
+
+
+def test_a_save_that_loses_a_race_is_refused_and_keeps_the_winner(client, monkeypatch):
+    client.post("/api/blog/drafts", json={"slug": "r", "title": "T", "body": "one"},
+                headers=_human("mem@example.com"))
+    _race(monkeypatch, "r")
+    r = client.put("/api/blog/drafts/r", json={"body": "MINE"},
+                   headers=_human("operator@example.com"))
+    assert r.status_code == 409
+    assert _archive_body("r") == "THEIRS"
+
+
+def test_a_publish_that_loses_a_race_publishes_nothing(client, monkeypatch):
+    import journal_push
+    pushed = []
+    monkeypatch.setattr(journal_push, "push_corpus", lambda: pushed.append(True) or {})
+    client.post("/api/blog/drafts", json={"slug": "q", "title": "T", "body": "one"},
+                headers=_human("mem@example.com"))
+    _race(monkeypatch, "q")
+    r = client.post("/api/blog/drafts/q/publish", headers=_human("mem@example.com"))
+    assert r.status_code == 409
+    assert pushed == []
+    assert _archive_latest("q").kind == blog_api.KIND_DRAFT, "it was published anyway"
+
+
+# --- the `first-published` dating marker is never read as a revision -------
+#
+# CQ·170 part A's one-time script (issue_01M5GBJ3H5BFX0CR83019T737D)
+# wrote a one-time `kind=post` entry carrying a migrated post's true
+# original `published_at`, with no revision position. Every reader of a
+# slug's revisions here must filter it out before it can be read as "latest".
+
+
+def _seed_marker(slug, *, produced_at, title="Live", author="writer@example.com",
+                 authorship="human"):
+    library_client.create_signal(
+        source="blog_migration", kind=blog_api.KIND_POST, actor=author,
+        product=blog_api.PRODUCT, stream=slug, body="",
+        meta={"title": title, "revision": None, "authorship": authorship,
+              "reason": "first-published"},
+        dedup_key=f"post:{slug}:first-published", produced_at=produced_at)
+
+
+def _seed_current(slug, *, produced_at, title="Live", author="writer@example.com",
+                  authorship="human"):
+    library_client.create_signal(
+        source="writing_desk", kind=blog_api.KIND_POST, actor=author,
+        product=blog_api.PRODUCT, stream=slug, body="live text", content="live text",
+        meta={"title": title, "revision": "current", "authorship": authorship,
+              "reason": "current"},
+        dedup_key=f"post:{slug}:current:{produced_at}", produced_at=produced_at)
+
+
+@pytest.mark.parametrize("marker_first", [True, False])
+def test_a_marker_tied_with_a_current_entry_never_wins_latest(client, marker_first):
+    """Named case: a migrated post's `current` entry can share the marker's
+    exact `produced_at` (the live `you-will-almost-certainly…` post does,
+    both at `2026-07-28T21:59:53Z`). Tested in both insertion orders, since a
+    sort that broke ties on insertion order would let the marker win half
+    the time."""
+    same_time = "2026-07-28T21:59:53Z"
+    if marker_first:
+        _seed_marker("live", produced_at=same_time)
+        _seed_current("live", produced_at=same_time)
+    else:
+        _seed_current("live", produced_at=same_time)
+        _seed_marker("live", produced_at=same_time)
+
+    revs = blog_api._slug_entries("live")
+    assert len(revs) == 1, "the marker leaked into the revision list"
+    latest = blog_api._latest(revs)
+    assert latest.reason == "current"
+
+
+def test_a_marker_does_not_appear_in_list_posts(client):
+    """Same tie as above, through the route: if the marker won `latest` it
+    would supply the title `list_posts` serves, since both entries share
+    the one `produced_at`."""
+    same_time = "2026-07-28T21:59:53Z"
+    _seed_marker("live", produced_at=same_time, title="Marker Title")
+    _seed_current("live", produced_at=same_time, title="Live")
+
+    r = client.get("/api/blog/posts", headers=_human("mem@example.com"))
+    [post] = r.json()["posts"]
+    assert post["title"] == "Live"
+
+
+# --- every dated reader takes the marker's date -------------------------------
+#
+# A migrated post's `current` entry is dated to the Archives copy, months
+# after the post first went out; the marker carries the real date. Found by
+# `reviewer` on PR #412: publish's response and the Blog Posts page read the
+# first `kind=post` entry only.
+
+
+def test_list_posts_dates_a_migrated_post_by_its_marker_and_sorts_by_it(client):
+    _seed_marker("old", produced_at="2026-07-06T20:11:29Z", title="Old")
+    _seed_current("old", produced_at="2026-10-04T04:37:00Z", title="Old")
+    _seed_marker("mid", produced_at="2026-07-18T16:04:58Z", title="Mid")
+    _seed_current("mid", produced_at="2026-08-01T00:00:00Z", title="Mid")
+
+    r = client.get("/api/blog/posts", headers=_human("mem@example.com"))
+    posts = r.json()["posts"]
+    assert [(p["slug"], p["date"]) for p in posts] == [
+        ("mid", "2026-07-18T16:04:58Z"), ("old", "2026-07-06T20:11:29Z")]
+    assert posts[1]["updated"] == "2026-10-04T04:37:00Z"
+
+
+def test_published_views_dates_a_migrated_post_by_its_marker(client):
+    _seed_marker("old", produced_at="2026-07-06T20:11:29Z")
+    _seed_current("old", produced_at="2026-10-04T04:37:00Z")
+    [view] = blog_api.published_views()
+    assert blog_api._iso(view.published_at) == "2026-07-06T20:11:29Z"
+
+
+def test_republishing_a_migrated_post_reports_its_marker_date(client):
+    _seed_marker("old", produced_at="2026-07-06T20:11:29Z")
+    _seed_current("old", produced_at="2026-10-04T04:37:00Z")
+    client.put("/api/blog/drafts/old", json={"body": "edited"},
+               headers=_human("mem@example.com"))
+    r = client.post("/api/blog/drafts/old/publish", headers=_human("mem@example.com"))
+    assert r.status_code == 200, r.text
+    assert r.json()["published_at"] == "2026-07-06T20:11:29Z"
+
+
+def test_a_post_with_no_marker_is_dated_by_its_first_publish(client):
+    _publish(client, "fresh", title="Fresh")
+    first = client.get("/api/blog/posts", headers=_human("mem@example.com")).json()["posts"][0]
+    client.put("/api/blog/drafts/fresh", json={"body": "edited"},
+               headers=_human("mem@example.com"))
+    r = client.post("/api/blog/drafts/fresh/publish", headers=_human("mem@example.com"))
+    assert r.json()["published_at"] == first["date"]

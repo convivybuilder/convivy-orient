@@ -1,5 +1,6 @@
 #!/usr/bin/env python3.11
-"""`POST /api/epics/{issue_id}/approve` — the operator's approve button
+"""`POST /api/epics/{issue_id}/approve`, `.../decline` and `.../repropose` —
+the operator's approve, decline and repropose buttons on a put-forward epic
 (issue_01M32CB6A9T04NVYPARGDT2GWQ).
 
 **The operator, 2026-09-21:** "all epics stay as proposed, and are displayed as
@@ -48,17 +49,32 @@ than a bare 500 the page could only report as "something went wrong."
 
 **Nothing here writes `maturity` by any other path**, and nothing else in
 Orient writes it at all — Orient reads the field everywhere else.
+
+**Decline and repropose follow approve step for step**, because the Library
+gates all three identically (`epic.approve` and `course.write`, plus the
+attested human) and library#300 (merged 2026-10-20) added them as the
+Library's own routes. Before that PR, Orient's Decline button called the
+Library's resolve route with `wontfix`, which resolve now refuses for any
+epic that is not approved — the defect this module closes. Decline takes a
+`reason` from the body (the outcome-note panel's text on the epic's card);
+repropose takes nothing but the identity. Both read the epic first and scope
+the capability check to its product, the same reason `approve_epic` does.
 """
 from __future__ import annotations
 
 from fastapi import APIRouter, Request
 
 import library_client
-from api_common import _json, api_guard as _api, resolve_identity, same_origin
+from api_common import _json, api_guard as _api, read_json_body, resolve_identity, same_origin
 from authz import authorize
 from control_db import ISSUE_TYPE_EPIC
 
 router = APIRouter(prefix="/api")
+
+# A decline's reason is the outcome-note panel's free text; 4 KiB is far past
+# what a human types there and bounds what one request can make the Library
+# store on every work item and sub-epic the cascade touches.
+_MAX_REASON_BODY = 4 * 1024
 
 
 @router.post("/epics/{issue_id:path}/approve")
@@ -125,4 +141,84 @@ async def approve_epic(issue_id: str, request: Request):
         "acting_human": approval.acting_human,
         "course_id": approval.course_id,
         "position": approval.position,
+    })
+
+
+@router.post("/epics/{issue_id:path}/decline")
+@_api
+async def decline_epic(issue_id: str, request: Request):
+    """Decline `issue_id` as the calling human: the work it describes will
+    not happen. Gated exactly like `approve_epic` above, step for step — see
+    that function's comments for why each check is there and in this order.
+
+    `reason` comes from the body: the outcome-note panel's text on the
+    epic's card, carried through unread otherwise. `acting_human` is
+    `ident.actor`, never a body value, for the same reason `approve_epic`
+    never reads it from the body."""
+    ident = resolve_identity(request)
+    if ident is None:
+        return _json(401, {"error": "unauthorized"})
+    if ident.kind != "human":
+        return _json(403, {"error": "forbidden: declining an epic is a human act"})
+    if not same_origin(request):
+        return _json(403, {"error": "csrf: origin check failed"})
+    if not issue_id.strip():
+        return _json(404, {"error": "not found"})
+    item = library_client.get_issue_item(issue_id)
+    if item is None or item.type != ISSUE_TYPE_EPIC:
+        return _json(404, {"error": "not found"})
+    if not authorize(ident, "epic.approve", item.product):
+        return _json(404, {"error": "not found"})
+    body, refused = await read_json_body(request, _MAX_REASON_BODY)
+    if refused is not None:
+        return refused
+    reason = body.get("reason")
+    if reason is not None and not isinstance(reason, str):
+        return _json(400, {"error": "reason must be a string"})
+    try:
+        decline = library_client.decline_epic(
+            issue_id, acting_human=ident.actor, reason=reason)
+    except library_client.EpicApprovalRefused as refused:
+        return _json(409, {"error": refused.message, "declined": False})
+    return _json(200, {
+        "issue_id": issue_id,
+        "declined": True,
+        "declined_by": decline.declined_by,
+        "acting_human": decline.acting_human,
+        "reason": decline.reason,
+        "children_resolved": decline.children_resolved,
+        "epics_declined": decline.epics_declined,
+    })
+
+
+@router.post("/epics/{issue_id:path}/repropose")
+@_api
+async def repropose_epic(issue_id: str, request: Request):
+    """Repropose `issue_id` as the calling human: send an approved or
+    declined epic back to `proposed` for another look. Gated exactly like
+    `approve_epic` above, step for step."""
+    ident = resolve_identity(request)
+    if ident is None:
+        return _json(401, {"error": "unauthorized"})
+    if ident.kind != "human":
+        return _json(403, {"error": "forbidden: reproposing an epic is a human act"})
+    if not same_origin(request):
+        return _json(403, {"error": "csrf: origin check failed"})
+    if not issue_id.strip():
+        return _json(404, {"error": "not found"})
+    item = library_client.get_issue_item(issue_id)
+    if item is None or item.type != ISSUE_TYPE_EPIC:
+        return _json(404, {"error": "not found"})
+    if not authorize(ident, "epic.approve", item.product):
+        return _json(404, {"error": "not found"})
+    try:
+        repropose = library_client.repropose_epic(issue_id, acting_human=ident.actor)
+    except library_client.EpicApprovalRefused as refused:
+        return _json(409, {"error": refused.message, "reproposed": False})
+    return _json(200, {
+        "issue_id": issue_id,
+        "reproposed": True,
+        "reproposed_by": repropose.reproposed_by,
+        "acting_human": repropose.acting_human,
+        "from_maturity": repropose.from_maturity,
     })

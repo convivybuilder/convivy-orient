@@ -83,7 +83,7 @@ def _write_form(known_products: list[str]) -> str:
     <form class="capture-form card" id="rnForm" hidden>
       <div class="cf-row">
         <label>Product
-          <input name="product" list="rnProds" required maxlength="64" placeholder="constance">
+          <input name="product" list="rnProds" required maxlength="64" placeholder="acme">
           <datalist id="rnProds">{prods}</datalist>
         </label>
         <label>Version
@@ -102,13 +102,17 @@ def _write_form(known_products: list[str]) -> str:
 
 
 def _page(cards_html: str, chips_html: str, count: int,
-          known_products: list[str] | None = None) -> str:
+          known_products: list[str] | None = None, filter_label: str | None = None) -> str:
     block = cards_html or '<div class="allclear">No release notes yet. Write the first one above.</div>'
+    lede = (f'Curated, user-facing notes for <strong>{escape(filter_label)}</strong> — one '
+            f'per shipped version, authored not auto-derived.'
+            if filter_label else
+            'Curated, user-facing notes — one per shipped version, authored not auto-derived.')
     body = f'''<div class="rn">
   <header class="rn-head">
     <div class="eyebrow-line"><span class="dot"></span>team.convivy.com / products / release notes</div>
     <h1>Release notes</h1>
-    <p class="lede">Curated, user-facing notes — one per shipped version, authored not auto-derived.</p>
+    <p class="lede">{lede}</p>
     <div class="chips" id="chips">{chips_html}</div>
   </header>
   <div class="wrap">
@@ -126,7 +130,8 @@ def _page(cards_html: str, chips_html: str, count: int,
                          body=body, extra_css=_CSS)
 
 
-def live_html(scope: frozenset[str] = frozenset(), whole_fleet: bool = True) -> str:
+def live_html(scope: frozenset[str] = frozenset(), whole_fleet: bool = True,
+             requested_product: str | None = None) -> str:
     """/products/release-notes — authored release notes, newest first,
     restricted to `scope` (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M): the
     fan-out fetch (`archives_build.fan_out`, the same per-product fetch
@@ -138,9 +143,19 @@ def live_html(scope: frozenset[str] = frozenset(), whole_fleet: bool = True) -> 
     over the WHOLE store unfiltered — a list of every product that has EVER
     recorded ANY signal, named here regardless of release notes — is
     narrowed to `scope` the same way, so the write form's suggestions can't
-    name a project outside it."""
+    name a project outside it.
+
+    `requested_product` (CQ·167, issue_01M5C9ZDJ14Y55B54XGM5RW5J6) is the
+    project page's `?product=<slug>` link, matched against each row's own
+    `product` exactly — no repo-name/slug translation. Applied to the
+    already-scoped `rows`, after the fan-out above, so a product outside
+    `scope` has nothing left to match and renders identically to a product
+    that does not exist at all: zero rows, the plain empty state, and (via
+    `filter_label` below) no echo of the requested name."""
     products = None if whole_fleet else sorted(scope)
     rows = archives_build.fan_out(_KIND, cap_per_product=_LIMIT, products=products)
+    if requested_product:
+        rows = [sig for sig in rows if sig.product == requested_product]
     rows.sort(key=lambda s: s.produced_at or s.ingested_at, reverse=True)
     rows = rows[:_LIMIT]
     counts: dict[str, int] = {}
@@ -151,7 +166,11 @@ def live_html(scope: frozenset[str] = frozenset(), whole_fleet: bool = True) -> 
     if not whole_fleet:
         known = [p for p in known if p in scope]
     cards = "".join(_card(sig) for sig in rows)
-    return _page(cards, _chips(product_counts, len(rows)), len(rows), known)
+    # Only echoed when it matched at least one in-scope row — never for an
+    # out-of-scope or nonexistent product, which must not be distinguishable
+    # from each other by a name appearing (or not) on the rendered page.
+    filter_label = requested_product if (requested_product and rows) else None
+    return _page(cards, _chips(product_counts, len(rows)), len(rows), known, filter_label)
 
 
 def build_static() -> None:

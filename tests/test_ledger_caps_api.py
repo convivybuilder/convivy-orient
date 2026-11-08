@@ -18,7 +18,7 @@ import authz
 import library_client
 import server as srv
 
-_PROJECT = "vivy"
+_PROJECT = "alpha"
 
 
 @pytest.fixture

@@ -25,8 +25,8 @@ def client(tmp_path, monkeypatch):
     roles = tmp_path / "roles.json"
     roles.write_text(json.dumps({
         "operator@example.com": {"role": "admin", "products": ["*"]},
-        "mem@example.com": {"role": "member", "products": ["vivy"]},
-        "con@example.com": {"role": "contractor", "products": ["vivy"]},
+        "mem@example.com": {"role": "member", "products": ["alpha"]},
+        "con@example.com": {"role": "contractor", "products": ["alpha"]},
     }))
     monkeypatch.setattr(authz, "ROLES", roles)
     # The project scope now comes from the Library (E19·1,
@@ -134,11 +134,11 @@ def test_a_published_post_can_be_opened_in_the_editor(client):
     (issue_01M0R9XR0SFP9360C73P60RR5Q).
 
     Every backend piece already worked — `GET /api/blog/drafts/{slug}` returns a
-    published post (a refusal `reviewer` caught on PR #197) and
-    `blog_store.save` writes to a published row on purpose, because correcting a
-    live post is the normal path. But the two panels read disjoint queries
-    (`drafts()` is `status == DRAFT`, `published()` is `status == PUBLISHED`), so
-    a post left the only list carrying an Edit button the instant it went out.
+    published post (a refusal `reviewer` caught on PR #197) and `save_draft`
+    writes to a published row on purpose, because correcting a live post is
+    the normal path. But the two panels read disjoint queries (drafts whose
+    latest entry is still a draft, posts whose latest is `kind=post`), so a
+    post left the only list carrying an Edit button the instant it went out.
 
     Asserted on the rendered source rather than by driving a browser: the wiring
     is literal JavaScript in the returned HTML, and the gap was that no such
@@ -161,7 +161,7 @@ def test_the_editor_says_whether_a_post_is_live_rather_than_leaving_it_implied(c
 def test_the_live_post_warning_says_publish_is_what_reaches_the_journal(client):
     """Under push, nothing reaches Swabby's Journal until something is Published:
     `journal_push.push_corpus` runs only from `publish_draft`. A Save to a live
-    post changes what `blog_store.corpus()` holds but does not itself reach the
+    post changes what the post Orient shows but does not itself reach the
     journal, so the warning must say that plainly, and say when a publish shows
     up.
 
@@ -223,9 +223,9 @@ def test_a_published_row_shows_that_a_live_post_was_edited(client):
     a change nobody can see happened. `updated` has been on `/api/blog/posts`
     since that route was written and was never rendered.
 
-    Compared by DAY, not timestamp: `blog_store.save` stamps `updated_at` on
-    every write, so a post published and corrected the same day would otherwise
-    read as "edited" on the day it came out, which tells a reader nothing."""
+    Compared by DAY, not timestamp: every save writes a fresh Archives entry,
+    so a post published and corrected the same day would otherwise read as
+    "edited" on the day it came out, which tells a reader nothing."""
     r = client.get("/writing-desk", headers=_human("operator@example.com"))
     assert 'const day = function(v) { return v ? v.slice(0, 10) : ""; };' in r.text
     assert "day(p.updated) !== day(p.date)" in r.text

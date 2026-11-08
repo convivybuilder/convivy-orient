@@ -1,7 +1,8 @@
 """The control-plane data model (WS0.5, ARCH-348).
 
 Orient's own concerns only (ADR-0022): the Reading Room, Web Push
-subscriptions, the Field Notes blog store, and dashboard alert policy.
+subscriptions, and dashboard alert policy. Field Notes posts live in the
+Archives since CQ·170 (issue_01M5GBJ3H5BFX0CR83019T737D).
 Everything else that used to live here — the decision plane, the issue queue,
 signal memory, the Course — was a second copy of what the Library now owns
 alone, and is gone as of
@@ -60,7 +61,7 @@ class RoomEntry(Base):
     of its own beyond the note — `doc_id` is the referenced thing's own id, in
     whichever store `kind` names (ARCH-357, widened for CQ·147, E22):
 
-      - kind="doc"    → a KB doc id, e.g. "sous-chef/runbooks/mini"
+      - kind="doc"    → a KB doc id, e.g. "alpha/runbooks/mini"
       - kind="item"   → a Chart House work item or epic id
       - kind="signal" → an Archives entry id
 
@@ -80,7 +81,7 @@ class RoomEntry(Base):
         ForeignKey("reading_rooms.id", ondelete="CASCADE"), index=True)
     kind: Mapped[str] = mapped_column(String(20), default="doc")  # doc | item | signal
     doc_id: Mapped[str] = mapped_column(String(200))  # the referenced thing's own id
-    section: Mapped[str] = mapped_column(String(120), default="")  # display grouping: "Start here", "Sous Chef"
+    section: Mapped[str] = mapped_column(String(120), default="")  # display grouping: "Start here", "Alpha"
     position: Mapped[int] = mapped_column(Integer, default=0)      # order within section
     note: Mapped[str | None] = mapped_column(Text)                 # per-entry annotation, markdown
     pinned: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -158,56 +159,6 @@ class PushSubscription(Base):
     failures: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 
 
-class BlogPost(Base):
-    """One Field Notes post, and Orient is where it actually lives.
-
-    **Orient is the store of truth and every public surface is a renderer**
-    (the operator, 2026-08-22, `issue_01M0N650ZJHPQYPF54HD22RJEH`). Until this table the
-    corpus lived as files in `convivy-lab/content/field-notes/`, which made the
-    claim untrue in the only way that matters: the repository holding the posts
-    is gone, and a store of truth that another repo can take with it is a cache
-    with good intentions.
-
-    THIS ROW IS CURRENT STATE ONLY. Every save appends a `BlogPostRevision`, so
-    "what did this post say when it was published" survives an edit. Git used to
-    answer that and stopped answering it once `convivy-lab` was archived
-    (2026-09-11).
-
-    `status` is `draft | published`. A draft has never been published; a
-    published post stays published while it is edited, since a surface pulling
-    the corpus should get the current text of a live post rather than watching it
-    disappear mid-edit.
-    """
-
-    __tablename__ = "blog_posts"
-
-    slug: Mapped[str] = mapped_column(String(64), primary_key=True)
-    title: Mapped[str] = mapped_column(String(300), default="")
-    body: Mapped[str] = mapped_column(Text, default="")  # markdown, as authored
-    status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
-
-    # THE ATTESTED FIELDS. `author` and `authorship` are what the SERVER resolved
-    # from the verified Cloudflare Access identity, never what a request body
-    # claimed (`blog_api.py`'s rule 2). They are duplicated onto every revision
-    # rather than only here, because a published label is a claim about a post AS
-    # READ, and an edit must not silently restate who wrote the version somebody
-    # already saw.
-    author: Mapped[str] = mapped_column(String(200), default="")
-    authorship: Mapped[str] = mapped_column(String(20), default="human")
-
-    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    updated_at: Mapped[dt.datetime] = mapped_column(
-        DateTime(timezone=True), default=utcnow, onupdate=utcnow)
-    # When it FIRST went public. Distinct from `updated_at` because the corpus
-    # ships both: `date` orders the blog and must not move when a typo is fixed.
-    published_at: Mapped[dt.datetime | None] = mapped_column(
-        DateTime(timezone=True), default=None, index=True)
-
-    revisions: Mapped[list["BlogPostRevision"]] = relationship(
-        back_populates="post", cascade="all, delete-orphan",
-        order_by="BlogPostRevision.id")
-
-
 class AlertPolicy(Base):
     """A dashboard alert threshold, settable from the page whose metric it
     gates (issue_01M17W6XGXVHNDWCFRTQ38Y2RK).
@@ -242,43 +193,3 @@ class AlertPolicy(Base):
     updated_by: Mapped[str] = mapped_column(String(200))
     updated_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow)
-
-
-class BlogPostRevision(Base):
-    """An append-only record of what a post said, and who attested it, at one
-    moment.
-
-    **Append-only on purpose.** This is the history git held before the corpus
-    moved, and the reason it is worth a table rather than a column: an edit to a
-    published post changes what the public reads, and no other record would say
-    what it replaced. Six posts and a handful of edits is a rounding error of
-    storage against losing the only account of what was published.
-
-    `authorship` is stored per revision rather than inherited from the post, so
-    the classification convivy.com renders for a version is answerable for that
-    version. A post drafted with `llm` assistance and later hand-rewritten is two
-    honest labels, not one retroactive one.
-    """
-
-    __tablename__ = "blog_post_revisions"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    slug: Mapped[str] = mapped_column(
-        String(64), ForeignKey("blog_posts.slug", ondelete="CASCADE"), index=True)
-    title: Mapped[str] = mapped_column(String(300), default="")
-    body: Mapped[str] = mapped_column(Text, default="")
-    author: Mapped[str] = mapped_column(String(200), default="")
-    authorship: Mapped[str] = mapped_column(String(20), default="human")
-    # What produced this revision: ingest | create | save | publish. `ingest` is
-    # the one-time import from convivy-lab and appears on no revision written
-    # afterwards, which is what makes an imported post distinguishable from one
-    # authored here.
-    reason: Mapped[str] = mapped_column(String(20), default="save")
-    # The human the server attested for THIS write. Null for `ingest`, which
-    # predates the store and has no attested actor to name, and also for a
-    # `save` called with no caller-supplied actor — recording an inferred one
-    # would be the fabrication the attestation rule exists to prevent.
-    actor: Mapped[str | None] = mapped_column(String(200), default=None)
-    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-
-    post: Mapped["BlogPost"] = relationship(back_populates="revisions")

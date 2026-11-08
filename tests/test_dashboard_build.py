@@ -18,21 +18,20 @@ def test_provider_of():
     assert db.provider_of("some-other") == "other"
 
 
-def test_canon_product_reports_the_three_nyh_projects_separately():
-    """ARCH-426 amendment: the NYH repos are three projects, each reporting for
-    itself. This table MIRRORS agent-platform's cost_join._NYH_DISPLAY — if the two
+def test_canon_product_reports_the_three_omega_projects_separately():
+    """ARCH-426 amendment: the Omega repos are three projects, each reporting for
+    itself. This table MIRRORS agent-platform's cost_join display map for these repos — if the two
     drift, the scorecard and /activity disagree about the same run."""
-    assert db._canon_product("nyh-arch-tools") == "NYH Arch Tools"
-    assert db._canon_product("nyh-etc") == "East Texas Circle"
-    assert db._canon_product("nyh-park-villa") == "Park Villa"
-    assert db._canon_product("nyh-architecture") == "NYH Arch Tools"
+    assert db._canon_product("omega-tools") == "Omega Tools"
+    assert db._canon_product("omega-etc") == "Omega Circle"
+    assert db._canon_product("omega-villa") == "Omega Villa"
+    assert db._canon_product("omega-architecture") == "Omega Tools"
     # a fourth property must appear as itself, not be swallowed by a prefix match
-    assert db._canon_product("nyh-somewhere-new") == "nyh-somewhere-new"
-    # the Hollis fold is unchanged — three tags across the ARCH-290 rename, one row
-    assert db._canon_product("hollis") == "Hollis"
-    assert db._canon_product("personal-assistant") == "Hollis"
-    assert db._canon_product("pa") == "Hollis"
-    assert db._canon_product("vivy") == "vivy"
+    assert db._canon_product("omega-somewhere-new") == "omega-somewhere-new"
+    # the Gamma fold is unchanged — three tags across the ARCH-290 rename, one row
+    assert db._canon_product("gamma") == "Gamma"
+    assert db._canon_product("mu-assistant") == "Gamma"
+    assert db._canon_product("alpha") == "alpha"
     assert db._canon_product(None) is None
 
 
@@ -55,45 +54,34 @@ def _write(path, rows):
 
 def test_normalize_joins_judge_and_maps_dimensions(tmp_path, monkeypatch):
     sc = tmp_path / "scorecard.jsonl"
-    pa = tmp_path / "personal-assistant.jsonl"
     jg = tmp_path / "judge.jsonl"
     _write(sc, [{
         "run_id": "run-1", "date": "2026-06-03", "agent": "bug-fixer",
         "model": "deepseek/deepseek-chat", "billing_source": "provider_api:deepseek",
-        "repo": "vivy", "cost_usd": 0.02, "pr_state": "MERGED", "merged": True,
+        "repo": "alpha", "cost_usd": 0.02, "pr_state": "MERGED", "merged": True,
         "survived": True, "ci_first_pass": True, "pr_number": 5,
-    }])
-    _write(pa, [{
-        "run_id": "personal-assistant#9", "date": "2026-06-02", "agent": "personal-assistant",
-        "model": None, "repo": "personal-assistant", "cost_usd": None, "pr_state": "MERGED",
-        "merged": True, "survived": None, "ci_first_pass": True, "pr_number": 9,
     }])
     _write(jg, [{"run_id": "run-1", "review_thoroughness": 4, "fix_quality": 5}])
     monkeypatch.setattr(db, "SCORECARD", sc)
-    monkeypatch.setattr(db, "PA_LEDGER", pa)
     monkeypatch.setattr(db, "JUDGE", jg)
 
     facts = db.normalize()
-    assert len(facts) == 2
-    f = next(x for x in facts if x["pr_number"] == 5)
-    assert f["product"] == "vivy" and f["provider"] == "deepseek" and f["billing"] == "metered"
+    assert len(facts) == 1
+    f = facts[0]
+    assert f["product"] == "alpha" and f["provider"] == "deepseek" and f["billing"] == "metered"
     assert f["week"] == "2026-06-01" and f["resolved"] is True
     assert f["review_score"] == 4 and f["fix_score"] == 5  # judge joined by run_id
-
-    pa_fact = next(x for x in facts if x["product"] == "Hollis")
-    assert pa_fact["provider"] == "—" and pa_fact["cost_usd"] is None  # PA: no model/cost
-    assert pa_fact["source"] == "github-pr"
+    assert f["source"] == "run"
 
 
 def test_normalize_tolerates_missing_ledgers(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "SCORECARD", tmp_path / "absent.jsonl")
-    monkeypatch.setattr(db, "PA_LEDGER", tmp_path / "absent2.jsonl")
     monkeypatch.setattr(db, "JUDGE", tmp_path / "absent3.jsonl")
     assert db.normalize() == []
 
 
 def test_render_is_self_contained_and_substitutes(tmp_path, monkeypatch):
-    facts = [{"product": "vivy", "agent": "coder", "model": "claude-sonnet-4-6",
+    facts = [{"product": "alpha", "agent": "coder", "model": "claude-sonnet-4-6",
               "provider": "anthropic", "billing": "subscription", "date": "2026-06-03",
               "week": "2026-06-01", "cost_usd": 0.1, "resolved": True, "merged": True,
               "survived": None, "ci_first_pass": True, "review_score": None,
@@ -103,7 +91,7 @@ def test_render_is_self_contained_and_substitutes(tmp_path, monkeypatch):
     assert "const FACTS = [" in html
     # the embedded data round-trips
     blob = html.split("const FACTS = ", 1)[1].split(";\n", 1)[0]
-    assert json.loads(blob)[0]["product"] == "vivy"
+    assert json.loads(blob)[0]["product"] == "alpha"
 
 
 def test_render_has_metric_tooltips():
@@ -254,7 +242,7 @@ def test_spending_billed_split_subscription_is_zero(tmp_path, monkeypatch):
         "by_model": [
             {"model": "claude-opus-4-8", "cost": 10.0, "kind": "est"},    # subscription → $0 billed
             {"model": "deepseek/deepseek-chat", "cost": 0.10, "kind": "actual"},  # gateway → billed
-            {"model": "app/sous-chef", "cost": 0.03, "kind": "api"},      # direct API → billed
+            {"model": "app/epsilon", "cost": 0.03, "kind": "api"},      # direct API → billed
         ],
     }])
     html = db.cost_panel_html()
@@ -331,7 +319,7 @@ def test_cost_per_outcome_has_exclude_and_rollup(monkeypatch):
     (e.g. a one-off runaway) and recomputes a by-model/agent cost-per-PR rollup
     live, so one outlier doesn't condemn a model."""
     snap = {"outcome_count": 1, "generated_at": "2026-06-24T00:00:00Z", "outcomes": [
-        {"agent": "refactorer", "model": "moonshot/kimi-k2.7-code", "product": "vivy",
+        {"agent": "refactorer", "model": "moonshot/kimi-k2.7-code", "product": "alpha",
          "pr_number": 1, "pr_url": "", "date": "2026-06-24T00:00:00Z",
          "chain_usd": 23.49, "node_usd": 23.49, "node_run_id": "run-AAA"}]}
     monkeypatch.setattr(db, "_load_outcomes", lambda: snap)
@@ -351,12 +339,11 @@ def test_cost_performance_billed_split(tmp_path, monkeypatch):
     """Cost-performance aggregate: metered billing rows contribute to billedUsd;
     subscription and '—' rows contribute $0. Two-column table headers present."""
     monkeypatch.setattr(db, "SCORECARD", tmp_path / "absent.jsonl")
-    monkeypatch.setattr(db, "PA_LEDGER", tmp_path / "absent2.jsonl")
     monkeypatch.setattr(db, "JUDGE", tmp_path / "absent3.jsonl")
 
     # metered fact (gateway deepseek)
     metered_fact = {
-        "product": "vivy", "agent": "coder", "model": "deepseek/deepseek-chat",
+        "product": "alpha", "agent": "coder", "model": "deepseek/deepseek-chat",
         "provider": "deepseek", "billing": "metered", "date": "2026-06-21",
         "week": "2026-06-16", "cost_usd": 0.05, "resolved": True, "merged": True,
         "survived": None, "ci_first_pass": True, "review_score": None,
@@ -364,7 +351,7 @@ def test_cost_performance_billed_split(tmp_path, monkeypatch):
     }
     # subscription fact (Anthropic claude)
     subscription_fact = {
-        "product": "vivy", "agent": "reviewer", "model": "claude-sonnet-4-6",
+        "product": "alpha", "agent": "reviewer", "model": "claude-sonnet-4-6",
         "provider": "anthropic", "billing": "subscription", "date": "2026-06-21",
         "week": "2026-06-16", "cost_usd": 0.20, "resolved": True, "merged": True,
         "survived": None, "ci_first_pass": True, "review_score": None,
@@ -530,7 +517,7 @@ def test_cost_performance_freshness_never_stalled_even_when_the_only_date_is_old
 
 
 def test_cost_performance_render_never_shows_a_stalled_banner():
-    html = db.cost_performance_render([{"product": "vivy", "agent": "coder", "model": "—",
+    html = db.cost_performance_render([{"product": "alpha", "agent": "coder", "model": "—",
                                         "provider": "—", "billing": "—", "date": "2020-01-01",
                                         "week": "2019-12-30", "cost_usd": None, "resolved": True,
                                         "merged": True, "survived": None, "ci_first_pass": None,
@@ -582,7 +569,7 @@ import datetime as _dt  # noqa: E402
 import library_client  # noqa: E402
 
 
-def _le(n, *, product="vivy", usd=1.0, model="claude-sonnet-5", agent="coder",
+def _le(n, *, product="alpha", usd=1.0, model="claude-sonnet-5", agent="coder",
         item_id=None, source="gateway", day="2026-09-27", voided=False):
     return library_client.LedgerEntry(
         id=f"le_{n}", ledger_id="led_1", day=day, usd=usd,
@@ -596,7 +583,7 @@ _FIXTURE = [
     _le(2, usd=0.75, item_id="issue_b"),
     _le(3, usd=1.10, agent="reviewer", day="2026-09-26"),
     _le(4, usd=9.99, voided=True),
-    _le(5, product="selector", usd=4.00, source="app"),
+    _le(5, product="delta", usd=4.00, source="app"),
 ]
 _EPIC_OF = {"issue_a": "epic_x", "issue_b": "epic_x"}
 
@@ -607,15 +594,15 @@ def test_a_projects_total_and_each_groups_total_equal_their_entries_sum():
     total. A voided entry is counted separately and left out, as the
     Library's own ledger total leaves it out."""
     groups = db.ledger_groups(_FIXTURE, _EPIC_OF)
-    for product in ("vivy", "selector"):
+    for product in ("alpha", "delta"):
         live = [e for e in _FIXTURE if e.product == product and e.voided_at is None]
         g = groups[product]
         assert round(g["total"], 6) == round(sum(e.usd for e in live), 6)
         assert g["count"] == len(live)
         for dim, _label in db._LEDGER_DIMENSIONS:
             assert round(sum(t for _, t, _ in g["groups"][dim]), 6) == round(g["total"], 6), dim
-    assert groups["vivy"]["voided"] == 1
-    assert dict((v, t) for v, t, _ in groups["vivy"]["groups"]["epic"]) == {
+    assert groups["alpha"]["voided"] == 1
+    assert dict((v, t) for v, t, _ in groups["alpha"]["groups"]["epic"]) == {
         "epic_x": 3.25, "(none)": 1.10}
 
 
@@ -623,8 +610,8 @@ def test_a_page_missing_one_page_of_entries_would_fail_the_total_check(monkeypat
     """The total check above only guards anything if a short read changes the
     answer. Drop the last entry, as a reader that stopped one page early
     would, and the rendered total no longer equals the full set's sum."""
-    full = db.ledger_groups(_FIXTURE, _EPIC_OF)["vivy"]["total"]
-    short = db.ledger_groups(_FIXTURE[:2], _EPIC_OF)["vivy"]["total"]
+    full = db.ledger_groups(_FIXTURE, _EPIC_OF)["alpha"]["total"]
+    short = db.ledger_groups(_FIXTURE[:2], _EPIC_OF)["alpha"]["total"]
     assert short != full
     html = db.ledger_section_html(_FIXTURE, [], _EPIC_OF)
     assert f"${full:,.2f}" in html
@@ -637,23 +624,48 @@ def test_an_empty_ledger_says_nothing_is_recorded_rather_than_zero():
 
 
 def test_a_projects_ledger_shows_todays_total_against_its_hard_cap():
-    lg = library_client.Ledger(scope_kind="project", scope_id="vivy", day="2026-09-27",
+    lg = library_client.Ledger(scope_kind="project", scope_id="alpha", day="2026-09-27",
                                total_usd=3.5, warn_usd=None, soft_cap_usd=None,
                                hard_cap_usd=10.0, per_run_cap_usd=None, state="ok")
     html = db.ledger_section_html(_FIXTURE, [lg], _EPIC_OF)
-    assert "$3.50 today (2026-09-27) of $10.00 hard cap" in html
+    assert "$3.50 gateway today (2026-09-27) of $10.00 hard cap" in html
     assert "1 voided, not counted" in html
+
+
+def test_a_ledgers_subscription_lane_shows_beside_the_gateway_lane_unsummed():
+    """GET /ledgers' `total_usd` is the gateway lane alone. A day of
+    subscription-only spend read "$0.00 today" on every card until the
+    other lanes were shown."""
+    lg = library_client.Ledger(scope_kind="project", scope_id="alpha", day="2026-09-27",
+                               total_usd=0.0, warn_usd=None, soft_cap_usd=None,
+                               hard_cap_usd=None, per_run_cap_usd=None, state="ok",
+                               lanes={"gateway": 0.0, "subscription": 200.25,
+                                      "openai-subscription": 0.0})
+    html = db.ledger_section_html(_FIXTURE, [lg], _EPIC_OF)
+    assert "$0.00 gateway today (2026-09-27)" in html
+    assert "$200.25 subscription today" in html
+    assert "openai-subscription" not in html
+    assert "$200.25 gateway" not in html
+
+
+def test_a_ledger_served_without_lanes_shows_only_the_gateway_lane():
+    lg = library_client.Ledger(scope_kind="project", scope_id="alpha", day="2026-09-27",
+                               total_usd=1.25, warn_usd=None, soft_cap_usd=None,
+                               hard_cap_usd=None, per_run_cap_usd=None, state="ok")
+    html = db.ledger_section_html(_FIXTURE, [lg], _EPIC_OF)
+    assert "$1.25 gateway today (2026-09-27)" in html
+    assert "subscription today" not in html
 
 
 # --- the per-project ledger-caps form (issue_01M4BH8KSSMC8XBKB2C2CX9QTF) -----
 
 
 def test_the_caps_form_prefills_all_four_values_from_the_ledger():
-    lg = library_client.Ledger(scope_kind="project", scope_id="vivy", day="2026-09-27",
+    lg = library_client.Ledger(scope_kind="project", scope_id="alpha", day="2026-09-27",
                                total_usd=3.5, warn_usd=1.0, soft_cap_usd=2.0,
                                hard_cap_usd=10.0, per_run_cap_usd=0.5, state="ok")
     html = db.ledger_section_html(_FIXTURE, [lg], _EPIC_OF)
-    block = html.split('data-project="vivy"')[1].split("</div>")[0]
+    block = html.split('data-project="alpha"')[1].split("</div>")[0]
     assert 'data-field="warn_usd" value="1.0"' in block
     assert 'data-field="soft_cap_usd" value="2.0"' in block
     assert 'data-field="hard_cap_usd" value="10.0"' in block
@@ -661,10 +673,10 @@ def test_the_caps_form_prefills_all_four_values_from_the_ledger():
 
 
 def test_the_caps_form_prefills_blank_fields_when_the_project_has_no_ledger():
-    """`selector` carries entries in `_FIXTURE` but no `Ledger` is passed for
+    """`delta` carries entries in `_FIXTURE` but no `Ledger` is passed for
     it — the shape a project with no caps set shows."""
     html = db.ledger_section_html(_FIXTURE, [], _EPIC_OF)
-    block = html.split('data-project="selector"')[1].split("</div>")[0]
+    block = html.split('data-project="delta"')[1].split("</div>")[0]
     for field in ("warn_usd", "soft_cap_usd", "hard_cap_usd", "per_run_cap_usd"):
         assert f'data-field="{field}" value=""' in block
 
@@ -674,7 +686,7 @@ def test_the_caps_write_script_is_emitted_once_for_every_project_on_the_page():
     handler again on every row already rendered (ds.ledger_caps_form_html's
     own docstring)."""
     html = db.ledger_section_html(_FIXTURE, [], _EPIC_OF)
-    assert len({"vivy", "selector"} & set(re.findall(r'data-project="(\w+)"', html))) == 2
+    assert len({"alpha", "delta"} & set(re.findall(r'data-project="(\w+)"', html))) == 2
     assert html.count('document.querySelectorAll(".ledger-caps")') == 1
 
 
@@ -696,11 +708,11 @@ def test_the_ledger_groups_a_correction_under_corrections_not_its_queue_id(monke
     "Corrections", and an epic's child still groups under the epic."""
     entries = [_le(1, item_id="issue_null"), _le(2, item_id="issue_queued"),
                _le(3, item_id="issue_child"), _le(4)]
-    parents = {"issue_null": None, "issue_queued": "cq_vivy", "issue_child": "epic_x"}
+    parents = {"issue_null": None, "issue_queued": "cq_alpha", "issue_child": "epic_x"}
 
     def rec(i, type_, parent):
         return library_client.IssueRecord(
-            id=i, url="", product="vivy", title="", body="", type=type_, state="open",
+            id=i, url="", product="alpha", title="", body="", type=type_, state="open",
             severity=None, needs=None, maturity=None, parent_id=parent, topics=[], refs={},
             specification=None, definition_of_done=None, resolution=None, resolved_by=None,
             outcome_note=None, claimed_by=None, claimed_at=None, claim_expires_at=None,
@@ -714,13 +726,13 @@ def test_the_ledger_groups_a_correction_under_corrections_not_its_queue_id(monke
     monkeypatch.setattr(library_client, "list_ledgers", lambda: [])
     monkeypatch.setattr(library_client, "list_issue_items", lambda: items)
     monkeypatch.setattr(library_client, "corrections_queue_ids",
-                        lambda ids: asked.append(set(ids)) or {i for i in ids if i == "cq_vivy"})
-    html = db._ledger_section(frozenset({"vivy"}), False)
+                        lambda ids: asked.append(set(ids)) or {i for i in ids if i == "cq_alpha"})
+    html = db._ledger_section(frozenset({"alpha"}), False)
     epic_rows = dict(re.findall(r"<tr><td>([^<]+)</td><td class=\"num\">(\d+)</td>",
                                 html.split("<h4>Epic</h4>")[1].split("</table>")[0]))
     assert epic_rows == {"Corrections": "2", "epic_x": "1", "(none)": "1"}
-    assert "cq_vivy" not in html
-    assert asked == [{"cq_vivy"}]
+    assert "cq_alpha" not in html
+    assert asked == [{"cq_alpha"}]
 
 
 def test_the_live_page_reads_the_ledger_and_the_static_build_does_not(tmp_path, monkeypatch):
@@ -733,7 +745,7 @@ def test_the_live_page_reads_the_ledger_and_the_static_build_does_not(tmp_path, 
     monkeypatch.setattr(library_client, "list_ledger_entries", lambda **k: _FIXTURE)
     monkeypatch.setattr(library_client, "list_ledgers", lambda: [])
     items = [library_client.IssueRecord(
-        id=i, url="", product="vivy", title="", body="", type="task", state="open",
+        id=i, url="", product="alpha", title="", body="", type="task", state="open",
         severity=None, needs=None, maturity=None, parent_id="epic_x", topics=[], refs={},
         specification=None, definition_of_done=None, resolution=None, resolved_by=None,
         outcome_note=None, claimed_by=None, claimed_at=None, claim_expires_at=None,
@@ -743,7 +755,7 @@ def test_the_live_page_reads_the_ledger_and_the_static_build_does_not(tmp_path, 
         for i in ("issue_a", "issue_b")]
     monkeypatch.setattr(library_client, "list_issue_items", lambda: items)
     monkeypatch.setattr(library_client, "corrections_queue_ids", lambda ids: set())
-    live = db.spending_live_html(frozenset({"vivy", "selector"}), True)
+    live = db.spending_live_html(frozenset({"alpha", "delta"}), True)
     assert "Recorded LLM spend by project" in live and "epic_x" in live
 
     def refuse(**_k):
@@ -835,3 +847,37 @@ def test_build_writes_an_empty_static_fallback_naming_no_project(tmp_path, monke
         fallback = (tmp_path / name).read_text()
         assert "alpha" not in fallback and "beta" not in fallback
         assert "Live view unavailable" in fallback
+
+
+# --- _canon_product comes from the install's registry ---------------------
+#
+# Captured on main against the live registry (2026-10-22), before either read
+# the registry at all:
+#   the display map = {"omega-tools": "Omega Tools", "omega-etc": "Omega Circle",
+#                    "omega-villa": "Omega Villa", "omega-architecture": "Omega Tools"}
+#   the Gamma fold: "gamma"/"mu-assistant" both -> "Gamma"
+# test_canon_product_reports_the_three_omega_projects_separately above already
+# pins the fold values against the pinned registry fixture; these pin the
+# registry-reading mechanism itself.
+
+
+def test_canon_product_comes_from_a_made_up_registry(tmp_path, monkeypatch):
+    """No Convivy name: a made-up project ('alpha') whose own alias ('legacy-alpha')
+    folds to its own display, and an unrelated repo passes through unfolded —
+    entirely from the fixture registry, the same mechanism that folds Gamma
+    and the Omega repos in production."""
+    registry = tmp_path / "projects.json"
+    registry.write_text(json.dumps({
+        "alpha": {"display": "Alpha", "aliases": ["legacy-alpha"]},
+    }))
+    monkeypatch.setenv("PROJECTS_JSON", str(registry))
+    assert db._canon_product("legacy-alpha") == "Alpha"
+    assert db._canon_product("alpha") == "Alpha"
+    assert db._canon_product("beta") == "beta"
+
+
+def test_canon_product_degrades_on_an_unreadable_registry(tmp_path, monkeypatch):
+    """Never falls back to a literal name — an unreadable registry answers no
+    folding."""
+    monkeypatch.setenv("PROJECTS_JSON", str(tmp_path / "absent.json"))
+    assert db._canon_product("gamma") == "gamma"

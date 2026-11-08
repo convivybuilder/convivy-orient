@@ -33,7 +33,7 @@ works in the service's own interface.
 - **GitHub** provides version control, CI compute and an integrated off-site backup. Pull
   requests are the mechanism its engine merges through. Their review record, state and
   description are memory the Library holds.
-- **Gmail** provides email transport. The operator's mail is captured into the EA crew's own archive and
+- **Gmail** provides email transport. The operator's mail is captured into the Kappa crew's own archive and
   acted on there; as user-owned data it stays out of the Keel's shared vaults.
 - **Slack** has been retired as an operating surface. The operator does not read it, and no new Slack
   surface is added.

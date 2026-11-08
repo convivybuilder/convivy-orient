@@ -73,8 +73,8 @@ def client(tmp_path, monkeypatch):
         "adm@example.com": {"role": "admin", "products": ["*"]},
         "mem@example.com": {"role": "member", "products": ["*"]},
         "obs@example.com": {"role": "observer", "products": ["*"]},
-        "scoped@example.com": {"role": "admin", "products": ["vivy"]},
-        "po@example.com": {"role": "product_owner", "products": ["vivy"]},
+        "scoped@example.com": {"role": "admin", "products": ["alpha"]},
+        "po@example.com": {"role": "product_owner", "products": ["alpha"]},
     }))
     monkeypatch.setattr(authz, "ROLES", roles)
     # The project scope now comes from the Library (E19·1,
@@ -223,7 +223,7 @@ def test_a_contractor_is_refused(client, approved, tmp_path, monkeypatch):
 
 def test_a_holder_scoped_to_another_product_is_refused(client, approved):
     """`epic_approve` is product-scoped, because an epic belongs to a product
-    and approving it writes that product's Course. An admin scoped to `vivy`
+    and approving it writes that product's Course. An admin scoped to `alpha`
     must not approve a `convivy-orient` epic — the "check against what the
     request ACTUALLY RESOLVES TO" rule, with the epic's own product as the
     thing it resolves to."""
@@ -252,7 +252,7 @@ def test_the_same_scoped_holder_approves_an_epic_in_their_own_product(
     hold just as well if the route refused everybody — which is exactly what an
     unscoped `authorize` call does, admin included, and is the bug this pair
     was written after finding."""
-    monkeypatch.setattr(library_client, "get_issue_item", lambda _id: _epic(product="vivy"))
+    monkeypatch.setattr(library_client, "get_issue_item", lambda _id: _epic(product="alpha"))
     r = _post(client, _human("scoped@example.com"))
     assert r.status_code == 200, r.text
 
@@ -260,7 +260,7 @@ def test_the_same_scoped_holder_approves_an_epic_in_their_own_product(
 def test_a_product_owner_approves_an_epic_in_its_own_product(client, approved, monkeypatch):
     """issue_01M350CGZB6DR577FASP53K7WM's done-when, first half: a
     `product_owner` scoped to one product approves an epic in that product."""
-    monkeypatch.setattr(library_client, "get_issue_item", lambda _id: _epic(product="vivy"))
+    monkeypatch.setattr(library_client, "get_issue_item", lambda _id: _epic(product="alpha"))
     r = _post(client, _human("po@example.com"))
     assert r.status_code == 200, r.text
     assert approved["acting_human"] == "po@example.com"
@@ -401,6 +401,219 @@ def test_only_the_client_addresses_the_librarys_approve_route():
                if library_path.search(p.read_text(encoding="utf-8"))]
     assert callers == ["library_client.py"], (
         f"only library_client may address the Library's approve route; found {callers}")
+
+
+# --- decline and repropose (library#300, merged 2026-10-20) -----------------
+#
+# Gated identically to approve, so this section pins only what differs: the
+# routes called, the reason field decline carries, and that both use the same
+# `epic.approve` capability — not a second, narrower check.
+
+
+@pytest.fixture
+def declined(monkeypatch):
+    """Record what reached `library_client.decline_epic`, and answer success."""
+    seen = {}
+
+    def fake(issue_id, *, acting_human, reason=None):
+        seen["issue_id"] = issue_id
+        seen["acting_human"] = acting_human
+        seen["reason"] = reason
+        return library_client.EpicDecline(
+            declined_by="convivy-orient", acting_human=acting_human,
+            reason=reason, children_resolved=["issue_child"], epics_declined=[])
+
+    monkeypatch.setattr(library_client, "decline_epic", fake)
+    return seen
+
+
+@pytest.fixture
+def reproposed(monkeypatch):
+    """Record what reached `library_client.repropose_epic`, and answer success."""
+    seen = {}
+
+    def fake(issue_id, *, acting_human):
+        seen["issue_id"] = issue_id
+        seen["acting_human"] = acting_human
+        return library_client.EpicRepropose(
+            reproposed_by="convivy-orient", acting_human=acting_human,
+            from_maturity="declined")
+
+    monkeypatch.setattr(library_client, "repropose_epic", fake)
+    return seen
+
+
+def _post_decline(client, headers, epic_id=_EPIC_ID, **kw):
+    return client.post(f"/api/epics/{epic_id}/decline", headers=headers, **kw)
+
+
+def _post_repropose(client, headers, epic_id=_EPIC_ID, **kw):
+    return client.post(f"/api/epics/{epic_id}/repropose", headers=headers, **kw)
+
+
+def test_decline_unauthenticated_is_401(client):
+    assert client.post(f"/api/epics/{_EPIC_ID}/decline").status_code == 401
+
+
+def test_repropose_unauthenticated_is_401(client):
+    assert client.post(f"/api/epics/{_EPIC_ID}/repropose").status_code == 401
+
+
+def test_decline_refuses_a_non_human_with_403(client, declined):
+    r = _post_decline(client, _agent())
+    assert r.status_code == 403, r.text
+    assert "human" in r.json()["error"]
+    assert not declined
+
+
+def test_repropose_refuses_a_non_human_with_403(client, reproposed):
+    r = _post_repropose(client, _agent())
+    assert r.status_code == 403, r.text
+    assert "human" in r.json()["error"]
+    assert not reproposed
+
+
+def test_decline_a_cross_site_post_is_refused(client, declined):
+    r = _post_decline(client, _human("operator@example.com", origin="https://evil.example"))
+    assert r.status_code == 403, r.text
+    assert "csrf" in r.json()["error"]
+    assert not declined
+
+
+def test_decline_an_admin_declines(client, declined):
+    r = _post_decline(client, _human("operator@example.com"))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["declined"] is True
+    assert declined["issue_id"] == _EPIC_ID
+
+
+def test_repropose_an_admin_reproposes(client, reproposed):
+    r = _post_repropose(client, _human("operator@example.com"))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["reproposed"] is True
+    assert reproposed["issue_id"] == _EPIC_ID
+
+
+def test_decline_a_member_without_the_capability_gets_404(client, declined):
+    """`epic.approve` is the same capability decline checks — not a weaker
+    one, which is the defect this route closes: the old resolve-based
+    Decline let a member without `epic_approve` close a proposal."""
+    r = _post_decline(client, _human("mem@example.com"))
+    assert r.status_code == 404, r.text
+    assert not declined
+
+
+def test_repropose_a_member_without_the_capability_gets_404(client, reproposed):
+    r = _post_repropose(client, _human("mem@example.com"))
+    assert r.status_code == 404, r.text
+    assert not reproposed
+
+
+def test_decline_a_holder_scoped_to_another_product_is_refused(client, declined):
+    r = _post_decline(client, _human("scoped@example.com"))
+    assert r.status_code == 404, r.text
+    assert not declined
+
+
+def test_decline_a_missing_epic_and_a_non_epic_item_both_404(client, declined, monkeypatch):
+    monkeypatch.setattr(library_client, "get_issue_item", lambda _id: None)
+    assert _post_decline(client, _human("operator@example.com")).status_code == 404
+    monkeypatch.setattr(library_client, "get_issue_item", lambda _id: _epic(itype="bug"))
+    assert _post_decline(client, _human("operator@example.com")).status_code == 404
+    assert not declined
+
+
+def test_decline_acting_human_is_the_verified_email_not_a_body_value(client, declined):
+    r = _post_decline(client, _human("adm@example.com"),
+                      json={"acting_human": "operator@example.com", "reason": "stale"})
+    assert r.status_code == 200, r.text
+    assert declined["acting_human"] == "adm@example.com"
+
+
+def test_repropose_acting_human_is_the_verified_email_not_a_body_value(client, reproposed):
+    r = _post_repropose(client, _human("adm@example.com"),
+                        json={"acting_human": "operator@example.com"})
+    assert r.status_code == 200, r.text
+    assert reproposed["acting_human"] == "adm@example.com"
+
+
+def test_decline_carries_the_reason_from_the_body(client, declined):
+    """The outcome-note panel's text, carried through as `reason` — the field
+    the Library records on the epic and cascades to every child it resolves
+    `wontfix`."""
+    r = _post_decline(client, _human("operator@example.com"),
+                      json={"reason": "nobody will build this"})
+    assert r.status_code == 200, r.text
+    assert declined["reason"] == "nobody will build this"
+    assert r.json()["children_resolved"] == ["issue_child"]
+
+
+def test_decline_with_no_reason_passes_none(client, declined):
+    r = _post_decline(client, _human("operator@example.com"))
+    assert r.status_code == 200, r.text
+    assert declined["reason"] is None
+
+
+def test_decline_rejects_a_non_string_reason(client, declined):
+    r = _post_decline(client, _human("operator@example.com"), json={"reason": 7})
+    assert r.status_code == 400, r.text
+    assert not declined
+
+
+def test_decline_a_library_refusal_comes_back_as_409_with_the_librarys_own_wording(
+        client, monkeypatch):
+    def refuse(issue_id, *, acting_human, reason=None):
+        raise library_client.EpicApprovalRefused(
+            409, "issue_01TESTEPIC is approved; an approved epic is not declined directly")
+
+    monkeypatch.setattr(library_client, "decline_epic", refuse)
+    r = _post_decline(client, _human("operator@example.com"))
+    assert r.status_code == 409, r.text
+    body = r.json()
+    assert body["declined"] is False
+    assert "approved" in body["error"]
+
+
+def test_repropose_a_library_refusal_comes_back_as_409_with_the_librarys_own_wording(
+        client, monkeypatch):
+    def refuse(issue_id, *, acting_human):
+        raise library_client.EpicApprovalRefused(
+            409, "only an approved or declined epic is reproposed, and "
+                 "issue_01TESTEPIC is proposed")
+
+    monkeypatch.setattr(library_client, "repropose_epic", refuse)
+    r = _post_repropose(client, _human("operator@example.com"))
+    assert r.status_code == 409, r.text
+    body = r.json()
+    assert body["reproposed"] is False
+    assert "proposed" in body["error"]
+
+
+def test_decline_a_library_fault_is_not_dressed_up_as_a_refusal(client, monkeypatch):
+    def boom(issue_id, *, acting_human, reason=None):
+        raise RuntimeError("Library unreachable")
+
+    monkeypatch.setattr(library_client, "decline_epic", boom)
+    r = _post_decline(client, _human("operator@example.com"))
+    assert r.status_code >= 500, r.text
+    assert r.status_code != 409
+
+
+def test_only_the_client_addresses_the_librarys_decline_and_repropose_routes():
+    """The decline/repropose half of `test_only_the_client_addresses_the_
+    librarys_approve_route` above: one write path, named, for each."""
+    import pathlib
+    import re
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    for act in ("decline", "repropose"):
+        library_path = re.compile(r"""["']/items/.*?/""" + act)
+        callers = [p.name for p in sorted(root.glob("*.py"))
+                   if library_path.search(p.read_text(encoding="utf-8"))]
+        assert callers == ["library_client.py"], (
+            f"only library_client may address the Library's {act} route; found {callers}")
 
 
 def test_nothing_sets_maturity_through_the_correction_route():

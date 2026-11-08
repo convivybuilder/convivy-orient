@@ -23,8 +23,9 @@ import library_client
 
 
 class _FakeResponse:
-    def __init__(self, body: dict):
-        self._buf = io.BytesIO(json.dumps(body).encode("utf-8"))
+    def __init__(self, body: dict | bytes):
+        raw = body if isinstance(body, bytes) else json.dumps(body).encode("utf-8")
+        self._buf = io.BytesIO(raw)
 
     def read(self):
         return self._buf.read()
@@ -46,7 +47,7 @@ def _issue_row(n: int) -> dict:
     where the real Library never would."""
     return {
         "id": f"issue_{n:04d}", "url": f"/engineering/issues/issue_{n:04d}",
-        "product": "vivy", "title": f"issue {n}", "body": "", "type": "bug",
+        "product": "alpha", "title": f"issue {n}", "body": "", "type": "bug",
         "state": "open", "severity": "unset", "needs": None, "maturity": None,
         "parent_id": None, "topics": [], "refs": {}, "specification": None,
         "definition_of_done": None, "resolution": None, "resolved_by": None,
@@ -88,7 +89,7 @@ def _signal_row(n: int) -> dict:
     return {
         "id": f"sig_{n:04d}", "source": "ci", "stream": "e2e-stage-smoke",
         "kind": "test-result", "actor": "ci-bot", "ingested_by": "ci-bot",
-        "product": "vivy", "body": f"run {n}", "refs": {}, "meta": {},
+        "product": "alpha", "body": f"run {n}", "refs": {}, "meta": {},
         "privacy_class": "internal", "produced_at": None,
         "ingested_at": "2026-08-01T00:00:00Z",
     }
@@ -690,8 +691,8 @@ def test_list_lease_refusals_passes_product_through_only_when_given(
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     library_client.list_lease_refusals()
     assert "product=" not in seen[0]
-    library_client.list_lease_refusals(product="vivy")
-    assert "product=vivy" in seen[1]
+    library_client.list_lease_refusals(product="alpha")
+    assert "product=alpha" in seen[1]
 
 
 def _live_run_row(n: int, **overrides) -> dict:
@@ -1039,8 +1040,8 @@ def test_list_signals_passes_product_through_only_when_given(monkeypatch, token_
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     library_client.list_signals()
     assert "product=" not in seen[0]
-    library_client.list_signals(product="vivy")
-    assert ("product", "vivy") in _query(seen[1]).items() or "product=vivy" in seen[1]
+    library_client.list_signals(product="alpha")
+    assert ("product", "alpha") in _query(seen[1]).items() or "product=alpha" in seen[1]
 
 
 def test_list_signals_product_filter_is_a_pre_filter_not_client_side(monkeypatch, token_env):
@@ -1052,15 +1053,15 @@ def test_list_signals_product_filter_is_a_pre_filter_not_client_side(monkeypatch
     requested can come back as 1 matching row); this fake server filters
     BEFORE paging, like `GET /signals` actually does, so every row this test
     hands back already matches `product`."""
-    all_rows = [{**_signal_row(n), "product": "vivy" if n % 2 == 0 else "constance"}
+    all_rows = [{**_signal_row(n), "product": "alpha" if n % 2 == 0 else "beta"}
                 for n in range(6)]
     requests_made = []
 
     def fake_urlopen(req, timeout=None):
         requests_made.append(req)
         params = _query(req.full_url)
-        assert params.get("product") == "vivy"          # every page must carry it
-        matching = [r for r in all_rows if r["product"] == "vivy"]
+        assert params.get("product") == "alpha"          # every page must carry it
+        matching = [r for r in all_rows if r["product"] == "alpha"]
         offset, limit = int(params["offset"]), int(params["limit"])
         page = matching[offset:offset + limit]
         return _FakeResponse({
@@ -1070,18 +1071,18 @@ def test_list_signals_product_filter_is_a_pre_filter_not_client_side(monkeypatch
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     monkeypatch.setattr(library_client, "MAX_PAGE", 2)   # force >1 request
-    got = library_client.list_signals(product="vivy", cap=10)
+    got = library_client.list_signals(product="alpha", cap=10)
 
     assert len(requests_made) > 1                        # the walk actually paged
-    assert len(got) == 3                                 # all 3 vivy rows, none dropped
-    assert {sig.product for sig in got} == {"vivy"}
+    assert len(got) == 3                                 # all 3 alpha rows, none dropped
+    assert {sig.product for sig in got} == {"alpha"}
 
 
 def test_signal_facets_request(monkeypatch, token_env):
     def fake_urlopen(req, timeout=None):
         return _FakeResponse({"total": 18455, "embedded": 12000,
                               "by_source": [["github_review", 9000], ["slack", 5000]],
-                              "products": ["constance", "vivy"]})
+                              "products": ["beta", "alpha"]})
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     facets = library_client.signal_facets(kind=["changelog"])
@@ -1089,7 +1090,7 @@ def test_signal_facets_request(monkeypatch, token_env):
     assert facets.total == 18455
     assert facets.embedded == 12000
     assert facets.by_source == [("github_review", 9000), ("slack", 5000)]
-    assert facets.products == ["constance", "vivy"]
+    assert facets.products == ["beta", "alpha"]
 
 
 def test_search_signals_request_and_response_shape(monkeypatch, token_env):
@@ -1106,11 +1107,11 @@ def test_search_signals_request_and_response_shape(monkeypatch, token_env):
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     resp = library_client.search_signals("deploy", source=["deploy_watch"],
-                                         product="vivy", cap=20)
+                                         product="alpha", cap=20)
 
     assert ("q", "deploy") in seen["params"]
     assert ("source", "deploy_watch") in seen["params"]
-    assert ("product", "vivy") in seen["params"]
+    assert ("product", "alpha") in seen["params"]
     assert ("limit", "20") in seen["params"]
     assert "kind" not in dict(seen["params"])
 
@@ -1314,7 +1315,8 @@ def test_a_signal_library_outage_raises_rather_than_returning_an_empty_list(monk
 
 
 def _resolution_row(n, *, product="convivy-orient", produced_at, ingested_at=None,
-                    cost_usd=1.0, repo=None):
+                    cost_usd=1.0, repo=None, model_resolved="claude-sonnet-5",
+                    exit_status="completed"):
     """A minimal-but-complete `model_resolution` signal row — every key
     `library_client._finished_run` reads out of `meta`."""
     return {
@@ -1323,8 +1325,9 @@ def _resolution_row(n, *, product="convivy-orient", produced_at, ingested_at=Non
         "product": product, "body": "", "refs": {},
         "meta": {"run": f"run-{n:04d}", "persona": "coder", "repo": repo or product,
                  "work_item": "issue_0001", "model": "claude-sonnet-5",
+                 "model_resolved": model_resolved,
                  "cost": {"usd": cost_usd, "tokens": 12345, "by_model": [{"model": "claude-sonnet-5", "cost": cost_usd}]},
-                 "outcome": "merged"},
+                 "outcome": {"exit_status": exit_status, "terminal_reason": None}},
         "privacy_class": "internal", "produced_at": produced_at,
         "ingested_at": ingested_at or produced_at or "2026-10-15T00:00:00Z",
     }
@@ -1360,10 +1363,27 @@ def test_list_finished_runs_parses_every_field_the_epic_names(monkeypatch, token
     assert run.repo == "convivy-orient"
     assert run.work_item == "issue_0001"
     assert run.model == "claude-sonnet-5"
-    assert run.outcome == "merged"
+    assert run.model_resolved == "claude-sonnet-5"
+    assert run.outcome == {"exit_status": "completed", "terminal_reason": None}
+    assert run.exit_status == "completed"
     assert run.cost.usd == 3.25
     assert run.cost.tokens == 12345
     assert run.cost.by_model == [{"model": "claude-sonnet-5", "cost": 3.25}]
+
+
+def test_list_finished_runs_exit_status_is_none_when_outcome_is_not_a_dict(monkeypatch, token_env):
+    """`exit_status` is pulled out of `outcome`'s dict shape (CQ·156); a run
+    whose `outcome` is absent or some other shape has no exit status to
+    report, rather than raising."""
+    row = _resolution_row(0, produced_at="2026-10-15T10:00:00Z")
+    row["meta"]["outcome"] = None
+
+    def fake_urlopen(req, timeout=None):
+        return _FakeResponse({"signals": [row], "count": 1, "offset": 0, "truncated": False})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    got = library_client.list_finished_runs(dt.datetime(2026, 10, 1), until=dt.datetime(2026, 10, 16))
+    assert got[0].exit_status is None
 
 
 def test_list_finished_runs_a_run_with_no_cost_still_has_a_record(monkeypatch, token_env):
@@ -1528,10 +1548,10 @@ def test_cost_rollup_by_project_sums_usd_and_counts_every_run_including_unknown_
             produced_at=None, ingested_at=dt.datetime(2026, 10, 15))
 
     rollup = library_client.cost_rollup_by_project([
-        run("vivy", 1.5), run("vivy", 2.5), run("vivy", None), run("constance", 3.0),
+        run("alpha", 1.5), run("alpha", 2.5), run("alpha", None), run("beta", 3.0),
     ])
-    assert rollup["vivy"] == {"cost_usd": 4.0, "runs": 3}
-    assert rollup["constance"] == {"cost_usd": 3.0, "runs": 1}
+    assert rollup["alpha"] == {"cost_usd": 4.0, "runs": 3}
+    assert rollup["beta"] == {"cost_usd": 3.0, "runs": 1}
 
 
 # --- the protocol header, the credential, the timeout ------------------------
@@ -1695,7 +1715,7 @@ def test_an_empty_acting_human_raises_rather_than_travelling(both_creds, monkeyp
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     with pytest.raises(ValueError, match="acting_human"):
         library_client.create_signal(source="note", kind="market",
-                                     actor="operator@example.com", product="vivy",
+                                     actor="operator@example.com", product="alpha",
                                      acting_human="   ")
 
 
@@ -1706,7 +1726,7 @@ def test_create_signal_surfaces_an_idempotent_dedup_hit_as_success(monkeypatch, 
     from a fresh 201 — the regression a round of review caught in
     signal_capture_api.py, which broke github_capture.py's created-vs-
     duplicate tally and the capture form's own double-submit guard."""
-    existing_row = {**_signal_row(1), "id": "sig_existing", "product": "constance",
+    existing_row = {**_signal_row(1), "id": "sig_existing", "product": "beta",
                     "idempotent": True}
 
     def fake_urlopen(req, timeout=None):
@@ -1714,18 +1734,114 @@ def test_create_signal_surfaces_an_idempotent_dedup_hit_as_success(monkeypatch, 
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     sid, idempotent, existing = library_client.create_signal(
-        source="gh", kind="review_comment", actor="reviewer", product="vivy",
-        dedup_key="gh:vivy:pr1:review:1")
+        source="gh", kind="review_comment", actor="reviewer", product="alpha",
+        dedup_key="gh:alpha:pr1:review:1")
     assert sid == "sig_existing"
     assert idempotent is True
     # existing is parsed from THIS SAME response — no second request — and
     # carries the row's REAL product, which may differ from the product the
-    # caller declared (here: vivy declared, constance actual). A caller
+    # caller declared (here: alpha declared, beta actual). A caller
     # checking authz against `existing.product` rather than the declared one
     # is exactly what closes the round-5 cross-product disclosure.
     assert existing is not None
     assert existing.id == "sig_existing"
-    assert existing.product == "constance"
+    assert existing.product == "beta"
+
+
+def test_create_signal_sends_content_and_produced_at_only_when_given(monkeypatch, token_env):
+    """Both are sent only when the caller passes one — an existing caller
+    that predates these two parameters (the four `vault_plane` capture jobs)
+    must see the exact same payload it always has."""
+    seen = {}
+
+    def fake_urlopen(req, timeout=None):
+        seen["body"] = json.loads(req.data)
+        return _FakeResponse({"id": "sig_new1"})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    library_client.create_signal(source="ci", kind="test-result", actor="ci-bot",
+                                 product="alpha", body="ran fine")
+    assert seen["body"] == {"source": "ci", "kind": "test-result", "actor": "ci-bot",
+                            "product": "alpha", "body": "ran fine"}
+
+    library_client.create_signal(
+        source="blog_migration", kind="post", actor="author@example.com",
+        product="company", stream="a-post", content="full markdown text",
+        produced_at="2026-01-01T00:00:00Z")
+    assert seen["body"]["content"] == "full markdown text"
+    assert seen["body"]["produced_at"] == "2026-01-01T00:00:00Z"
+
+
+def test_create_signal_with_human_reserved_and_no_acting_human_uses_the_client_token(
+        both_creds, monkeypatch):
+    """`human_reserved=True` with no `acting_human` is the shape
+    `bin/copy_posts_to_archives.py` writes a `post_draft` row under — an
+    automated migration, not a session a human drove — and it must still
+    carry the approved-client credential while sending no `acting_human`
+    key at all."""
+    seen = {}
+
+    def fake_urlopen(req, timeout=None):
+        seen["auth"] = req.headers["Authorization"]
+        seen["body"] = json.loads(req.data)
+        return _FakeResponse({"id": "sig_draft1"})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    library_client.create_signal(
+        source="blog_migration", kind="post_draft", actor="author@example.com",
+        product="company", stream="a-post", human_reserved=True)
+
+    assert seen["auth"] == "Bearer CLIENT-CRED"
+    assert "acting_human" not in seen["body"]
+
+
+def test_get_signal_blob_requests_the_blob_route_under_each_credential(
+        both_creds, monkeypatch):
+    """`GET /signals/{id}/blob`, under the agent credential by default and
+    the approved-client one when a `post_draft` row's blob needs
+    `human_reserved=True` to be read back at all (ADR-0038). The Library
+    answers this route with a `PlainTextResponse`, the stored text itself,
+    so the body is returned verbatim rather than parsed as JSON."""
+    seen = {}
+    text = "# A Post\n\nThe full text, ünïcode included.\n"
+
+    def fake_urlopen(req, timeout=None):
+        seen["method"] = req.get_method()
+        seen["url"] = req.full_url
+        seen["auth"] = req.headers["Authorization"]
+        return _FakeResponse(text.encode("utf-8"))
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    blob = library_client.get_signal_blob("sig_0001")
+    assert blob == text
+    assert seen["method"] == "GET"
+    assert seen["url"].endswith("/signals/sig_0001/blob")
+    assert seen["auth"] == "Bearer AGENT-CRED"
+
+    blob = library_client.get_signal_blob("sig_0002", human_reserved=True)
+    assert blob == text
+    assert seen["url"].endswith("/signals/sig_0002/blob")
+    assert seen["auth"] == "Bearer CLIENT-CRED"
+
+
+def test_list_signals_passes_human_reserved_through(both_creds, monkeypatch):
+    """`human_reserved=True` reads a `kind: post_draft` row back under the
+    approved-client credential, the one caller being `--verify` reading
+    back a draft revision written under it — the default stays on the
+    agent credential, matching every other caller."""
+    seen = []
+
+    def fake_urlopen(req, timeout=None):
+        seen.append(req.headers["Authorization"])
+        return _FakeResponse({"signals": [], "count": 0, "total": 0,
+                              "offset": 0, "truncated": False})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    library_client.list_signals()
+    library_client.list_signals(human_reserved=True)
+
+    assert seen == ["Bearer AGENT-CRED", "Bearer CLIENT-CRED"]
 
 
 def test_ack_signal_posts_under_the_client_credential_and_returns_true(monkeypatch, token_env):
@@ -1838,7 +1954,7 @@ def _course_row(n: int, *, entries=None) -> dict:
     detail; see `_course_detail_row` for the `/courses/{id}` shape, which adds
     `items`)."""
     return {
-        "id": f"course_{n:04d}", "product": "vivy", "title": f"course {n}",
+        "id": f"course_{n:04d}", "product": "alpha", "title": f"course {n}",
         "status": "live", "version": 1,
         "entries": entries if entries is not None else ["issue_0001", "issue_0002"],
         "created_by": "ops-mcp", "created_at": "2026-08-01T00:00:00Z",
@@ -1900,9 +2016,9 @@ def test_list_courses_defaults_to_status_live_and_no_product_filter(monkeypatch,
     assert seen_params[0]["status"] == "live"
     assert "product" not in seen_params[0]
 
-    library_client.list_courses(product="vivy", status="all")
+    library_client.list_courses(product="alpha", status="all")
     assert seen_params[1]["status"] == "all"
-    assert seen_params[1]["product"] == "vivy"
+    assert seen_params[1]["product"] == "alpha"
 
 
 def test_list_courses_entries_carry_ids_only_no_state_or_title(monkeypatch, token_env):
@@ -2572,6 +2688,94 @@ def test_list_reference_topics_reads_the_unpaginated_shape(monkeypatch, token_en
     assert [(t.topic, t.documents) for t in got] == [("keel", 30), ("security", 26)]
 
 
+# --- knowledge-commit history (CQ·165, issue_01M57NS8PJRTWJ9H6ZHHYB3BFN) -----
+
+
+def _history_row(*, commit="abc1234", committed_at="2026-10-18T12:00:00Z",
+                 doc_id="proj/kind/doc-1", title="A doc", status="modified",
+                 subject="Update the thing", source_ref=None) -> dict:
+    return {"commit": commit, "committed_at": committed_at, "doc_id": doc_id,
+            "title": title, "status": status, "subject": subject,
+            "source_ref": source_ref}
+
+
+def test_list_knowledge_history_reads_params_and_rows(monkeypatch, token_env):
+    seen = {}
+
+    def fake_urlopen(req, timeout=None):
+        seen["params"] = _query(req.full_url)
+        return _FakeResponse({"history": [_history_row()]})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    got = library_client.list_knowledge_history("convivy-orient", limit=8)
+    assert seen["params"] == {"project": "convivy-orient", "limit": "8"}
+    assert len(got) == 1
+    row = got[0]
+    assert row.commit == "abc1234"
+    assert row.committed_at == dt.datetime(2026, 10, 18, 12, 0, 0)
+    assert row.doc_id == "proj/kind/doc-1"
+    assert row.title == "A doc"
+    assert row.status == "modified"
+    assert row.subject == "Update the thing"
+    assert row.source_ref is None
+
+
+def test_list_knowledge_history_several_documents_in_one_commit(monkeypatch, token_env):
+    """One commit touching several documents returns several rows — the
+    shape a caller groups by `commit` to render, per the route's contract."""
+    rows = [
+        _history_row(commit="c1", doc_id="proj/kind/a", title="A", subject="Big commit"),
+        _history_row(commit="c1", doc_id="proj/kind/b", title="B", subject="Big commit"),
+        _history_row(commit="c0", doc_id="proj/kind/c", title="C", subject="Earlier commit"),
+    ]
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        lambda req, timeout=None: _FakeResponse({"history": rows}))
+    got = library_client.list_knowledge_history("convivy-orient", limit=8)
+    assert [r.commit for r in got] == ["c1", "c1", "c0"]
+    assert [r.doc_id for r in got] == ["proj/kind/a", "proj/kind/b", "proj/kind/c"]
+
+
+def test_list_knowledge_history_null_doc_id_carries_source_ref(monkeypatch, token_env):
+    """A path with no index row (a deleted document, the old half of a
+    rename, or a kind the index never holds, such as a profile YAML) arrives
+    with `doc_id: null` and `source_ref` set — measured on the live route,
+    2026-10-18 (issue thread note)."""
+    row = _history_row(doc_id=None, title=None,
+                       source_ref="projects/convivy-orient/profiles/daytime.yaml",
+                       status="modified")
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        lambda req, timeout=None: _FakeResponse({"history": [row]}))
+    got = library_client.list_knowledge_history("convivy-orient", limit=8)
+    assert len(got) == 1
+    assert got[0].doc_id is None
+    assert got[0].source_ref == "projects/convivy-orient/profiles/daytime.yaml"
+    assert got[0].status == "modified"
+
+
+def test_list_knowledge_history_400_is_an_empty_list(monkeypatch, token_env):
+    """A 400 — an unknown project, or (given Orient's unbound token) one out
+    of this call's own scope — collapses into an empty list, the same
+    not-found/out-of-scope collapse `get_issue_item` makes, rather than
+    raising. The caller cannot and must not tell the two apart."""
+    def fake_urlopen(req, timeout=None):
+        raise urllib.error.HTTPError(req.full_url, 400, "unknown project", {}, None)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    assert library_client.list_knowledge_history("not-a-project", limit=8) == []
+
+
+def test_list_knowledge_history_503_raises(monkeypatch, token_env):
+    """A git failure on the Library's side (503) must read as "unavailable",
+    never as an empty list — this module's "failure is not caught" rule
+    applies here exactly as everywhere else in it."""
+    def fake_urlopen(req, timeout=None):
+        raise urllib.error.HTTPError(req.full_url, 503, "git failure", {}, None)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(urllib.error.HTTPError):
+        library_client.list_knowledge_history("convivy-orient", limit=8)
+
+
 # --- reference-document coordination (issue_01M0TKX6DW2E1TXGN9QT6K61J5 §4) ---
 
 
@@ -3057,7 +3261,7 @@ def test_write_operations_are_sampled_as_write(monkeypatch, token_env):
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     with pytest.raises(TimeoutError):
         library_client.create_signal(source="ci", kind="test-result", actor="ci-bot",
-                                     product="vivy")
+                                     product="alpha")
 
     assert len(calls) == 1
     assert calls[0]["direction"] == "write"
@@ -3233,6 +3437,139 @@ def test_a_refusal_prefers_detail_or_message_when_error_is_absent(
         assert caught.value.message == f"refused via {key}"
 
 
+# --- declining and reproposing an epic (library#300, merged 2026-10-20) ------
+#
+# Gated and recorded exactly like `approve_epic`: the approved-client
+# credential, the attested `acting_human`, and `EpicApprovalRefused` for a
+# 4xx. The route-level tests in `test_approve_api.py` stub these wholesale, so
+# the credential and request shapes are pinned here, the same reason the
+# `approve_epic` block above exists.
+
+
+def test_decline_epic_carries_the_client_credential_the_human_and_the_reason(
+        both_creds, monkeypatch):
+    seen = {}
+
+    def fake_urlopen(req, timeout=None):
+        seen["url"] = req.full_url
+        seen["auth"] = req.headers["Authorization"]
+        seen["body"] = json.loads(req.data)
+        return _FakeResponse({"item": {"id": "issue_1"},
+                              "decline": {"declined_by": "orient",
+                                          "acting_human": "operator@example.com",
+                                          "reason": "nobody will build this",
+                                          "children_resolved": ["issue_2"],
+                                          "epics_declined": ["issue_3"]}})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    decline = library_client.decline_epic(
+        "issue_1", acting_human="operator@example.com", reason="nobody will build this")
+
+    assert seen["auth"] == "Bearer CLIENT-CRED"
+    assert seen["url"].endswith("/items/issue_1/decline")
+    assert seen["body"] == {"acting_human": "operator@example.com",
+                            "reason": "nobody will build this"}
+    assert decline.declined_by == "orient"
+    assert decline.acting_human == "operator@example.com"
+    assert decline.reason == "nobody will build this"
+    assert decline.children_resolved == ["issue_2"]
+    assert decline.epics_declined == ["issue_3"]
+
+
+def test_decline_epic_omits_an_absent_reason(both_creds, monkeypatch):
+    seen = {}
+
+    def fake_urlopen(req, timeout=None):
+        seen["body"] = json.loads(req.data)
+        return _FakeResponse({"decline": {}})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    library_client.decline_epic("issue_1", acting_human="operator@example.com")
+    assert seen["body"] == {"acting_human": "operator@example.com"}
+
+
+def test_decline_epic_quotes_an_id_containing_a_slash(both_creds, monkeypatch):
+    seen = {}
+
+    def fake_urlopen(req, timeout=None):
+        seen["url"] = req.full_url
+        return _FakeResponse({"decline": {}})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    library_client.decline_epic("a/b/../c", acting_human="operator@example.com")
+    assert "/items/a%2Fb%2F..%2Fc/decline" in seen["url"]
+
+
+def test_decline_epic_raises_the_librarys_wording_on_a_refusal(both_creds, monkeypatch):
+    """An approved epic refuses a decline (library/decisions/0005 rule 4), and
+    the page has to show that specific cause rather than a bare 409."""
+    def refuse(req, timeout=None):
+        raise _raw_http_error(409, json.dumps(
+            {"error": "issue_1 is approved; an approved epic is not declined "
+                      "directly"}).encode())
+
+    monkeypatch.setattr(urllib.request, "urlopen", refuse)
+    with pytest.raises(library_client.EpicApprovalRefused) as caught:
+        library_client.decline_epic("issue_1", acting_human="operator@example.com")
+    assert caught.value.status == 409
+    assert "approved" in caught.value.message
+
+
+def test_decline_epic_lets_a_fault_propagate(both_creds, monkeypatch):
+    def boom(req, timeout=None):
+        raise _raw_http_error(503, b"down")
+
+    monkeypatch.setattr(urllib.request, "urlopen", boom)
+    with pytest.raises(urllib.error.HTTPError):
+        library_client.decline_epic("issue_1", acting_human="operator@example.com")
+
+
+def test_repropose_epic_carries_the_client_credential_and_the_human(
+        both_creds, monkeypatch):
+    seen = {}
+
+    def fake_urlopen(req, timeout=None):
+        seen["url"] = req.full_url
+        seen["auth"] = req.headers["Authorization"]
+        seen["body"] = json.loads(req.data)
+        return _FakeResponse({"item": {"id": "issue_1"},
+                              "repropose": {"reproposed_by": "orient",
+                                            "acting_human": "operator@example.com",
+                                            "from_maturity": "declined"}})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    repropose = library_client.repropose_epic("issue_1", acting_human="operator@example.com")
+
+    assert seen["auth"] == "Bearer CLIENT-CRED"
+    assert seen["url"].endswith("/items/issue_1/repropose")
+    assert seen["body"] == {"acting_human": "operator@example.com"}
+    assert repropose.reproposed_by == "orient"
+    assert repropose.acting_human == "operator@example.com"
+    assert repropose.from_maturity == "declined"
+
+
+def test_repropose_epic_raises_the_librarys_wording_on_a_refusal(both_creds, monkeypatch):
+    def refuse(req, timeout=None):
+        raise _raw_http_error(409, json.dumps(
+            {"error": "only an approved or declined epic is reproposed, and "
+                      "issue_1 is proposed"}).encode())
+
+    monkeypatch.setattr(urllib.request, "urlopen", refuse)
+    with pytest.raises(library_client.EpicApprovalRefused) as caught:
+        library_client.repropose_epic("issue_1", acting_human="operator@example.com")
+    assert caught.value.status == 409
+    assert "proposed" in caught.value.message
+
+
+def test_repropose_epic_lets_a_fault_propagate(both_creds, monkeypatch):
+    def boom(req, timeout=None):
+        raise _raw_http_error(503, b"down")
+
+    monkeypatch.setattr(urllib.request, "urlopen", boom)
+    with pytest.raises(urllib.error.HTTPError):
+        library_client.repropose_epic("issue_1", acting_human="operator@example.com")
+
+
 # --- revising an epic's text (the epic editor) --------------------------------
 #
 # The three calls `epic_revise_api` makes in one request. The route-level tests
@@ -3276,12 +3613,12 @@ def test_an_edit_refusal_carries_the_librarys_wording_and_names_the_act(
     so an unreadable refusal does not read as a refused approval."""
     def held(req, timeout=None):
         raise _raw_http_error(409, json.dumps(
-            {"error": "held by co-selector until 18:00"}).encode())
+            {"error": "held by co-delta until 18:00"}).encode())
 
     monkeypatch.setattr(urllib.request, "urlopen", held)
     with pytest.raises(library_client.ItemWriteRefused) as caught:
         library_client.checkout_item("issue_1", owner="operator@example.com")
-    assert caught.value.message == "held by co-selector until 18:00"
+    assert caught.value.message == "held by co-delta until 18:00"
 
     monkeypatch.setattr(urllib.request, "urlopen",
                         lambda req, timeout=None: (_ for _ in ()).throw(_raw_http_error(400, b"")))
@@ -3446,7 +3783,7 @@ def test_set_item_model_lets_a_fault_propagate(both_creds, monkeypatch):
 # --- the spend ledger (issue_01M38TF7S5RXVKB1JG6P4VT9JW) ---------------------
 
 
-def _entry_row(n: int, *, product="vivy", usd=1.25, voided=False) -> dict:
+def _entry_row(n: int, *, product="alpha", usd=1.25, voided=False) -> dict:
     """Every key `ledger_entry_dict` serves, so a missing one raises here
     where the real Library never would."""
     return {"id": f"le_{n:04d}", "ledger_id": "led_1", "day": "2026-09-27", "usd": usd,
@@ -3472,11 +3809,57 @@ def test_list_ledger_entries_follows_every_page_and_carries_the_filter(monkeypat
                               "offset": off, "truncated": off + len(rows) < 3})
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-    entries = library_client.list_ledger_entries(product="vivy")
+    entries = library_client.list_ledger_entries(product="alpha")
     assert [e.id for e in entries] == ["le_0001", "le_0002", "le_0003"]
     assert [q["offset"] for q in asked] == ["0", "2"]
-    assert all(q["product"] == "vivy" for q in asked)
+    assert all(q["product"] == "alpha" for q in asked)
     assert all(q["limit"] == str(library_client.MAX_PAGE) for q in asked)
+
+
+def test_list_ledger_entries_reads_a_ledger_past_the_offset_cap(monkeypatch, token_env):
+    """The Library refuses an offset past MAX_OFFSET with 400 rather than
+    clamping it. On 2026-10-25 the live ledger passed 10,200 entries and the
+    Spending page failed on `offset=10200`. A ledger past the cap must be read
+    whole through date windows, each paged within the cap. The fake enforces
+    the cap and the `from`/`to` filter the way the route does, with the cap
+    shrunk so the test stays small."""
+    monkeypatch.setattr(library_client, "MAX_OFFSET", 4, raising=False)
+    monkeypatch.setattr(library_client, "MAX_PAGE", 2)
+    ledger = []
+    for n in range(1, 16):
+        row = _entry_row(n)
+        row["day"] = f"2026-10-{n:02d}"
+        row["at"] = f"2026-10-{n:02d}T12:00:00Z"
+        ledger.append(row)
+    ledger.append({**_entry_row(99, product="beta"), "day": "2026-10-03"})
+    ledger.sort(key=lambda r: r["at"], reverse=True)
+    asked = []
+
+    def fake_urlopen(req, timeout=None):
+        q = _query(req.full_url)
+        asked.append(q)
+        off, lim = int(q["offset"]), int(q["limit"])
+        if off > 4:
+            raise urllib.error.HTTPError(req.full_url, 400, "Bad Request", {}, io.BytesIO(
+                b'{"error":"offset may be at most 4"}'))
+        rows = [r for r in ledger
+                if q.get("from", "0000") <= r["day"] <= q.get("to", "9999")
+                and q.get("product", r["product"]) == r["product"]]
+        page = rows[off:off + lim]
+        return _FakeResponse({"entries": page, "count": len(page), "total": len(rows),
+                              "offset": off, "truncated": off + len(page) < len(rows)})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    entries = library_client.list_ledger_entries(product="alpha")
+    alpha = [r for r in ledger if r["product"] == "alpha"]
+    assert sorted(e.id for e in entries) == sorted(r["id"] for r in alpha)
+    assert len(entries) == len(alpha)
+    assert all(q["product"] == "alpha" for q in asked)
+    # The unfiltered first read already counted the whole ledger, so no
+    # request re-asks for it as an all-days window.
+    assert not any(q.get("from") == "2000-01-01" and q.get("to") == "9999-12-31"
+                   for q in asked)
+    assert [e.day for e in entries] == sorted((e.day for e in entries), reverse=True)
 
 
 def test_a_ledger_entry_carries_its_void(monkeypatch, token_env):
@@ -3493,19 +3876,20 @@ def test_list_ledgers_reads_todays_total_and_caps(monkeypatch, token_env):
     Library predating library#225 serves — and `list_ledgers` must still read
     the other three rather than raising `KeyError`."""
     monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=None: _FakeResponse(
-        {"ledgers": [{"id": "led_1", "scope_kind": "project", "scope_id": "vivy",
+        {"ledgers": [{"id": "led_1", "scope_kind": "project", "scope_id": "alpha",
                       "day": "2026-09-27", "total_usd": 3.5,
                       "caps": {"warn_usd": 5.0, "soft_cap_usd": None, "hard_cap_usd": 10.0},
                       "state": "ok", "granted_by": "operator", "updated_at": "2026-09-27T00:00:00Z"}],
          "day": "2026-09-27", "count": 1, "total": 1, "offset": 0, "truncated": False}))
     (lg,) = library_client.list_ledgers()
-    assert (lg.scope_id, lg.total_usd, lg.hard_cap_usd, lg.soft_cap_usd) == ("vivy", 3.5, 10.0, None)
+    assert (lg.scope_id, lg.total_usd, lg.hard_cap_usd, lg.soft_cap_usd) == ("alpha", 3.5, 10.0, None)
     assert lg.per_run_cap_usd is None
+    assert lg.lanes is None
 
 
 def test_list_ledgers_reads_per_run_cap_usd_when_the_library_serves_it(monkeypatch, token_env):
     monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=None: _FakeResponse(
-        {"ledgers": [{"id": "led_1", "scope_kind": "project", "scope_id": "vivy",
+        {"ledgers": [{"id": "led_1", "scope_kind": "project", "scope_id": "alpha",
                       "day": "2026-09-27", "total_usd": 3.5,
                       "caps": {"warn_usd": None, "soft_cap_usd": None, "hard_cap_usd": None,
                               "per_run_cap_usd": 2.5},
@@ -3514,6 +3898,26 @@ def test_list_ledgers_reads_per_run_cap_usd_when_the_library_serves_it(monkeypat
          "day": "2026-09-27", "count": 1, "total": 1, "offset": 0, "truncated": False}))
     (lg,) = library_client.list_ledgers()
     assert lg.per_run_cap_usd == 2.5
+
+
+def test_list_ledgers_reads_each_lanes_total_beside_the_gateway_total(monkeypatch, token_env):
+    """`total_usd` is the gateway lane alone; subscription spend arrives only
+    in `lanes`, so a reader that dropped it showed $0.00 for a day of
+    subscription spend. The first test above covers a Library serving no
+    `lanes`, which leaves the field None."""
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=None: _FakeResponse(
+        {"ledgers": [{"id": "led_1", "scope_kind": "project", "scope_id": "alpha",
+                      "day": "2026-10-21", "total_usd": 0.0,
+                      "lanes": {"gateway": 0.0, "subscription": 200.25,
+                                "openai-subscription": 0.0},
+                      "caps": {"warn_usd": None, "soft_cap_usd": None, "hard_cap_usd": None,
+                              "per_run_cap_usd": None},
+                      "state": "uncapped", "granted_by": "operator",
+                      "updated_at": "2026-10-21T00:00:00Z"}],
+         "day": "2026-10-21", "count": 1, "total": 1, "offset": 0, "truncated": False}))
+    (lg,) = library_client.list_ledgers()
+    assert lg.total_usd == 0.0
+    assert lg.lanes == {"gateway": 0.0, "subscription": 200.25, "openai-subscription": 0.0}
 
 
 # --- setting a project's cap set (issue_01M4BH8KSSMC8XBKB2C2CX9QTF) ----------
@@ -3531,7 +3935,7 @@ def test_set_ledger_caps_puts_all_four_under_the_client_credential(both_creds, m
         seen["method"] = req.get_method()
         seen["auth"] = req.headers["Authorization"]
         seen["body"] = json.loads(req.data)
-        return _FakeResponse({"id": "led_1", "scope_kind": "project", "scope_id": "vivy",
+        return _FakeResponse({"id": "led_1", "scope_kind": "project", "scope_id": "alpha",
                               "caps": {"warn_usd": 1.0, "soft_cap_usd": 2.0,
                                       "hard_cap_usd": 3.0, "per_run_cap_usd": 0.5},
                               "acting_human": "operator@example.com",
@@ -3539,14 +3943,14 @@ def test_set_ledger_caps_puts_all_four_under_the_client_credential(both_creds, m
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     result = library_client.set_ledger_caps(
-        "vivy", warn_usd=1.0, soft_cap_usd=2.0, hard_cap_usd=3.0, per_run_cap_usd=0.5,
+        "alpha", warn_usd=1.0, soft_cap_usd=2.0, hard_cap_usd=3.0, per_run_cap_usd=0.5,
         acting_human="operator@example.com")
 
     assert seen["method"] == "PUT"
     assert seen["auth"] == "Bearer CLIENT-CRED"
     assert seen["url"].endswith("/ledgers")
     assert seen["body"] == {
-        "scope_kind": "project", "scope_id": "vivy",
+        "scope_kind": "project", "scope_id": "alpha",
         "warn_usd": 1.0, "soft_cap_usd": 2.0, "hard_cap_usd": 3.0, "per_run_cap_usd": 0.5,
         "acting_human": "operator@example.com"}
     assert result["caps"]["hard_cap_usd"] == 3.0
@@ -3564,7 +3968,7 @@ def test_set_ledger_caps_sends_an_omitted_cap_as_null(both_creds, monkeypatch):
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     library_client.set_ledger_caps(
-        "vivy", warn_usd=None, soft_cap_usd=None, hard_cap_usd=None, per_run_cap_usd=None,
+        "alpha", warn_usd=None, soft_cap_usd=None, hard_cap_usd=None, per_run_cap_usd=None,
         acting_human="operator@example.com")
     assert bodies[0]["warn_usd"] is None
     assert bodies[0]["per_run_cap_usd"] is None
@@ -3579,7 +3983,7 @@ def test_set_ledger_caps_refusal_carries_the_librarys_own_wording(both_creds, mo
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     with pytest.raises(library_client.LedgerCapsRefused) as caught:
         library_client.set_ledger_caps(
-            "vivy", warn_usd=10.0, soft_cap_usd=1.0, hard_cap_usd=5.0, per_run_cap_usd=None,
+            "alpha", warn_usd=10.0, soft_cap_usd=1.0, hard_cap_usd=5.0, per_run_cap_usd=None,
             acting_human="operator@example.com")
     assert caught.value.status == 400
     assert "non-decreasing" in caught.value.message
@@ -3592,7 +3996,7 @@ def test_set_ledger_caps_5xx_is_not_dressed_up_as_a_refusal(both_creds, monkeypa
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     with pytest.raises(urllib.error.HTTPError):
         library_client.set_ledger_caps(
-            "vivy", warn_usd=None, soft_cap_usd=None, hard_cap_usd=None, per_run_cap_usd=None,
+            "alpha", warn_usd=None, soft_cap_usd=None, hard_cap_usd=None, per_run_cap_usd=None,
             acting_human="operator@example.com")
 
 
@@ -3608,15 +4012,15 @@ def test_corrections_queue_ids_keeps_a_200_drops_a_404_and_asks_once(monkeypatch
 
     def fake_urlopen(req, timeout=None):
         asked.append(req.full_url)
-        if req.full_url.endswith("/corrections-queues/cq_vivy"):
-            return _FakeResponse({"id": "cq_vivy", "product": "vivy"})
+        if req.full_url.endswith("/corrections-queues/cq_alpha"):
+            return _FakeResponse({"id": "cq_alpha", "product": "alpha"})
         raise urllib.error.HTTPError(req.full_url, 404, "not found", {}, None)
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-    assert library_client.corrections_queue_ids({"cq_vivy", "issue_epic"}) == {"cq_vivy"}
+    assert library_client.corrections_queue_ids({"cq_alpha", "issue_epic"}) == {"cq_alpha"}
     lookups = [u for u in asked if "/corrections-queues/" in u]
     assert len(lookups) == 2
-    assert library_client.corrections_queue_ids({"cq_vivy"}) == {"cq_vivy"}
+    assert library_client.corrections_queue_ids({"cq_alpha"}) == {"cq_alpha"}
     assert [u for u in asked if "/corrections-queues/" in u] == lookups
 
 
@@ -3628,7 +4032,7 @@ def test_corrections_queue_ids_raises_on_a_library_error(monkeypatch, token_env)
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     with pytest.raises(urllib.error.HTTPError):
-        library_client.corrections_queue_ids({"cq_vivy"})
+        library_client.corrections_queue_ids({"cq_alpha"})
 
 
 # --- per-person project scope (E19·1, issue_01M35K54QHJYYPXWS28YWEHJP3) ------
@@ -3646,7 +4050,7 @@ def test_person_scope_carries_the_client_credential_and_the_email_in_the_body(
         seen["url"] = req.full_url
         seen["auth"] = req.headers["Authorization"]
         seen["body"] = json.loads(req.data)
-        return _FakeResponse({"count": 2, "projects": ["vivy", "constance"]})
+        return _FakeResponse({"count": 2, "projects": ["alpha", "beta"]})
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     scope = library_client.person_scope("admin@example.com")
@@ -3655,7 +4059,7 @@ def test_person_scope_carries_the_client_credential_and_the_email_in_the_body(
     assert seen["url"].endswith("/people/by-email/projects")
     assert "admin@example.com" not in seen["url"]  # never a path or query string
     assert seen["body"] == {"email": "admin@example.com"}
-    assert scope == frozenset({"vivy", "constance"})
+    assert scope == frozenset({"alpha", "beta"})
 
 
 def test_person_scope_administrator_is_the_full_registry_the_library_returns(

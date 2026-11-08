@@ -65,7 +65,7 @@ def test_velocity_stat_headlines_waypoints_passed_within_7_days(monkeypatch):
 
 
 def test_velocity_stat_reports_zero_when_no_terminal_entries(monkeypatch):
-    course = _course("course_1", "vivy", "Ship it", entries=[_entry("i1", "open")])
+    course = _course("course_1", "alpha", "Ship it", entries=[_entry("i1", "open")])
     monkeypatch.setattr(library_client, "list_courses", lambda **k: [course])
     monkeypatch.setattr(library_client, "get_course", lambda cid: course)
 
@@ -95,7 +95,7 @@ def test_old_prs_merged_headline_is_gone(monkeypatch):
     drives the headline — a velocity.json with a large prs_merged count must
     not appear in `_velocity_stat()`'s value now that it reads Courses."""
     now = utcnow()
-    course = _course("course_1", "vivy", "Ship it",
+    course = _course("course_1", "alpha", "Ship it",
                      entries=[_entry("i1", "fixed", resolved_at=now - dt.timedelta(days=1))])
     monkeypatch.setattr(library_client, "list_courses", lambda **k: [course])
     monkeypatch.setattr(library_client, "get_course", lambda cid: course)
@@ -111,7 +111,7 @@ def test_velocity_stat_a_passed_entry_with_no_resolved_at_is_not_in_the_7d_windo
     position but not in the 7-day headline — there's no transition time to
     test against the window, and guessing one would misreport a pace this
     codebase can't actually measure."""
-    course = _course("course_1", "vivy", "Ship it", entries=[_entry("i1", "fixed")])
+    course = _course("course_1", "alpha", "Ship it", entries=[_entry("i1", "fixed")])
     monkeypatch.setattr(library_client, "list_courses", lambda **k: [course])
     monkeypatch.setattr(library_client, "get_course", lambda cid: course)
 
@@ -138,11 +138,10 @@ def test_overview_cost_performance_differs_from_ci_health(tmp_path, monkeypatch)
     sc.write_text(json.dumps({
         "run_id": "r1", "date": "2026-06-21", "agent": "coder",
         "model": "claude-sonnet-4-6", "billing_source": "subscription",
-        "repo": "vivy", "cost_usd": 0.50, "pr_state": "MERGED", "merged": True,
+        "repo": "alpha", "cost_usd": 0.50, "pr_state": "MERGED", "merged": True,
         "survived": True, "ci_first_pass": True, "pr_number": 42,
     }) + "\n")
     monkeypatch.setattr(db, "SCORECARD", sc)
-    monkeypatch.setattr(db, "PA_LEDGER", tmp_path / "absent.jsonl")
     monkeypatch.setattr(db, "JUDGE", tmp_path / "absent2.jsonl")
 
     cp = overview_build._cost_per_merged_pr(db.normalize())
@@ -158,7 +157,7 @@ def test_overview_cost_performance_differs_from_ci_health(tmp_path, monkeypatch)
     # and compare.
     import code_health_build
     monkeypatch.setattr(code_health_build, "load_snapshot",
-                        lambda: ("2026-06-21T00:00:00Z", [{"repo": "vivy", "ci_pass_rate": 0.80}]))
+                        lambda: ("2026-06-21T00:00:00Z", [{"repo": "alpha", "ci_pass_rate": 0.80}]))
 
     health = home_build._ci_health()
     assert health["value"] != cp["value"], (
@@ -171,7 +170,6 @@ def test_overview_cost_performance_graceful_on_empty_scorecard(tmp_path, monkeyp
     import dashboard_build as db
 
     monkeypatch.setattr(db, "SCORECARD", tmp_path / "absent.jsonl")
-    monkeypatch.setattr(db, "PA_LEDGER", tmp_path / "absent2.jsonl")
     monkeypatch.setattr(db, "JUDGE", tmp_path / "absent3.jsonl")
 
     cp = overview_build._cost_per_merged_pr(db.normalize())
@@ -208,7 +206,7 @@ def test_contractor_recent_docs_marker_not_kind_or_title(monkeypatch):
     """The marker is the only axis: a contractor-tagged runbook IS allowed, and an
     untagged overview is NOT — the old kind/title/project blocklist is gone."""
     library_fake.patch(monkeypatch)
-    library_fake.seed_reference_doc(id="vivy/runbooks/deploy", kind="runbook",
+    library_fake.seed_reference_doc(id="alpha/runbooks/deploy", kind="runbook",
                                     title="Deploy runbook", audience=["team", "contractor"],
                                     last_reviewed="2026-06-20")
     library_fake.seed_reference_doc(id="shared/overview/secret", kind="overview",
@@ -218,7 +216,7 @@ def test_contractor_recent_docs_marker_not_kind_or_title(monkeypatch):
     results = home_build._recent_docs(n=10, contractor_only=True)
     ids = {d["id"] for d in results}
 
-    assert "vivy/runbooks/deploy" in ids, "a contractor-tagged runbook is allowed"
+    assert "alpha/runbooks/deploy" in ids, "a contractor-tagged runbook is allowed"
     assert "shared/overview/secret" not in ids, "an untagged overview is denied"
 
 
@@ -432,12 +430,12 @@ def test_full_home_recent_docs_link_to_the_documents_own_page(monkeypatch):
     /reference bundle before the drawer could open. The id's own slashes stay
     literal in the URL; anything else would be percent-encoded."""
     library_fake.patch(monkeypatch)
-    library_fake.seed_reference_doc(id="constance/reference/spine-brief",
+    library_fake.seed_reference_doc(id="beta/reference/spine-brief",
                                     title="Spine brief", audience=["team"],
                                     last_reviewed="2026-07-16")
 
     html = home_build.live_html("full", "t", scope=frozenset({"proj"}), whole_fleet=True)
-    assert 'href="/reference/doc/constance/reference/spine-brief"' in html
+    assert 'href="/reference/doc/beta/reference/spine-brief"' in html
     assert "/reference#doc=" not in html
     # no full-tier doc item may still carry the old generic /orientation href
     assert 'class="doc-item" href="/orientation"' not in html
@@ -485,7 +483,10 @@ def test_home_promotes_the_issue_queue_not_the_roster():
 # ---------------------------------------------------------------------------
 
 
-def test_build_body_has_three_group_headings():
+def test_build_body_has_three_group_headings(monkeypatch):
+    # The Tech Debt card (CQ·164) reads the Library live; stubbed here so this
+    # structural test never reaches the real one.
+    monkeypatch.setattr(library_client, "list_issue_items", lambda: [])
     html = overview_build._build_body()
     assert '<h2 class="overview-group-title">Money</h2>' in html
     assert '<h2 class="overview-group-title">Delivery</h2>' in html
@@ -508,7 +509,7 @@ def test_velocity_section_shows_the_same_number_as_the_front_page(monkeypatch):
     ])
     # An out-of-scope Course with two passes of its own: an unfiltered count
     # reads "3 passed", so the scope filter has to run for "1 passed" to hold.
-    other = _course("course_2", "vivy", "Ship taste maps", entries=[
+    other = _course("course_2", "alpha", "Ship taste maps", entries=[
         _entry("i3", "fixed", resolved_at=now - dt.timedelta(days=1)),
         _entry("i4", "fixed", resolved_at=now - dt.timedelta(days=2)),
     ])
@@ -603,7 +604,7 @@ def test_e2e_stalled_when_the_newest_ci_signal_is_old(monkeypatch):
     import library_client
 
     class _Sig:
-        product = "vivy"
+        product = "alpha"
         stream = "e2e-stage-smoke"
         kind = "test-result"
         meta = {"status": "pass"}
@@ -635,7 +636,7 @@ def test_e2e_not_stalled_when_the_newest_ci_signal_is_fresh(monkeypatch):
     fresh = utcnow() - dt.timedelta(hours=1)
 
     class _Sig:
-        product = "vivy"
+        product = "alpha"
         stream = "e2e-stage-smoke"
         kind = "test-result"
         meta = {"status": "pass"}
@@ -818,7 +819,7 @@ def test_e2e_card_and_page_agree_when_stalled(monkeypatch):
     stale = utcnow() - dt.timedelta(hours=200)
 
     class _Sig:
-        product = "vivy"
+        product = "alpha"
         stream = "e2e-stage-smoke"
         kind = "test-result"
         meta = {"status": "pass"}
@@ -929,44 +930,51 @@ def test_kb_card_only_empty_states_when_no_eval_has_ever_run(monkeypatch):
 # --- the spend figure names its day, and the spend pages reload (the operator, 2026-09-28)
 
 
-def test_the_spend_figure_names_the_render_day_and_time(monkeypatch):
+def _cost_report(tmp_path, monkeypatch, snap):
+    """Point dashboard_build at a cost-report directory holding `snap` as
+    latest.json, so `_today_spend` runs its real read."""
+    import dashboard_build
+    (tmp_path / "latest.json").write_text(json.dumps(snap))
+    monkeypatch.setattr(dashboard_build, "COST_DIR", tmp_path)
+
+
+def test_the_spend_figure_names_the_snapshots_day_and_time(tmp_path, monkeypatch):
     """A bare "today" read the same on a tab left open since the night
     before, which showed Sunday's $750 beside Monday's $158 on another
-    device. The figure is a live per-request read now (CQ·154,
-    issue_01M4ZBBQK0KFH9YQ16MNK75HJT), so the day and clock named are the
-    render's own rather than a snapshot's."""
-    import orient_time
-    fixed = dt.datetime(2026, 9, 28, 14, 35, 6, tzinfo=orient_time.MST)
-    monkeypatch.setattr(orient_time, "now", lambda: fixed)
-    monkeypatch.setattr(library_client, "list_finished_runs", lambda since, until=None: [])
-    monkeypatch.setattr(library_client, "cost_rollup_by_project",
-                        lambda runs: {"vivy": {"cost_usd": 158.71, "runs": 3}})
+    device. The day and clock named are the snapshot's own, so a day-close
+    snapshot read after midnight names the day it covers."""
+    _cost_report(tmp_path, monkeypatch,
+                 {"total": 158.71, "generated_at": "2026-09-28T14:35:06.1"})
     assert home_build._today_spend() == {"value": "$158.71",
                                          "delta": "Mon Sep 28 · as of 2:35 PM"}
 
 
-def test_the_spend_figure_sums_every_project_in_the_rollup(monkeypatch):
-    monkeypatch.setattr(library_client, "list_finished_runs", lambda since, until=None: [])
-    monkeypatch.setattr(library_client, "cost_rollup_by_project", lambda runs: {
-        "vivy": {"cost_usd": 1.5, "runs": 1}, "constance": {"cost_usd": 2.5, "runs": 2}})
-    assert home_build._today_spend()["value"] == "$4.00"
+def test_the_spend_figure_is_the_all_providers_total_spending_shows(tmp_path, monkeypatch):
+    """The operator, 2026-10-25: Home shows total cost across every session
+    and every provider, the figure /spending's "Spend — all sessions" panel
+    headlines. agent-cost-report's `total` is Anthropic plus gateway plus
+    apps, so Home reads `total` rather than adding the parts itself."""
+    _cost_report(tmp_path, monkeypatch, {
+        "total": 1434.0, "anthropic_total": 1397.12, "gateway_total": 36.88,
+        "apps_total": 0, "generated_at": "2026-10-19T20:35:04"})
+    assert home_build._today_spend()["value"] == "$1,434.00"
 
 
-def test_the_spend_figure_degrades_to_unavailable_on_a_library_outage(monkeypatch):
+def test_the_spend_figure_degrades_to_unavailable_without_a_snapshot(tmp_path, monkeypatch):
     """Matches every other loader in this module (its own docstring): one
     broken source degrades, it never 500s the whole Home page."""
-    def boom(since, until=None):
-        raise ConnectionError("Library unreachable")
-
-    monkeypatch.setattr(library_client, "list_finished_runs", boom)
+    import dashboard_build
+    monkeypatch.setattr(dashboard_build, "COST_DIR", tmp_path)
     assert home_build._today_spend() == {"value": "—", "delta": "unavailable"}
 
 
-def test_the_spend_figure_is_none_for_a_scoped_viewer(monkeypatch):
+def test_the_spend_figure_is_none_for_a_scoped_viewer(tmp_path, monkeypatch):
     """Rule 1 (E19·3, issue_01M35K5EAZD85FBYXEBQVRKVZV): no fleet total to a
-    scoped viewer. Asserted with the Library call itself unmocked, so a
-    regression that moved the gate past the read would be a hard failure
-    here, not a quietly-passing stub."""
+    scoped viewer. A real snapshot is present, so a regression that moved the
+    gate past the read would return a figure here."""
+    _cost_report(tmp_path, monkeypatch,
+                 {"total": 158.71, "generated_at": "2026-09-28T14:35:06"})
+    assert home_build._today_spend(whole_fleet=True)["value"] == "$158.71"
     assert home_build._today_spend(whole_fleet=False) is None
 
 
@@ -1063,7 +1071,7 @@ def test_ci_health_averages_only_in_scope_repos(tmp_path, monkeypatch):
     reg = tmp_path / "projects.json"
     reg.write_text(json.dumps({"bosun": {"crew": "bosun", "repos": ["agent-platform"]},
                                "convivy-deck": {"crew": "deck", "repos": ["deck-repo"]}}))
-    monkeypatch.setattr(crew_registry, "REGISTRY", reg)
+    monkeypatch.setenv("PROJECTS_JSON", str(reg))
     monkeypatch.setattr(code_health_build, "load_snapshot", lambda: (
         "2026-10-13T00:00:00Z",
         [{"repo": "agent-platform", "ci_pass_rate": 1.0},
@@ -1074,7 +1082,7 @@ def test_ci_health_averages_only_in_scope_repos(tmp_path, monkeypatch):
 
 
 def test_e2e_section_counts_only_in_scope_suites(monkeypatch):
-    """A failing `constance` suite must neither appear in the scoped viewer's
+    """A failing `beta` suite must neither appear in the scoped viewer's
     count nor drag their "passing" figure: unfiltered, the card reads 1/2."""
     import datetime as dt
 
@@ -1091,22 +1099,22 @@ def test_e2e_section_counts_only_in_scope_suites(monkeypatch):
         return _Sig()
 
     monkeypatch.setattr(library_client, "list_signals",
-                        lambda **k: [sig("vivy", "pass"), sig("constance", "fail")])
-    scoped = overview_build._e2e_section(frozenset({"vivy"}), False)
+                        lambda **k: [sig("alpha", "pass"), sig("beta", "fail")])
+    scoped = overview_build._e2e_section(frozenset({"alpha"}), False)
     assert "1/1 passing" in scoped
     assert "1 suites" in scoped
     assert "1/2 passing" in overview_build._e2e_section(frozenset(), True)
 
 
 def test_kb_doc_count_counts_only_in_scope_documents(monkeypatch):
-    """Home's knowledge-base pill: unfiltered it reads 3 docs; the vivy
+    """Home's knowledge-base pill: unfiltered it reads 3 docs; the alpha
     viewer's reads 1."""
     library_fake.patch(monkeypatch)
-    library_fake.seed_reference_doc(id="vivy/a", title="A", project="vivy")
+    library_fake.seed_reference_doc(id="alpha/a", title="A", project="alpha")
     library_fake.seed_reference_doc(id="deck/b", title="B", project="convivy-deck")
     library_fake.seed_reference_doc(id="deck/c", title="C", project="convivy-deck")
 
-    assert home_build._kb_doc_count(frozenset({"vivy"}), False) == "1 docs indexed"
+    assert home_build._kb_doc_count(frozenset({"alpha"}), False) == "1 docs indexed"
     assert home_build._kb_doc_count(frozenset(), True) == "3 docs indexed"
 
 
@@ -1114,7 +1122,7 @@ def _two_repo_registry(tmp_path, monkeypatch):
     reg = tmp_path / "projects.json"
     reg.write_text(json.dumps({"bosun": {"crew": "bosun", "repos": ["agent-platform"]},
                                "convivy-deck": {"crew": "deck", "repos": ["deck-repo"]}}))
-    monkeypatch.setattr(crew_registry, "REGISTRY", reg)
+    monkeypatch.setenv("PROJECTS_JSON", str(reg))
     return frozenset({"bosun"})
 
 
@@ -1130,7 +1138,6 @@ def test_cost_performance_section_counts_only_in_scope_repos(tmp_path, monkeypat
             for i, (repo, cost) in enumerate([("agent-platform", 0.50), ("deck-repo", 9.50)])]
     sc.write_text("".join(json.dumps(r) + "\n" for r in rows))
     monkeypatch.setattr(db, "SCORECARD", sc)
-    monkeypatch.setattr(db, "PA_LEDGER", tmp_path / "absent.jsonl")
     monkeypatch.setattr(db, "JUDGE", tmp_path / "absent2.jsonl")
 
     scoped = overview_build._cost_performance_section(scope, False)
@@ -1151,3 +1158,34 @@ def test_activity_section_counts_only_in_scope_sessions(tmp_path, monkeypatch):
 
     assert "1 sessions" in overview_build._activity_section(scope, False)
     assert "3 sessions" in overview_build._activity_section(frozenset(), True)
+
+
+def _finished_run(product, exit_status):
+    return library_client.FinishedRun(
+        signal_id=f"{product}-run", product=product, run="run-1", persona="coder",
+        repo=product, work_item=None, model="claude-sonnet-5", cost=None,
+        outcome={"exit_status": exit_status, "terminal_reason": None},
+        produced_at=None, ingested_at=utcnow(),
+        model_resolved="claude-sonnet-5", exit_status=exit_status)
+
+
+def test_model_comparison_section_counts_only_in_scope_runs(monkeypatch):
+    """A `beta` run must neither appear in the alpha viewer's count nor
+    drag their "completed" share: a whole-fleet viewer whose scope covers
+    both projects (`person_scope`'s own whole-fleet shape — a scope that
+    does not cover every project is never `whole_fleet`, crew_registry.
+    covers_every_project) reads 2 runs, 50% completed; the alpha viewer's
+    reads 1 run, 100% completed."""
+    monkeypatch.setattr(
+        library_client, "list_finished_runs",
+        lambda *a, **k: [_finished_run("alpha", "completed"),
+                         _finished_run("beta", "errored")])
+
+    scoped = overview_build._model_comparison_section(frozenset({"alpha"}), False)
+    assert "1 runs" in scoped
+    assert "100% completed" in scoped
+    assert "beta" not in scoped
+
+    whole = overview_build._model_comparison_section(frozenset({"alpha", "beta"}), True)
+    assert "2 runs" in whole
+    assert "50% completed" in whole

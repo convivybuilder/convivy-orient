@@ -635,8 +635,8 @@ def render(data: dict, scope: frozenset[str], whole_fleet: bool) -> str:
     buckets (`data["bucket_order"]`) come from the velocity-report producer's
     own engineering-grouping taxonomy, keyed by names like "Library" and
     "Bosun" that are Builder's own crews, not a Library project — and others
-    ("Placard", "Archy", "Convivy general") that are features with no project
-    of their own at all (E19·3, issue_01M35K5EAZD85FBYXEBQVRKVZV). Neither
+    that are features with no project of their own at all (E19·3,
+    issue_01M35K5EAZD85FBYXEBQVRKVZV). Neither
     reconciles with the viewer's project-slug `scope`, so there is no safe way
     to filter this section's buckets, its fleet-wide Delivery-index composite
     score, or its weekly trend history (which carries no per-bucket

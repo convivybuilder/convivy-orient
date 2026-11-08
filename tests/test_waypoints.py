@@ -73,7 +73,7 @@ def test_mixed_course_reports_passed_in_flight_and_remaining(monkeypatch):
 
 
 def test_course_with_no_terminal_entries_reports_zero_passed(monkeypatch):
-    course = _course("course_1", "vivy", "Ship it", entries=[
+    course = _course("course_1", "alpha", "Ship it", entries=[
         _entry("i1", "open", title="Step one"),
         _entry("i2", "pr-open", title="Step two"),
     ])
@@ -87,7 +87,7 @@ def test_course_with_no_terminal_entries_reports_zero_passed(monkeypatch):
 
 
 def test_fully_passed_course_has_no_entry_in_flight(monkeypatch):
-    course = _course("course_1", "vivy", "Ship it", entries=[_entry("i1", "fixed")])
+    course = _course("course_1", "alpha", "Ship it", entries=[_entry("i1", "fixed")])
     monkeypatch.setattr(library_client, "list_courses", lambda **k: [course])
     monkeypatch.setattr(library_client, "get_course", lambda cid: course)
 
@@ -102,12 +102,12 @@ def test_product_with_no_live_course_is_simply_absent(monkeypatch):
     error — course_progress() only ever iterates what list_courses returns,
     so an absent product produces no row rather than a placeholder or a
     crash."""
-    course = _course("course_1", "vivy", "Ship it", entries=[_entry("i1", "fixed")])
+    course = _course("course_1", "alpha", "Ship it", entries=[_entry("i1", "fixed")])
     monkeypatch.setattr(library_client, "list_courses", lambda **k: [course])
     monkeypatch.setattr(library_client, "get_course", lambda cid: course)
 
     rows = waypoints.course_progress()
-    assert [r.product for r in rows] == ["vivy"]  # "constance" etc. simply don't appear
+    assert [r.product for r in rows] == ["alpha"]  # "beta" etc. simply don't appear
 
 
 def test_course_progress_raises_when_list_courses_fails(monkeypatch):
@@ -119,8 +119,8 @@ def test_course_progress_raises_when_list_courses_fails(monkeypatch):
 
 
 def test_one_courses_detail_failing_degrades_that_row_and_not_the_others(monkeypatch, capsys):
-    good = _course("course_1", "vivy", "Ship it", entries=[_entry("i1", "fixed")])
-    bad = _course("course_2", "selector", "Make playlists good", entries=[_entry("i2", None)])
+    good = _course("course_1", "alpha", "Ship it", entries=[_entry("i1", "fixed")])
+    bad = _course("course_2", "delta", "Make playlists good", entries=[_entry("i2", None)])
     monkeypatch.setattr(library_client, "list_courses", lambda **k: [good, bad])
 
     def flaky(cid):
@@ -132,8 +132,8 @@ def test_one_courses_detail_failing_degrades_that_row_and_not_the_others(monkeyp
     rows = waypoints.course_progress()
     assert len(rows) == 2
     by_product = {r.product: r for r in rows}
-    assert by_product["vivy"].passed == 1
-    assert by_product["selector"].passed == 0  # degraded to the list record's unresolved state
+    assert by_product["alpha"].passed == 1
+    assert by_product["delta"].passed == 0  # degraded to the list record's unresolved state
     assert "course_2" in capsys.readouterr().err
 
 
@@ -142,7 +142,7 @@ def test_one_courses_detail_failing_degrades_that_row_and_not_the_others(monkeyp
 
 def test_passed_entry_resolved_3_days_ago_counts_in_every_window(monkeypatch):
     now = utcnow()
-    course = _course("course_1", "vivy", "Ship it", entries=[
+    course = _course("course_1", "alpha", "Ship it", entries=[
         _entry("i1", "fixed", resolved_at=now - dt.timedelta(days=3)),
     ])
     monkeypatch.setattr(library_client, "list_courses", lambda **k: [course])
@@ -156,7 +156,7 @@ def test_passed_entry_resolved_3_days_ago_counts_in_every_window(monkeypatch):
 
 def test_passed_entry_resolved_20_days_ago_counts_in_30_and_90_only(monkeypatch):
     now = utcnow()
-    course = _course("course_1", "vivy", "Ship it", entries=[
+    course = _course("course_1", "alpha", "Ship it", entries=[
         _entry("i1", "fixed", resolved_at=now - dt.timedelta(days=20)),
     ])
     monkeypatch.setattr(library_client, "list_courses", lambda **k: [course])
@@ -169,7 +169,7 @@ def test_passed_entry_resolved_20_days_ago_counts_in_30_and_90_only(monkeypatch)
 
 
 def test_passed_entry_with_no_resolved_at_counts_in_no_window_but_still_passed(monkeypatch):
-    course = _course("course_1", "vivy", "Ship it", entries=[_entry("i1", "fixed")])
+    course = _course("course_1", "alpha", "Ship it", entries=[_entry("i1", "fixed")])
     monkeypatch.setattr(library_client, "list_courses", lambda **k: [course])
     monkeypatch.setattr(library_client, "get_course", lambda cid: course)
 
@@ -185,7 +185,7 @@ def test_open_entry_never_counts_in_any_window_however_old_its_resolved_at(monke
     never count as passed in any window — `is_passed` gates every window
     check, `resolved_at` alone is not enough."""
     now = utcnow()
-    course = _course("course_1", "vivy", "Ship it", entries=[
+    course = _course("course_1", "alpha", "Ship it", entries=[
         _entry("i1", "open", resolved_at=now - dt.timedelta(days=1)),
     ])
     monkeypatch.setattr(library_client, "list_courses", lambda **k: [course])
@@ -224,7 +224,7 @@ def test_a_resolved_at_in_the_future_counts_in_no_window():
 
 def test_total_within_sums_across_products(monkeypatch):
     now = utcnow()
-    c1 = _course("course_1", "vivy", "Ship it", entries=[
+    c1 = _course("course_1", "alpha", "Ship it", entries=[
         _entry("i1", "fixed", resolved_at=now - dt.timedelta(days=2)),
     ])
     c2 = _course("course_2", "bosun", "Make dispatch accountable", entries=[
@@ -253,12 +253,12 @@ def test_course_progress_accepts_a_prefetched_course_list_without_refetching(mon
     """The /velocity page fetches once and hands the same courses to both
     `course_progress` and `weekly_pace` — `course_progress(courses)` must not
     call `list_courses`/`get_course` again."""
-    course = _course("course_1", "vivy", "Ship it", entries=[_entry("i1", "fixed")])
+    course = _course("course_1", "alpha", "Ship it", entries=[_entry("i1", "fixed")])
     monkeypatch.setattr(library_client, "list_courses", _boom)
     monkeypatch.setattr(library_client, "get_course", _boom)
 
     rows = waypoints.course_progress([course])
-    assert rows[0].product == "vivy"
+    assert rows[0].product == "alpha"
     assert rows[0].passed == 1
 
 
@@ -271,7 +271,7 @@ _NOW = dt.datetime(2026, 9, 15, 12, 0)  # naive UTC, this codebase's convention
 def test_weekly_pace_fills_a_quiet_week_with_zero_rather_than_a_gap():
     """Entries land 3 and 1 weeks ago; nothing happened 2 weeks ago. That
     middle week must still appear, at 0 — not be skipped."""
-    course = _course("course_1", "vivy", "Ship it", entries=[
+    course = _course("course_1", "alpha", "Ship it", entries=[
         _entry("i1", "fixed", resolved_at=_NOW - dt.timedelta(days=21)),
         _entry("i2", "fixed", resolved_at=_NOW - dt.timedelta(days=7)),
     ])
@@ -285,7 +285,7 @@ def test_weekly_pace_fills_a_quiet_week_with_zero_rather_than_a_gap():
 
 
 def test_weekly_pace_marks_only_the_current_week_partial():
-    course = _course("course_1", "vivy", "Ship it", entries=[
+    course = _course("course_1", "alpha", "Ship it", entries=[
         _entry("i1", "fixed", resolved_at=_NOW - dt.timedelta(days=7)),
         _entry("i2", "fixed", resolved_at=_NOW),
     ])
@@ -296,23 +296,23 @@ def test_weekly_pace_marks_only_the_current_week_partial():
 
 def test_weekly_pace_splits_builder_crews_from_products_and_sums_to_total():
     """Builder's crews (library here) collapse to one "Builder" group,
-    distinct from a product's own name (vivy) — and the groups still add up
+    distinct from a product's own name (alpha) — and the groups still add up
     to that week's total, per the item's definition of done."""
     builder_course = _course("course_1", "library", "Ship the queue", entries=[
         _entry("i1", "fixed", resolved_at=_NOW - dt.timedelta(days=7)),
         _entry("i2", "fixed", resolved_at=_NOW - dt.timedelta(days=7)),
     ])
-    product_course = _course("course_2", "vivy", "Ship it", entries=[
+    product_course = _course("course_2", "alpha", "Ship it", entries=[
         _entry("i3", "fixed", resolved_at=_NOW - dt.timedelta(days=7)),
     ])
     weekly = waypoints.weekly_pace([builder_course, product_course], now=_NOW)
     week = next(w for w in weekly if w.total)
-    assert week.by_group == {"Builder": 2, "vivy": 1}
+    assert week.by_group == {"Builder": 2, "alpha": 1}
     assert sum(week.by_group.values()) == week.total == 3
 
 
 def test_weekly_pace_excludes_open_and_unresolved_entries():
-    course = _course("course_1", "vivy", "Ship it", entries=[
+    course = _course("course_1", "alpha", "Ship it", entries=[
         _entry("i1", "open", resolved_at=_NOW - dt.timedelta(days=7)),  # not passed
         _entry("i2", "fixed"),  # passed, no resolved_at
     ])
@@ -321,14 +321,14 @@ def test_weekly_pace_excludes_open_and_unresolved_entries():
 
 
 def test_weekly_pace_returns_empty_list_with_no_passed_and_resolved_entries():
-    course = _course("course_1", "vivy", "Ship it", entries=[_entry("i1", "open")])
+    course = _course("course_1", "alpha", "Ship it", entries=[_entry("i1", "open")])
     assert waypoints.weekly_pace([course], now=_NOW) == []
 
 
 def test_weekly_pace_ignores_a_resolved_at_in_the_future():
     """Clock skew between this host and the Library could otherwise put a
     week past "now" into the series, breaking the one-partial-week rule."""
-    course = _course("course_1", "vivy", "Ship it", entries=[
+    course = _course("course_1", "alpha", "Ship it", entries=[
         _entry("i1", "fixed", resolved_at=_NOW - dt.timedelta(days=7)),
         _entry("i2", "fixed", resolved_at=_NOW + dt.timedelta(days=7)),
     ])
@@ -341,7 +341,7 @@ def test_weekly_pace_ignores_a_resolved_at_in_the_future():
 
 
 def test_unresolved_passed_count_counts_passed_entries_with_no_resolved_at():
-    course = _course("course_1", "vivy", "Ship it", entries=[
+    course = _course("course_1", "alpha", "Ship it", entries=[
         _entry("i1", "fixed", resolved_at=_NOW),  # resolved — not counted
         _entry("i2", "fixed"),                    # passed, no resolved_at
         _entry("i3", "open"),                     # not passed at all

@@ -52,9 +52,10 @@ import asyncio
 import contextlib
 import datetime as dt
 import os
+import re
 import sys
 import time
-from html import escape as _html_escape
+from html import escape as _html_escape, unescape as _html_unescape
 from pathlib import Path
 
 import uvicorn
@@ -93,6 +94,7 @@ import merge_queue_build
 import overview_build
 import ops_reports_build
 import approve_api
+import model_comparison_build
 import model_override_api
 import issue_write_api
 import epic_revise_api
@@ -116,6 +118,7 @@ import signal_search_api
 import signals_build
 import warrant_build
 import velocity_build
+import tech_debt_build
 import writing_desk_build
 import blog_posts_build
 from paths import STATE_ROOT
@@ -454,6 +457,59 @@ def _substitute_viewer_tokens(html: str, email: str, esc_label: str,
     return html.replace("__WHOAMI__", esc_label)
 
 
+# The saved page's own `data-rendered-at` stamp (`design_system.render_stamp`),
+# which is what the stale-copy banner dates the copy from.
+_SAVED_RENDER_TIME = re.compile(r'data-rendered-at="([^"]+)"')
+
+
+def _saved_render_time(html: str) -> str:
+    """When the saved copy was last rendered, off its own footer stamp, or ""
+    when it carries none.
+
+    Read from the page rather than from the file's mtime: the stamp is what the
+    page itself asserts, it survives a copy between machines with its original
+    time intact, and it is the same value a reader can find at the bottom of
+    the page. Unescaped here because `design_system.saved_copy_banner` escapes
+    it again for the banner's text and attribute."""
+    found = _SAVED_RENDER_TIME.search(html)
+    return _html_unescape(found.group(1)) if found else ""
+
+
+def _with_saved_copy_banner(html: str, banner: str) -> str:
+    """Put the stale-copy `banner` at the top of the saved page's content
+    column, below the nav (`design_system.PAGE_WRAP_MARKER`).
+
+    A saved file with no such column gets the banner prepended, so a page
+    served from a hand-written fallback still says it is a saved copy rather
+    than reading as a current render."""
+    if ds.PAGE_WRAP_MARKER in html:
+        return html.replace(ds.PAGE_WRAP_MARKER, ds.PAGE_WRAP_MARKER + banner, 1)
+    return banner + html
+
+
+def _serve_page(html: str, request: Request, *, stale: bool,
+                email: str, esc_label: str, scope: frozenset[str]) -> Response:
+    """Answer a page route with `html`, marking it when it is a saved copy.
+
+    This is the one step that adds both markers. Before it, each of the twelve
+    fallback branches set `X-Orient-Render: stale-fallback` from its own `stale`
+    flag while the page itself carried nothing, so only a script was told: a
+    render that had been failing since the last restart answered a normal 200
+    with the last build's body, indistinguishable from a current page
+    (CQ·163, issue_01M57NS03XATJRWY5Q7H8W90DS). A fallback branch added later
+    answers through here and gets both markers from the one `stale` flag.
+
+    `stale` is required rather than defaulted, so a page answered from a
+    fallback cannot pass silently as a live render, and a live render cannot
+    pick the banner up by accident."""
+    html = _substitute_viewer_tokens(html, email, esc_label, scope)
+    if not stale:
+        return _html(200, html.encode("utf-8"), request)
+    banner = ds.saved_copy_banner(_saved_render_time(html))
+    return _html(200, _with_saved_copy_banner(html, banner).encode("utf-8"), request,
+                 extra_headers={STALE_FALLBACK_HEADER: "stale-fallback"})
+
+
 def _scope_line_text(scope: frozenset[str]) -> str:
     """The scope chip's text (E19·5, issue_01M35K5PC5W3SS3495105WW7BF):
     "All projects" when `scope` covers every registry project
@@ -521,7 +577,11 @@ def _require_scoped_access(request: Request, email: str, tier: str, jwt_status: 
 # issue_01M35K5EAZD85FBYXEBQVRKVZV). They render in their own block in
 # `handle_get` because `_full_only_routes()` calls its renderers with no
 # arguments; the contractor-404 test walks this tuple beside that table.
-SCOPED_DASHBOARDS = ("/spending", "/velocity", "/health", "/alerts")
+#
+# /tech-debt joined at CQ·164 (issue_01M57NS4ZPTBGG1QCMXX5YCPXF): it counts
+# each in-scope project's open corrections-queue items, so a project outside
+# the viewer's scope must not reach its rows or its totals.
+SCOPED_DASHBOARDS = ("/spending", "/velocity", "/health", "/alerts", "/tech-debt")
 
 # Nine more pages lifted out of `_full_only_routes()` for the same reason
 # (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M): each now reads or aggregates
@@ -535,6 +595,55 @@ SCOPED_ROUTES = ("/overview", "/cost-performance", "/activity", "/security", "/w
                  "/kb", "/engineering/e2e", "/engineering/changelog",
                  "/engineering/merge-queue", "/products/release-notes",
                  "/reference/briefings")
+
+
+def _scoped_pages(scope: frozenset[str], whole_fleet: bool,
+                  request: Request | None = None) -> dict[str, tuple]:
+    """Route path -> (static fallback file, live renderer) for every page in
+    `SCOPED_DASHBOARDS` and `SCOPED_ROUTES`.
+
+    One table with two readers: the dispatch below, and this repo's
+    saved-copy walk in tests/test_server.py, which takes each route's fallback
+    filename from here. A route added to either tuple therefore arrives in
+    that walk with its saved copy, rather than waiting for someone to add it
+    to a second hand-kept list.
+
+    `request` is optional (the two test-only callers below pass none, and
+    never invoke the renderer) because only /engineering/changelog and
+    /products/release-notes read a query param (CQ·167,
+    issue_01M5C9ZDJ14Y55B54XGM5RW5J6): the `?product=` their project-page
+    links carry, the way `/model-comparison` reads its own query."""
+    requested_product = request.query_params.get("product") if request is not None else None
+    return {
+        "/spending": ("spending.html", lambda: dashboard_build.spending_live_html(scope, whole_fleet)),
+        "/velocity": ("velocity.html", lambda: velocity_build.live_html(scope, whole_fleet)),
+        "/health": ("health.html", lambda: code_health_build.live_html(scope)),
+        "/alerts": ("alerts.html", lambda: alerts_build.live_html(scope, whole_fleet)),
+        # CQ·164, issue_01M57NS4ZPTBGG1QCMXX5YCPXF: reborn on the
+        # Library's corrections queue, the source that outlived the open
+        # GitHub issues it counted before.
+        "/tech-debt": ("tech-debt.html", lambda: tech_debt_build.live_html(scope)),
+        # E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M:
+        "/overview": ("overview.html", lambda: overview_build.live_html(scope, whole_fleet)),
+        "/cost-performance": ("cost-performance.html",
+                              lambda: dashboard_build.cost_performance_live_html(scope, whole_fleet)),
+        "/activity": ("activity.html", lambda: activity_build.live_html(scope, whole_fleet)),
+        "/security": ("security.html", lambda: security_build.live_html(scope, whole_fleet)),
+        "/warrant": ("warrant.html", lambda: warrant_build.live_html(scope, whole_fleet)),
+        "/kb": ("kb.html", lambda: kb_build.live_html(scope, whole_fleet)),
+        "/engineering/e2e": ("engineering-e2e.html",
+                             lambda: engineering_e2e_build.live_html(scope, whole_fleet)),
+        "/engineering/changelog": ("engineering-changelog.html",
+                                   lambda: changelog_build.changelog_live_html(
+                                       scope, whole_fleet, requested_product)),
+        "/engineering/merge-queue": ("engineering-merge-queue.html",
+                                     lambda: merge_queue_build.live_html(scope, whole_fleet)),
+        "/products/release-notes": ("products-release-notes.html",
+                                    lambda: release_notes_build.live_html(
+                                        scope, whole_fleet, requested_product)),
+        "/reference/briefings": ("memory-briefings.html",
+                                 lambda: ops_reports_build.briefings_live_html(scope, whole_fleet)),
+    }
 
 
 def _full_only_routes() -> dict:
@@ -977,9 +1086,8 @@ def handle_get(request: Request):
                 access_log(request, 500, email, tier, jwt_status)
                 return _html(500, b"<h1>500</h1><p>home bundle missing - run home_build.py</p>", request)
         access_log(request, 200, email, tier, jwt_status)
-        render_headers = {STALE_FALLBACK_HEADER: "stale-fallback"} if stale else None
-        return _html(200, _substitute_viewer_tokens(html, email, esc_label, scope).encode("utf-8"), request,
-                    extra_headers=render_headers)
+        return _serve_page(html, request, stale=stale, email=email,
+                           esc_label=esc_label, scope=scope)
 
     # The Reading Room (ARCH-357): one personalized reading surface per member,
     # reachable by BOTH tiers (un-tier-gated, as the retired Orientation area was).
@@ -1008,9 +1116,8 @@ def handle_get(request: Request):
                 access_log(request, 500, email, tier, jwt_status)
                 return _html(500, b"<h1>500</h1><p>issues.html missing - run its build</p>", request)
         access_log(request, 200, email, tier, jwt_status)
-        html = _substitute_viewer_tokens(html, email, esc_label, scope)
-        render_headers = {STALE_FALLBACK_HEADER: "stale-fallback"} if stale else None
-        return _html(200, html.encode("utf-8"), request, extra_headers=render_headers)
+        return _serve_page(html, request, stale=stale, email=email,
+                           esc_label=esc_label, scope=scope)
 
     # /crews (epic issue_01M08YM8MTNSTAEG1NV7E2GYRV): roster, active work,
     # held leases, and cost — one row per dispatchable crew. Handled here
@@ -1037,9 +1144,8 @@ def handle_get(request: Request):
                 access_log(request, 500, email, tier, jwt_status)
                 return _html(500, b"<h1>500</h1><p>crews.html missing - run its build</p>", request)
         access_log(request, 200, email, tier, jwt_status)
-        html = _substitute_viewer_tokens(html, email, esc_label, scope)
-        render_headers = {STALE_FALLBACK_HEADER: "stale-fallback"} if stale else None
-        return _html(200, html.encode("utf-8"), request, extra_headers=render_headers)
+        return _serve_page(html, request, stale=stale, email=email,
+                           esc_label=esc_label, scope=scope)
 
     # /archives, /archives/prs, /archives/changelogs (S1-b, ARCH-349; E19·4,
     # issue_01M35K5JQ7Z7MHYZGWRSB5F85M): the signal-memory browse page and its
@@ -1071,9 +1177,8 @@ def handle_get(request: Request):
                 access_log(request, 500, email, tier, jwt_status)
                 return _html(500, f"<h1>500</h1><p>{page} missing — run its build</p>".encode(), request)
         access_log(request, 200, email, tier, jwt_status)
-        html = _substitute_viewer_tokens(html, email, esc_label, scope)
-        render_headers = {STALE_FALLBACK_HEADER: "stale-fallback"} if stale else None
-        return _html(200, html.encode("utf-8"), request, extra_headers=render_headers)
+        return _serve_page(html, request, stale=stale, email=email,
+                           esc_label=esc_label, scope=scope)
 
     # /reference (ARCH-355, ARCH-194): the Greater KB browse — the Reference
     # Room. Handled here rather than in the zero-argument table because it
@@ -1097,9 +1202,8 @@ def handle_get(request: Request):
                 access_log(request, 500, email, tier, jwt_status)
                 return _html(500, b"<h1>500</h1><p>engineering.html missing - run its build</p>", request)
         access_log(request, 200, email, tier, jwt_status)
-        html = _substitute_viewer_tokens(html, email, esc_label, scope)
-        render_headers = {STALE_FALLBACK_HEADER: "stale-fallback"} if stale else None
-        return _html(200, html.encode("utf-8"), request, extra_headers=render_headers)
+        return _serve_page(html, request, stale=stale, email=email,
+                           esc_label=esc_label, scope=scope)
 
     # /engineering/roster: every project and the agents individuated for it,
     # by lane. Handled here rather than in the zero-argument table because
@@ -1123,9 +1227,8 @@ def handle_get(request: Request):
                 access_log(request, 500, email, tier, jwt_status)
                 return _html(500, b"<h1>500</h1><p>roster.html missing - run its build</p>", request)
         access_log(request, 200, email, tier, jwt_status)
-        html = _substitute_viewer_tokens(html, email, esc_label, scope)
-        render_headers = {STALE_FALLBACK_HEADER: "stale-fallback"} if stale else None
-        return _html(200, html.encode("utf-8"), request, extra_headers=render_headers)
+        return _serve_page(html, request, stale=stale, email=email,
+                           esc_label=esc_label, scope=scope)
 
     # /chart-house — Chart House's base page (issue_01M0JFSVSGZW7A4RD77YNG395B):
     # each project's Course, open work and 30-day cost. Handled here rather than
@@ -1147,9 +1250,8 @@ def handle_get(request: Request):
                 access_log(request, 500, email, tier, jwt_status)
                 return _html(500, b"<h1>500</h1><p>chart-house.html missing - run its build</p>", request)
         access_log(request, 200, email, tier, jwt_status)
-        html = _substitute_viewer_tokens(html, email, esc_label, scope)
-        render_headers = {STALE_FALLBACK_HEADER: "stale-fallback"} if stale else None
-        return _html(200, html.encode("utf-8"), request, extra_headers=render_headers)
+        return _serve_page(html, request, stale=stale, email=email,
+                           esc_label=esc_label, scope=scope)
 
     # /engineering/course — same reason and same shape as /engineering/issues
     # just above.
@@ -1169,9 +1271,8 @@ def handle_get(request: Request):
                 access_log(request, 500, email, tier, jwt_status)
                 return _html(500, b"<h1>500</h1><p>course.html missing - run its build</p>", request)
         access_log(request, 200, email, tier, jwt_status)
-        html = _substitute_viewer_tokens(html, email, esc_label, scope)
-        render_headers = {STALE_FALLBACK_HEADER: "stale-fallback"} if stale else None
-        return _html(200, html.encode("utf-8"), request, extra_headers=render_headers)
+        return _serve_page(html, request, stale=stale, email=email,
+                           esc_label=esc_label, scope=scope)
 
     # Blockers: a lane lifted out of the issue queue. Same tier gate as
     # /engineering/issues, since it reads the same table.
@@ -1231,9 +1332,8 @@ def handle_get(request: Request):
                 access_log(request, 500, email, tier, jwt_status)
                 return _html(500, b"<h1>500</h1><p>corrections.html missing - run its build</p>", request)
         access_log(request, 200, email, tier, jwt_status)
-        html = _substitute_viewer_tokens(html, email, esc_label, scope)
-        render_headers = {STALE_FALLBACK_HEADER: "stale-fallback"} if stale else None
-        return _html(200, html.encode("utf-8"), request, extra_headers=render_headers)
+        return _serve_page(html, request, stale=stale, email=email,
+                           esc_label=esc_label, scope=scope)
 
     # /activity/nodes (issue_01M388E7WD8C83T5430YS88EJG): one session's
     # dispatch tree, which /activity fetches when a row is expanded instead of
@@ -1309,6 +1409,28 @@ def handle_get(request: Request):
                             "true" if viewer_role in authz.POLICY_WRITER_ROLES else "false")
         return _html(200, _substitute_viewer_tokens(html, email, esc_label, scope).encode("utf-8"), request)
 
+    # /model-comparison (CQ·156, issue_01M57NH489EASKMATJ8QFED5EC): finished
+    # runs grouped by agent and model, off the query string (`by`, `project`,
+    # `from`/`to`). Handled here rather than through `SCOPED_ROUTES` just
+    # below for the same reason /crews/runs and /engineering/policy are —
+    # that dispatcher calls its renderer with no arguments. No static
+    # fallback, for the same reason /engineering/policy has none: a stale
+    # copy of a cost/completion figure is the one thing this page is built
+    # not to hold, so a render failure is a plain 500 instead.
+    if path == "/model-comparison":
+        refusal = _require_scoped_access(request, email, tier, jwt_status, scope, path, esc_label)
+        if refusal is not None:
+            return refusal
+        whole_fleet = crew_registry.covers_every_project(scope)
+        try:
+            html = model_comparison_build.live_html(dict(request.query_params), scope, whole_fleet)
+        except Exception as exc:
+            _log_render_failure("model-comparison", exc)
+            access_log(request, 500, email, tier, jwt_status)
+            return _html(500, b"<h1>500</h1><p>model comparison unavailable</p>", request)
+        access_log(request, 200, email, tier, jwt_status)
+        return _html(200, _substitute_viewer_tokens(html, email, esc_label, scope).encode("utf-8"), request)
+
     # /spending, /velocity, /health, /alerts (E19·3, issue_01M35K5EAZD85FBYXEBQVRKVZV)
     # and the nine `SCOPED_ROUTES` pages (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M):
     # pulled out of `_full_only_routes()` because each now reads or aggregates over the
@@ -1351,39 +1473,15 @@ def handle_get(request: Request):
                 access_log(request, 500, email, tier, jwt_status)
                 return _html(500, f"<h1>500</h1><p>{page} missing — run its build</p>".encode(), request)
         access_log(request, 200, email, tier, jwt_status)
-        html = _substitute_viewer_tokens(html, email, esc_label, scope)
-        render_headers = {STALE_FALLBACK_HEADER: "stale-fallback"} if stale else None
-        return _html(200, html.encode("utf-8"), request, extra_headers=render_headers)
+        return _serve_page(html, request, stale=stale, email=email,
+                           esc_label=esc_label, scope=scope)
 
     if path in SCOPED_DASHBOARDS or path in SCOPED_ROUTES:
         refusal = _require_scoped_access(request, email, tier, jwt_status, scope, path, esc_label)
         if refusal is not None:
             return refusal
         whole_fleet = crew_registry.covers_every_project(scope)
-        page, renderer = {
-            "/spending": ("spending.html", lambda: dashboard_build.spending_live_html(scope, whole_fleet)),
-            "/velocity": ("velocity.html", lambda: velocity_build.live_html(scope, whole_fleet)),
-            "/health": ("health.html", lambda: code_health_build.live_html(scope)),
-            "/alerts": ("alerts.html", lambda: alerts_build.live_html(scope, whole_fleet)),
-            # E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M:
-            "/overview": ("overview.html", lambda: overview_build.live_html(scope, whole_fleet)),
-            "/cost-performance": ("cost-performance.html",
-                                  lambda: dashboard_build.cost_performance_live_html(scope, whole_fleet)),
-            "/activity": ("activity.html", lambda: activity_build.live_html(scope, whole_fleet)),
-            "/security": ("security.html", lambda: security_build.live_html(scope, whole_fleet)),
-            "/warrant": ("warrant.html", lambda: warrant_build.live_html(scope, whole_fleet)),
-            "/kb": ("kb.html", lambda: kb_build.live_html(scope, whole_fleet)),
-            "/engineering/e2e": ("engineering-e2e.html",
-                                 lambda: engineering_e2e_build.live_html(scope, whole_fleet)),
-            "/engineering/changelog": ("engineering-changelog.html",
-                                      lambda: changelog_build.changelog_live_html(scope, whole_fleet)),
-            "/engineering/merge-queue": ("engineering-merge-queue.html",
-                                        lambda: merge_queue_build.live_html(scope, whole_fleet)),
-            "/products/release-notes": ("products-release-notes.html",
-                                       lambda: release_notes_build.live_html(scope, whole_fleet)),
-            "/reference/briefings": ("memory-briefings.html",
-                                     lambda: ops_reports_build.briefings_live_html(scope, whole_fleet)),
-        }[path]
+        page, renderer = _scoped_pages(scope, whole_fleet, request)[path]
         try:
             html = renderer()
             stale = False
@@ -1396,9 +1494,8 @@ def handle_get(request: Request):
                 access_log(request, 500, email, tier, jwt_status)
                 return _html(500, f"<h1>500</h1><p>{page} missing — run its build</p>".encode(), request)
         access_log(request, 200, email, tier, jwt_status)
-        html = _substitute_viewer_tokens(html, email, esc_label, scope)
-        render_headers = {STALE_FALLBACK_HEADER: "stale-fallback"} if stale else None
-        return _html(200, html.encode("utf-8"), request, extra_headers=render_headers)
+        return _serve_page(html, request, stale=stale, email=email,
+                           esc_label=esc_label, scope=scope)
 
     # One issue, at /engineering/issues/<id> — the URL every issue has always
     # carried as its own `url` and which has never resolved to anything.
@@ -1550,9 +1647,8 @@ def handle_get(request: Request):
                 access_log(request, 500, email, tier, jwt_status)
                 return _html(500, f"<h1>500</h1><p>{page} missing — run its build</p>".encode(), request)
         access_log(request, 200, email, tier, jwt_status)
-        html = _substitute_viewer_tokens(html, email, esc_label, scope)
-        render_headers = {STALE_FALLBACK_HEADER: "stale-fallback"} if stale else None
-        return _html(200, html.encode("utf-8"), request, extra_headers=render_headers)
+        return _serve_page(html, request, stale=stale, email=email,
+                           esc_label=esc_label, scope=scope)
 
     # One signal, at /archives/<id> — the URL a signal id has never resolved to.
     # Full-tier only and identity-substituted, like the browse page it is reached
@@ -1637,6 +1733,32 @@ def handle_get(request: Request):
         # route's full-tier check above, are the wall.
         html = _substitute_viewer_tokens(html, email, esc_label, scope)
         return _html(200, html.encode("utf-8"), request)
+
+    # /projects (CQ·160, issue_01M57NRMZSZW5B5VNWCM4HVZPV): the project index,
+    # listing every project the viewer can open, each linking to its own
+    # /projects/<name> page. Handled here rather than in `_full_only_routes()`
+    # because it needs the viewer's scope, the same reason /chart-house and
+    # /engineering/issues above are. Full-tier only, live per request with a
+    # static fallback, the same shape as the other scoped index pages.
+    if path == "/projects":
+        refusal = _require_scoped_access(request, email, tier, jwt_status, scope, path, esc_label)
+        if refusal is not None:
+            return refusal
+        whole_fleet = crew_registry.covers_every_project(scope)
+        stale = False
+        try:
+            html = project_build.live_html(scope, whole_fleet)
+        except Exception as exc:
+            _log_render_failure("projects.html", exc)
+            try:
+                html = (SITE / "projects.html").read_text(encoding="utf-8")
+                stale = True
+            except FileNotFoundError:
+                access_log(request, 500, email, tier, jwt_status)
+                return _html(500, b"<h1>500</h1><p>projects.html missing - run its build</p>", request)
+        access_log(request, 200, email, tier, jwt_status)
+        return _serve_page(html, request, stale=stale, email=email,
+                           esc_label=esc_label, scope=scope)
 
     # One project, at /projects/<name> (epic issue_01M0AK8CM3ADKDTG8PM6GRCP8H,
     # item 5) — open PRs, recently merged PRs and recent commits, all read live

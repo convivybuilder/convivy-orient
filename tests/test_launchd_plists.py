@@ -44,7 +44,6 @@ def test_plist_is_well_formed(path):
 # and its plist was removed from the repo along with it — the operator is unloading the
 # live launchd job separately.
 _VAULT_PLANE_JOBS = {
-    "com.convivy.orient-github-capture.plist",
     "com.convivy.orient-deploy-watch.plist",
 }
 
@@ -68,8 +67,8 @@ def test_vault_plane_capture_job_pins_vaults_on_library(name):
 
 # --- ADR-0059 deploy-area cutover (bin/install-orient) -----------------------
 #
-# The seven jobs the epic measured (issue_01M19RSV6PNDR562PHXTDD80E5). Six move
-# their Program/WorkingDirectory to the deploy area bin/install-orient stages;
+# Of the five jobs bin/install-orient installs, four move their
+# Program/WorkingDirectory to the deploy area it stages;
 # com.convivy.orient-deploy-watch is deliberately excluded here — its plist is
 # still versioned (rule 8) but its CONTENT stays pointed at the development
 # checkout, because ADR-0059 leaves the deploy-watch mechanism's future to the
@@ -84,7 +83,6 @@ _CUTOVER_JOBS = {
     "com.convivy.orient-dashboard.plist",
     "com.convivy.code-health.plist",
     "com.convivy.kb-observability.plist",
-    "com.convivy.orient-github-capture.plist",
 }
 
 

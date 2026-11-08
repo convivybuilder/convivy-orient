@@ -3,10 +3,10 @@
 #
 # WHY THIS FILE EXISTS. ruff 0.16.0 (2026-07-23) expanded its DEFAULT rule set. Every
 # repo that had been relying on that default went red on code nobody had touched:
-# convivy-services logged 81 errors on a commit whose checks had passed an hour
-# earlier, convivy-app-kit 203. This repo was clean under 0.15.22 and reports **238
-# errors** under 0.16.0 — it has simply not run CI since the release, so its green
-# `main` is stale rather than safe.
+# two sibling repos under one project logged 81 and 203 errors respectively on
+# commits whose checks had passed an hour earlier. This repo was clean under
+# 0.15.22 and reports **238 errors** under 0.16.0 — it has simply not run CI
+# since the release, so its green `main` is stale rather than safe.
 #
 # These four codes are exactly what ruff's default set has been, so declaring them
 # is behavior-preserving: this repo goes from 238 errors back to clean under 0.16.0
@@ -15,8 +15,8 @@
 # WHY THIS RATHER THAN PINNING THE VERSION. A pin (`ruff==0.15.22`) freezes the tool
 # and has to be bumped by hand forever; it also does not say what is being enforced.
 # Declaring the rules leaves the binary free to pick up bug fixes and speedups. The
-# evidence is in the fleet: the repos that survived 0.16.0 unscathed — agent-platform,
-# constance, vivy, sous-chef, selector — are precisely the ones that already declared
+# evidence is in the fleet: the repos that survived 0.16.0 unscathed — agent-platform
+# and several product repos — are precisely the ones that already declared
 # a `select`, and they are all UNPINNED. The two that broke are the two that did not.
 #
 # THE LIMIT OF THIS GUARD, stated precisely because a future reader will reason about

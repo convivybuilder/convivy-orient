@@ -180,14 +180,14 @@ def test_other_memory_kinds_surface_with_kind_label(tmp_path, monkeypatch, db):
     """The four kinds engineering_build.VISIBLE_KINDS drops as canonical-browse
     noise are memories under the operator's model and must be reachable here."""
     _seed_kb(monkeypatch, [
-        _kb_row(id="vivy/meeting-notes/a", kind="meeting-notes", project="vivy",
+        _kb_row(id="alpha/meeting-notes/a", kind="meeting-notes", project="alpha",
                 title="MEETING-NOTE-TITLE"),
-        _kb_row(id="sous-chef/proposals/b", kind="proposal", project="sous-chef",
+        _kb_row(id="epsilon/proposals/b", kind="proposal", project="epsilon",
                 title="PROPOSAL-TITLE", status="archived"),
-        _kb_row(id="sous-chef/observations/c", kind="observation", project="sous-chef",
+        _kb_row(id="epsilon/observations/c", kind="observation", project="epsilon",
                 title="OBSERVATION-TITLE"),
-        _kb_row(id="constance/feature-requests/d", kind="feature-request",
-                project="constance", title="FEATURE-REQUEST-TITLE", status="draft"),
+        _kb_row(id="beta/feature-requests/d", kind="feature-request",
+                project="beta", title="FEATURE-REQUEST-TITLE", status="draft"),
     ])
     html = o.briefings_live_html()
     payload = _payload(html)
@@ -219,7 +219,7 @@ def test_a_memory_of_every_status_renders(tmp_path, monkeypatch, db, status):
     failure names the status that vanished instead of reporting a set that does
     not match."""
     _seed_kb(monkeypatch, [
-        _kb_row(id="sous-chef/proposals/x", kind="proposal", project="sous-chef",
+        _kb_row(id="epsilon/proposals/x", kind="proposal", project="epsilon",
                 title="MEMORY-TITLE", status=status),
     ])
     payload = _payload(o.briefings_live_html())
@@ -234,7 +234,7 @@ def test_a_render_lists_the_corpus_once_not_once_per_group(tmp_path, monkeypatch
     trips a request path cannot)."""
     _seed_kb(monkeypatch, [
         _kb_row(id="platform/briefs/a", kind="brief", title="BRIEF"),
-        _kb_row(id="sous-chef/proposals/b", kind="proposal", title="PROPOSAL"),
+        _kb_row(id="epsilon/proposals/b", kind="proposal", title="PROPOSAL"),
     ])
     calls = []
     real = library_client.list_reference_documents
@@ -304,13 +304,13 @@ def test_briefings_and_other_memories_are_product_filterable(tmp_path, monkeypat
     _seed_kb(monkeypatch, [
         _kb_row(id="platform/briefs/a-2026-08-01", project="platform", title="A"),
         _kb_row(id="company/briefs/b-2026-08-02", project="company", title="B"),
-        _kb_row(id="vivy/meeting-notes/c", kind="meeting-notes", project="vivy", title="C"),
+        _kb_row(id="alpha/meeting-notes/c", kind="meeting-notes", project="alpha", title="C"),
     ])
     html = o.briefings_live_html()
     payload = _payload(html)
-    assert payload["projects"] == ["company", "platform", "vivy"]
+    assert payload["projects"] == ["alpha", "company", "platform"]
     assert {b["project"] for b in payload["briefs"]} == {"platform", "company"}
-    assert {e["project"] for e in payload["other"]} == {"vivy"}
+    assert {e["project"] for e in payload["other"]} == {"alpha"}
 
 
 def test_scoped_viewer_sees_only_their_own_projects(tmp_path, monkeypatch, db):
@@ -319,7 +319,7 @@ def test_scoped_viewer_sees_only_their_own_projects(tmp_path, monkeypatch, db):
     pill list or either payload is built from it."""
     _seed_kb(monkeypatch, [
         _kb_row(id="platform/briefs/a-2026-08-01", project="platform", title="A"),
-        _kb_row(id="vivy/meeting-notes/c", kind="meeting-notes", project="vivy", title="C"),
+        _kb_row(id="alpha/meeting-notes/c", kind="meeting-notes", project="alpha", title="C"),
     ])
     html = o.briefings_live_html(frozenset({"platform"}), False)
     payload = _payload(html)
@@ -331,11 +331,11 @@ def test_scoped_viewer_sees_only_their_own_projects(tmp_path, monkeypatch, db):
 def test_whole_fleet_viewer_sees_every_project(tmp_path, monkeypatch, db):
     _seed_kb(monkeypatch, [
         _kb_row(id="platform/briefs/a-2026-08-01", project="platform", title="A"),
-        _kb_row(id="vivy/meeting-notes/c", kind="meeting-notes", project="vivy", title="C"),
+        _kb_row(id="alpha/meeting-notes/c", kind="meeting-notes", project="alpha", title="C"),
     ])
     html = o.briefings_live_html(frozenset(), True)
     payload = _payload(html)
-    assert payload["projects"] == ["platform", "vivy"]
+    assert payload["projects"] == ["alpha", "platform"]
 
 
 def test_empty_states_use_the_shared_component(tmp_path, monkeypatch, db):
@@ -364,13 +364,13 @@ def test_team_audience_doc_of_each_kind_renders(tmp_path, monkeypatch, db):
     _seed_kb(monkeypatch, [
         _kb_row(id="platform/briefs/a", kind="brief", title="BRIEF-TEAM",
                 audience=["team"]),
-        _kb_row(id="vivy/meeting-notes/b", kind="meeting-notes", title="NOTE-TEAM",
+        _kb_row(id="alpha/meeting-notes/b", kind="meeting-notes", title="NOTE-TEAM",
                 audience=["team"]),
-        _kb_row(id="sous-chef/proposals/c", kind="proposal", title="PROPOSAL-TEAM",
+        _kb_row(id="epsilon/proposals/c", kind="proposal", title="PROPOSAL-TEAM",
                 audience=["team", "architect"]),
-        _kb_row(id="sous-chef/observations/d", kind="observation", title="OBS-TEAM",
+        _kb_row(id="epsilon/observations/d", kind="observation", title="OBS-TEAM",
                 audience=["team"]),
-        _kb_row(id="constance/feature-requests/e", kind="feature-request",
+        _kb_row(id="beta/feature-requests/e", kind="feature-request",
                 title="FEATURE-TEAM", audience=["team"]),
     ])
     html = o.briefings_live_html()
@@ -385,9 +385,9 @@ def test_non_team_audience_doc_is_excluded(tmp_path, monkeypatch, db):
     _seed_kb(monkeypatch, [
         _kb_row(id="platform/briefs/a", kind="brief", title="BRIEF-OPERATOR-ONLY",
                 audience=["operator"]),
-        _kb_row(id="vivy/meeting-notes/b", kind="meeting-notes", title="NOTE-ARCHITECT-ONLY",
+        _kb_row(id="alpha/meeting-notes/b", kind="meeting-notes", title="NOTE-ARCHITECT-ONLY",
                 audience=["architect"]),
-        _kb_row(id="sous-chef/proposals/c", kind="proposal", title="PROPOSAL-EMPTY-AUD",
+        _kb_row(id="epsilon/proposals/c", kind="proposal", title="PROPOSAL-EMPTY-AUD",
                 audience=[]),
     ])
     html = o.briefings_live_html()

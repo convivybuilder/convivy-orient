@@ -140,14 +140,38 @@ KIND_TOOLTIP = {
 # Project section order on every category page — "Convivy & Shared" first
 # (the operator 2026-06-19), then the products, then the engineering-internal projects.
 # Projects not listed sort after these, alphabetically.
-PROJECT_ORDER = ["company", "vivy", "constance",
-                 "hollis", "selector", "sous-chef",
-                 "platform", "engineering-practice", "agent-platform",
-                 # `substrate` carries the ARCH log entries surfaced as `arch`
-                 # docs (arch_docs below), which had no place in this order while
-                 # they claimed the retired `engineering` scope.
-                 "substrate", "knowledge", "convivy-orient"]
-PROJECT_LABEL = {**build.PROJECT_LABEL, "agent-platform": "Agent Platform"}
+#
+# The product run is `build.PRODUCT_ORDER` itself, spread in rather than
+# retyped, so this file carries no second copy of those names to drift from
+# the first. The rest of this order — which non-product scopes come first,
+# and in what order on THIS page — has no registry field behind it: unlike
+# `build.ENGINEERING_PROJECTS` (now the registry's own `_kb_projects`
+# `section: "engineering"` keys, CQ-171 slice 5), nothing says what order
+# this page's own section headings should read in.
+def _project_order() -> list[str]:
+    return ["company", *build.PRODUCT_ORDER,
+            "platform", "engineering-practice", "agent-platform",
+            # `substrate` carries the ARCH log entries surfaced as `arch`
+            # docs (arch_docs below), which had no place in this order while
+            # they claimed the retired `engineering` scope.
+            "substrate", "knowledge", "convivy-orient"]
+
+
+def __getattr__(name: str):
+    """PEP 562: `PROJECT_ORDER`/`PROJECT_LABEL` resolve fresh on every
+    access, matching `build.PRODUCT_ORDER`/`build.PROJECT_LABEL` themselves
+    (platform decision 0098's "resolve per read, not once at import") rather
+    than freezing whatever those held at this module's first import. The one
+    override `PROJECT_LABEL` used to carry by hand,
+    `"agent-platform": "Agent Platform"`, is already `build.PROJECT_LABEL`'s
+    own value (its `_PROJECT_LABEL_FALLBACK` entry, since `agent-platform` is
+    a repo/KB slug with no top-level registry key of its own), so this is a
+    passthrough rather than an overlay now."""
+    if name == "PROJECT_ORDER":
+        return _project_order()
+    if name == "PROJECT_LABEL":
+        return build.PROJECT_LABEL
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 # Bodies longer than this open in the right-side drawer rather than inline, so a
 # long decision doc doesn't push the list off-screen (designer 2026-06-19).
 DRAWER_THRESHOLD = 3000
@@ -1208,8 +1232,8 @@ def render(docs: list[dict], scope: frozenset[str], whole_fleet: bool) -> str:
     docs = docs if whole_fleet else [d for d in docs if d["project"] in scope]
     thin_docs = [{k: v for k, v in d.items() if k != "body"} for d in docs]
     present_projects = {d["project"] for d in thin_docs}
-    project_label = {p: label for p, label in PROJECT_LABEL.items() if p in present_projects}
-    project_order = [p for p in PROJECT_ORDER if p in present_projects]
+    project_label = {p: label for p, label in build.PROJECT_LABEL.items() if p in present_projects}
+    project_order = [p for p in _project_order() if p in present_projects]
     payload = json.dumps({
         "docs": thin_docs,
         "projectLabel": project_label,

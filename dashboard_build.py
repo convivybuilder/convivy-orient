@@ -13,13 +13,10 @@ The split (ARCH-191) gives each its own page + its own date picker so either can
 be screenshotted whole. Each picker carries a Custom date-range option.
 
 Sources (all under ~/Convivy/agent-runs/scorecard/):
-  - scorecard.jsonl          run-based cost+quality (vivy/constance/sous-chef)
-  - hollis.jsonl             GitHub-only Hollis quality (no per-agent cost)
+  - scorecard.jsonl          run-based cost+quality, across several crews
   - judge.jsonl              sampled LLM-judge scores (joined by run_id)
 
-This is the DEV-crew cost+quality view. Hollis *runtime* LLM cost
-(hollis/data/llm-spend.jsonl) is a separate, data-local feed — a
-deliberate follow-up, not folded in here.
+This is the DEV-crew cost+quality view.
 
 Served full-tier only (cost/perf is sensitive) — see server.py's routes.
 """
@@ -42,42 +39,27 @@ OUT = STATE_ROOT / "site"
 SCORECARD_DIR = Path.home() / "Convivy" / "agent-runs" / "scorecard"
 
 SCORECARD = SCORECARD_DIR / "scorecard.jsonl"
-PA_LEDGER = SCORECARD_DIR / "hollis.jsonl"
+
+
 JUDGE = SCORECARD_DIR / "judge.jsonl"
-
-
-# Telemetry string → display for the three NYH projects (ARCH-426 amendment).
-# Mirrors agent-platform cost_join._NYH_DISPLAY; the two must agree or the
-# scorecard and /activity disagree about the same run. An explicit table rather
-# than the `nyh-*` prefix match it replaces: a prefix would silently swallow a
-# fourth property into whichever branch it hit, and a new building should appear as
-# itself or not at all. `nyh-architecture` is the bare umbrella — one historical co
-# session from 2026-06-08, before the per-repo sessions existed.
-_NYH_DISPLAY = {
-    "nyh-arch-tools": "NYH Arch Tools",
-    "nyh-etc": "East Texas Circle",
-    "nyh-park-villa": "Park Villa",
-    "nyh-architecture": "NYH Arch Tools",
-}
 
 
 def _canon_product(repo):
     """Fold a raw repo string to its canonical product bucket, mirroring
-    agent-platform cost_join._canonical_product. Hollis (formerly personal-assistant,
-    ARCH-290) is tagged three ways across the rename — "hollis", "personal-assistant",
-    "pa" — so unify those into one row rather than slivers.
-
-    The NYH repos go the other way: they are THREE PROJECTS, each reporting for
-    itself (ARCH-426 amendment, the operator 2026-07-31). They were folded into one "NYH
-    Studio" bucket while the umbrella directory was the only thing holding them
-    together; NYH Studio survives as the product all three build."""
+    agent-platform cost_join._canonical_product: a renamed or umbrella-folded
+    telemetry string folds to its project's own `display`
+    (`crew_registry.telemetry_aliases`) — three tags across a rename unified
+    into one row, or several repos building one product each reporting under
+    its own name and its own display rather than a shared bucket. A project
+    with neither passes through unfolded. An unreadable registry answers no
+    folding at all, rather than a stale copy of a fold table."""
     if not repo:
         return None
-    if repo in _NYH_DISPLAY:
-        return _NYH_DISPLAY[repo]
-    if repo in ("hollis", "personal-assistant", "pa"):
-        return "Hollis"
-    return repo
+    try:
+        aliases = crew_registry.telemetry_aliases()
+    except crew_registry.RegistryUnavailable:
+        aliases = {}
+    return aliases.get(repo, repo)
 
 # Cost panel feed (ARCH-136): the agent-cost-report producer writes these.
 # Unlike the scorecard (autonomous dev-crew runs only), this captures TOTAL
@@ -148,8 +130,8 @@ def normalize(repos: frozenset[str] | None = None) -> list[dict]:
     `repos`, when given, drops any row whose raw `repo` field isn't in it —
     the repo names `crew_registry.repos_in_scope` returns (E19·4,
     issue_01M35K5JQ7Z7MHYZGWRSB5F85M), filtered BEFORE `_canon_product` folds
-    several raw repos into one display bucket (the three NYH repos, the
-    `hollis`/`personal-assistant`/`pa` aliases), so the filter matches the
+    several raw repos into one display bucket (several repos under one
+    product, a crew's own set of raw-ledger aliases), so the filter matches the
     name the registry actually lists rather than the renamed one a fact's
     own `product` field shows. `repos=None` (the default) keeps every row,
     for the whole-fleet caller."""
@@ -186,10 +168,6 @@ def normalize(repos: frozenset[str] | None = None) -> list[dict]:
         if repos is not None and r.get("repo") not in repos:
             continue
         facts.append(fact(r, source="run"))
-    for r in _load(PA_LEDGER):
-        if repos is not None and r.get("repo") not in repos:
-            continue
-        facts.append(fact(r, source="github-pr"))
     return facts
 
 
@@ -426,7 +404,7 @@ def cost_panel_html(thresholds: dict | None = None) -> str:
            "breakdown is the only place interactive co-session spend (Opus) surfaces. "
            "Anthropic models are a ccusage API-rate ESTIMATE from local transcripts "
            "(the subscription/credit consumers); gateway models (deepseek/kimi/gpt5) are "
-           "ACTUAL provider cost from the spend log. Direct-API apps (PA, sous-chef) are "
+           "ACTUAL provider cost from the spend log. Direct-API apps are "
            "real out-of-pocket spend from each app's own ledger. Refreshed every 4h by "
            "agent-cost-report.")
     head = f"""<div class="cp-title-row">
@@ -893,7 +871,12 @@ def ledger_section_html(entries: list, ledgers: list, epic_of: dict) -> str:
         lg = caps.get(product)
         if lg is not None:
             cap = f' of {_usd(lg.hard_cap_usd)} hard cap' if lg.hard_cap_usd is not None else ""
-            meta.append(f'{_usd(lg.total_usd)} today ({escape(lg.day)}){cap}')
+            # `total_usd` is the gateway lane only. Each other lane with spend
+            # follows under its own label, never summed into the capped figure.
+            meta.append(f'{_usd(lg.total_usd)} gateway today ({escape(lg.day)}){cap}')
+            for lane, usd in sorted((lg.lanes or {}).items()):
+                if lane != "gateway" and usd:
+                    meta.append(f'{_usd(usd)} {escape(lane)} today')
         caps_form = ds.ledger_caps_form_html(product, {
             "warn_usd": lg.warn_usd if lg else None,
             "soft_cap_usd": lg.soft_cap_usd if lg else None,
@@ -1089,7 +1072,7 @@ svg.spark { display:block; }
 
 _SCORECARD_BODY = r"""
   <div class="cph">Cost vs quality — coding agents</div>
-  <div class="scopenote">Each row is an agent's <b>cost-vs-quality ratio on code-related tasks</b> — <code>coder</code>, <code>refactorer</code>, <code>bug-fixer</code>, plus Hollis PRs. These land as pull requests, so their quality is observable (merge&nbsp;%, 7-day survival, CI-first-pass); agents without that signal (reviewers, planners, the orchestrator) are out of scope. Autonomous dev-crew runs only — interactive <code>co</code> sessions (Opus) never enter here; for those see the <b>Spending</b> dashboard. Full definitions: the <a href="/">Cost vs quality metrics</a> reference on this site.</div>
+  <div class="scopenote">Each row is an agent's <b>cost-vs-quality ratio on code-related tasks</b> — <code>coder</code>, <code>refactorer</code>, <code>bug-fixer</code>. These land as pull requests, so their quality is observable (merge&nbsp;%, 7-day survival, CI-first-pass); agents without that signal (reviewers, planners, the orchestrator) are out of scope. Autonomous dev-crew runs only — interactive <code>co</code> sessions (Opus) never enter here; for those see the <b>Spending</b> dashboard. Full definitions: the <a href="/">Cost vs quality metrics</a> reference on this site.</div>
   <div class="filters">
     <div class="fg"><label class="tip" tabindex="0" data-tip="Keeps records whose run/PR date falls inside the window. Each record carries the date its run or PR was logged to the scorecard ledger.">Window</label>
       <select id="window">
@@ -1120,7 +1103,7 @@ _SCORECARD_BODY = r"""
       </div></div>
   </div>
   <div class="statcards" id="cards"></div>
-  <div class="scopenote" id="modelnote" style="display:none">This table covers <b>autonomous dev-crew runs + Hollis PRs only</b> — interactive <code>co</code> sessions (which run on Opus) never enter it. For total spend including interactive Opus, see the <b>Spending</b> dashboard. The <b>"—"</b> row is Hollis PRs, whose ledger records no model yet.</div>
+  <div class="scopenote" id="modelnote" style="display:none">This table covers <b>autonomous dev-crew runs only</b> — interactive <code>co</code> sessions (which run on Opus) never enter it. For total spend including interactive Opus, see the <b>Spending</b> dashboard. The <b>"—"</b> row is runs whose scorecard record names no model.</div>
   <div class="data-table-wrap"><table class="data-table" id="tbl" role="tabpanel" aria-labelledby="view-tab-table"><thead></thead><tbody></tbody></table></div>
   <div class="empty" id="empty" style="display:none">No records match these filters.</div>
   <div id="trendwrap" role="tabpanel" aria-labelledby="view-tab-trends" tabindex="0" style="display:none"></div>
@@ -1183,7 +1166,7 @@ function aggregate(rows){
 // tip = what the metric is + which events feed it (rendered as a hover tooltip
 // on the column header; no double quotes inside — they sit in an HTML attribute)
 const TIPS = {
-  runs:"Records in this group. One record = one scorecard event: an agentctl dev-crew run (vivy / constance / sous-chef, from scorecard.jsonl) or one Hollis GitHub PR (hollis.jsonl).",
+  runs:"Records in this group. One record = one scorecard event: an agentctl dev-crew run (from scorecard.jsonl).",
   merge:"Merged PRs ÷ records whose PR state is known (open, merged or closed). Runs that produced no traceable PR sit outside the denominator. Green ≥90%, amber ≥70%.",
   surv:"Of merged PRs whose 7-day survival window has elapsed: the share not reverted and with no follow-up bug detected in-window (the ARCH-107 success bar). Fresh merges stay unscored until their window passes.",
   ci:"PRs whose FIRST pull-request CI run on the branch passed, ÷ those where that first run is known. A red first run that needed a fix-up push counts against it. Green ≥80%, amber ≥60%.",

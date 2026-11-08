@@ -7,11 +7,21 @@ escaped, not injected), and the empty state.
 """
 from __future__ import annotations
 
+import re
+
 import pytest
 
 import control_db
 import library_fake
 import changelog_build as c
+
+_STAMP_RE = re.compile(r'<footer class="render-stamp".*?</footer>', re.S)
+
+
+def _normalised(html: str) -> str:
+    """Strip the per-request render-stamp footer (design_system.render_stamp)
+    so two renders taken moments apart can be compared for equality."""
+    return _STAMP_RE.sub("", html)
 
 
 @pytest.fixture
@@ -31,9 +41,9 @@ def _mk(**kw):
     """An AUTHORED entry (source=co) — what the page renders. The git-derived
     merge rows use source=github and are covered by their own test below."""
     base = dict(id=control_db.new_signal_id(), source="co", kind="changelog",
-                stream="vivy", actor="vivy-co", ingested_by="agent-platform",
-                product="vivy", body="**Merged:** a thing that does the thing. #1",
-                refs={"pr": 1, "url": "https://github.com/convivy/vivy/pull/1",
+                stream="alpha", actor="alpha-co", ingested_by="agent-platform",
+                product="alpha", body="**Merged:** a thing that does the thing. #1",
+                refs={"pr": 1, "url": "https://github.com/convivy/alpha/pull/1",
                       "merged_at": "2026-07-15T00:00:00Z", "author": "operator-gh"},
                 privacy_class="internal", produced_at=None)
     base.update(kw)
@@ -48,7 +58,7 @@ def _seed(*sigs):
 def test_only_changelog_kind_renders(db):
     _seed(_mk(body="keep this. #1"),
           dict(id=control_db.new_signal_id(), source="slack", kind="notification",
-              actor="platform", ingested_by="agent-platform", product="vivy",
+              actor="platform", ingested_by="agent-platform", product="alpha",
               stream="cost", body="NOT-A-CHANGELOG-ENTRY", privacy_class="internal"))
     html = c.changelog_live_html()
     assert "keep this" in html
@@ -56,7 +66,7 @@ def test_only_changelog_kind_renders(db):
 
 
 def test_the_git_derived_merge_rows_do_not_render(db):
-    """ARCH-411, the whole point. github_capture writes a `changelog` signal per
+    """ARCH-411, the whole point. The Keel's capture writes a `changelog` signal per
     merge whose body is the PR title + PR description — written for a reviewer,
     unusable read back as a changelog. Those rows stay in the store because they
     are how changelog-drain detects a merge at all; they are not the changelog."""
@@ -78,11 +88,11 @@ def test_newest_first_by_produced_at_ordering(db):
 
 
 def test_chip_filterable_by_product(db):
-    _seed(_mk(product="vivy", stream="vivy", body="VIVY-ENTRY #1"),
-          _mk(product="constance", stream="constance", body="CONSTANCE-ENTRY #2"))
+    _seed(_mk(product="alpha", stream="alpha", body="ALPHA-ENTRY #1"),
+          _mk(product="beta", stream="beta", body="BETA-ENTRY #2"))
     html = c.changelog_live_html()
-    assert 'data-stream="vivy"' in html and 'data-stream="constance"' in html
-    assert "VIVY-ENTRY" in html and "CONSTANCE-ENTRY" in html
+    assert 'data-stream="alpha"' in html and 'data-stream="beta"' in html
+    assert "ALPHA-ENTRY" in html and "BETA-ENTRY" in html
 
 
 def test_the_whole_entry_renders_as_markdown(db):
@@ -108,10 +118,10 @@ def test_body_is_escaped_xss_safe(db):
 
 
 def test_pr_link_rendered(db):
-    _seed(_mk(refs={"pr": 99, "url": "https://github.com/convivy/vivy/pull/99",
+    _seed(_mk(refs={"pr": 99, "url": "https://github.com/convivy/alpha/pull/99",
                     "merged_at": "2026-07-15T00:00:00Z", "author": "operator-gh"}))
     html = c.changelog_live_html()
-    assert '<a href="https://github.com/convivy/vivy/pull/99"' in html
+    assert '<a href="https://github.com/convivy/alpha/pull/99"' in html
     assert "PR #99" in html
 
 
@@ -137,6 +147,55 @@ def test_pr_link_rejects_the_control_character_bypass(db):
     html = c.changelog_live_html()
     assert "javascript:" not in html
     assert 'href="http://' not in html, "the bypassing URL reached the href"
+
+
+# --- ?product= filtering (CQ·167, issue_01M5C9ZDJ14Y55B54XGM5RW5J6) --------
+
+
+def test_requested_product_filters_to_that_product_only(db):
+    _seed(_mk(product="alpha", stream="alpha", body="ALPHA-ENTRY #1"),
+          _mk(product="beta", stream="beta", body="BETA-ENTRY #2"))
+    html = c.changelog_live_html(requested_product="alpha")
+    assert "ALPHA-ENTRY" in html
+    assert "BETA-ENTRY" not in html
+
+
+def test_out_of_scope_product_renders_like_a_nonexistent_one(db):
+    """A viewer scoped to just `alpha` asking for `beta` (a real product,
+    outside their scope) must get the identical page a typo'd, wholly
+    nonexistent product name gets — nothing that confirms `beta` exists."""
+    _seed(_mk(product="alpha", stream="alpha", body="ALPHA-ENTRY #1"),
+          _mk(product="beta", stream="beta", body="BETA-ENTRY #2"))
+    scope, whole_fleet = frozenset({"alpha"}), False
+    out_of_scope = _normalised(c.changelog_live_html(
+        scope, whole_fleet, requested_product="beta"))
+    nonexistent = _normalised(c.changelog_live_html(
+        scope, whole_fleet, requested_product="does-not-exist"))
+    assert out_of_scope == nonexistent
+    assert "beta" not in out_of_scope
+    assert "BETA-ENTRY" not in out_of_scope
+
+
+def test_filter_label_is_escaped_in_the_lede(db):
+    _seed(_mk(product="<b>alpha</b>", stream="alpha", body="MATCHED-ENTRY #1"))
+    html = c.changelog_live_html(requested_product="<b>alpha</b>")
+    assert "MATCHED-ENTRY" in html
+    assert "<b>alpha</b>" not in html
+    assert "&lt;b&gt;alpha&lt;/b&gt;" in html
+
+
+def test_absent_product_renders_the_fleet_wide_page(db):
+    _seed(_mk(product="alpha", body="ALPHA-ENTRY #1"))
+    html = c.changelog_live_html()
+    assert f"The {c._LIMIT} most recent entries across the org" in html
+    assert "ALPHA-ENTRY" in html
+
+
+def test_empty_product_renders_the_fleet_wide_page(db):
+    _seed(_mk(product="alpha", body="ALPHA-ENTRY #1"))
+    html = c.changelog_live_html(requested_product="")
+    assert f"The {c._LIMIT} most recent entries across the org" in html
+    assert "ALPHA-ENTRY" in html
 
 
 def test_empty_state(db):

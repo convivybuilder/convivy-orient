@@ -198,7 +198,7 @@ def _capture_form(known_products: list[str]) -> str:
           <datalist id="kindList">{kinds}</datalist>
         </label>
         <label>Product
-          <input name="product" list="prodList" required maxlength="64" placeholder="constance">
+          <input name="product" list="prodList" required maxlength="64" placeholder="acme">
           <datalist id="prodList">{prods}</datalist>
         </label>
         <label>Stream <span class="opt">optional</span>

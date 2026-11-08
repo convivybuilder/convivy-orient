@@ -21,23 +21,31 @@ The Workshop and the decision queue are different: both arbitrate by design —
 they hold state that is claimed, resolved and acted on — so correcting a scope
 value in them is maintenance rather than revision.
 
-THE MAPPING IS FROZEN, NOT DERIVED. It would be one line to import
-project_registry and resolve each value live, and that would be wrong. A data
-migration is a historical fact: it must do the same thing on every database it is
-ever applied to, including one restored from backup a year from now. Deriving the
-mapping from a registry that keeps changing makes the migration's effect depend on
-when it runs. So the four mappings below are written out, taken from the registry
-as it stands on 2026-07-31 and pinned here permanently.
+ONE ENTRY ("Substrate" -> "substrate") IS A FROZEN LITERAL, NOT DERIVED, AND
+STAYS THAT WAY. It is a casing bug, not a scope: one issue filed through the
+team-site form, invisible to every view asking for `substrate`, the bug that
+motivated this whole step. No registry unit is keyed `substrate` (it has no
+repos of its own to resolve through), so there is nothing for the registry to
+tell this migration about it, and a data migration recording a historical fact
+must do the same thing on every database it is ever applied to — including one
+restored from backup a year from now — so this one stays pinned exactly as it
+read on 2026-07-31.
 
-DOWNGRADE IS A NO-OP, deliberately, and this is a genuine one-way door rather than
-laziness. `convivy-app-kit` and `convivy-services` both fold to `svc`, so the
-reverse is ambiguous — an `svc` row cannot say which repo it came from. Recording
-the pre-image to make it reversible would mean a side table carrying a value the
-system has decided is not canonical, kept forever, for a downgrade nobody runs.
-The forward direction loses only which of two repos a filer named for 9 rows
-total.
+THE REPO-NAME ENTRIES ARE GONE (CQ-171, the 0.7.0 name gate). This revision
+also used to fold three repo names a filer had typed as a project into the unit
+that owns each. Those names were per-install values, which a shipped file may
+not carry. Removing them changes no data that survives: both tables this
+revision touches are dropped by b031daf7f4c0 later in the same chain, so on
+every database the rows this backfill rewrote are deleted after it runs.
+Orient's own database applied the original version on 2026-07-31 and is past
+b031daf7f4c0.
+
+DOWNGRADE RAISES, deliberately: the original version folded two repos into
+one project, so a database migrated by it cannot be reversed, and a casing fix
+has no meaningful reverse either.
 """
-from typing import Sequence, Union
+from collections.abc import Sequence
+from typing import Union
 
 from alembic import op
 import sqlalchemy as sa
@@ -50,39 +58,36 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
-# Frozen as of 2026-07-31. See the module docstring: this must NOT be derived from
-# the live registry.
-#
-#   Substrate        → a casing bug, not a scope. One issue filed through the
-#                      team-site form, invisible to every view asking for
-#                      `substrate`. The bug that motivated the whole step.
-#   convivy-app-kit  → svc is ONE project over both repos (ARCH-426 amendment):
-#   convivy-services   one co, one crew, two tightly-coupled parts.
-#   selector-backend → one product over a frontend and a backend, which
-#                      issue_api's own comment already assumed.
-_CANONICAL = {
-    "Substrate": "substrate",
-    "convivy-app-kit": "svc",
-    "convivy-services": "svc",
-    "selector-backend": "selector",
-}
-
-# No target may also be a source. The loop below applies each mapping in turn
-# against the live table, so a chained entry — say `svc` also appearing as a KEY —
-# would promote rows TWICE: a row rewritten to `svc` by an earlier iteration would
-# then be caught by the later one and moved again. The current mapping is safe, and
-# this asserts it rather than leaving it to whoever edits the dict next. Module
-# scope, so it fails at import rather than mid-migration (reviewer, PR #144).
-assert not (set(_CANONICAL) & set(_CANONICAL.values())), (
-    "_CANONICAL is chained: a target value is also a source key, which would "
-    "rewrite the same rows twice")
+# Frozen as of 2026-07-31 — see the module docstring: this one entry must NOT
+# be derived from the live registry, because no registry unit is keyed this way.
+_CASE_FIX = {"Substrate": "substrate"}
 
 # Only the vaults that arbitrate. `signals` is deliberately absent.
 _TABLES = ("issue_items", "decision_items")
 
 
+def _canonical_mapping(present: set[str]) -> dict[str, str]:
+    """The backfill mapping for exactly the non-canonical values `present`
+    in the database — never more than that, so a value this migration
+    doesn't recognize is left alone rather than guessed at.
+
+    No target may also be a source. The loop in `upgrade()` applies each
+    mapping entry in turn against the live table, so a chained entry — say a
+    target also appearing as a key — would promote rows TWICE: a row
+    rewritten by an earlier iteration would then be caught by the later one
+    and moved again. This asserts that rather than leaving it to whoever
+    edits the source lists next (reviewer, PR #144)."""
+    mapping = {k: v for k, v in _CASE_FIX.items() if k in present}
+    assert not (set(mapping) & set(mapping.values())), (
+        "canonical mapping is chained: a target value is also a source key, "
+        "which would rewrite the same rows twice")
+    return mapping
+
+
 def upgrade() -> None:
     conn = op.get_bind()
+    known_sources = set(_CASE_FIX)
+    present: set[str] = set()
     for table in _TABLES:
         # Built from SQLAlchemy table/column objects rather than an f-string. The
         # table name is a frozen constant here so string formatting would be safe,
@@ -90,7 +95,14 @@ def upgrade() -> None:
         # injection, and it is the shape that gets copied into the next migration —
         # where the name may not be a constant (security-reviewer, PR #144).
         t = sa.table(table, sa.column("product", sa.String))
-        for old, new in _CANONICAL.items():
+        present |= {v for v in conn.execute(sa.select(t.c.product).distinct()).scalars()
+                    if v in known_sources}
+    if not present:
+        return
+    mapping = _canonical_mapping(present)
+    for table in _TABLES:
+        t = sa.table(table, sa.column("product", sa.String))
+        for old, new in mapping.items():
             conn.execute(t.update().where(t.c.product == old).values(product=new))
 
 
@@ -105,6 +117,6 @@ def downgrade() -> None:
     Raising surfaces the one-way-ness at the moment someone tries to use it, which
     is the only moment the reasoning is worth anything (reviewer, PR #144)."""
     raise NotImplementedError(
-        "b7e3d9c4a2f8 is a one-way migration: convivy-app-kit and convivy-services "
-        "both fold to svc, so an svc row cannot say which repo it came from and no "
-        "reverse mapping exists. To undo it you need the pre-migration backup.")
+        "b7e3d9c4a2f8 is a one-way migration: its original version folded two "
+        "repos into one project, so no reverse mapping exists. To undo it you "
+        "need the pre-migration backup.")

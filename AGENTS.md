@@ -15,7 +15,7 @@ served by `server.py` on the mini behind a Cloudflare Access tunnel. Read
   command is blocked, surface the PR URL instead of retrying.
 - **Run the full CI set locally before pushing a branch:** `ruff check .` and
   `python -m pytest`. Both must be green.
-- **The site is live.** Six of the seven launchd jobs, including the server
+- **The site is live.** Four of the five launchd jobs, including the server
   itself, run CODE from `~/.local/deploy/convivy-orient` — a separate area
   `bin/install-orient` builds, not this checkout (ADR-0059) — but `serve.sh`
   still reads/writes CONFIG, STATE, and this working tree's `site/` output

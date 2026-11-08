@@ -23,61 +23,61 @@ ALL_ACTIONS = ["decision.read", "decision.create", "decision.consume",
                "decision.comment", "decision.decide"]
 
 ADMIN = Identity("operator@example.com", "human", "admin", frozenset({"*"}))
-MEMBER = Identity("m@example.com", "human", "member", frozenset({"vivy"}))
+MEMBER = Identity("m@example.com", "human", "member", frozenset({"alpha"}))
 OBSERVER = Identity("k@example.com", "human", "observer", frozenset({"*"}))
-CONTRACTOR = Identity("c@x.example", "human", "contractor", frozenset({"vivy"}))
-AGENT = agent_identity("overnight-orchestrator", frozenset({"vivy"}))
+CONTRACTOR = Identity("c@x.example", "human", "contractor", frozenset({"alpha"}))
+AGENT = agent_identity("overnight-orchestrator", frozenset({"alpha"}))
 
 
 def test_admin_can_do_everything_in_scope():
     for action in ALL_ACTIONS:
-        assert authorize(ADMIN, action, "vivy") is True
-        assert authorize(ADMIN, action, "constance") is True  # "*" scope
+        assert authorize(ADMIN, action, "alpha") is True
+        assert authorize(ADMIN, action, "beta") is True  # "*" scope
 
 
 def test_member_decides_and_writes_only_in_scope():
     for action in ALL_ACTIONS:
-        assert authorize(MEMBER, action, "vivy") is True
+        assert authorize(MEMBER, action, "alpha") is True
     # out of scope: everything denied, including read
     for action in ALL_ACTIONS:
-        assert authorize(MEMBER, action, "constance") is False
+        assert authorize(MEMBER, action, "beta") is False
 
 
 def test_signal_capabilities_by_role():
     # internal signal (System A): every internal identity may read + create;
     # a contractor may not (decision "read" must NOT leak into the signal store).
     for ident in (ADMIN, MEMBER, AGENT):
-        assert authorize(ident, "signal.create", "vivy") is True
-        assert authorize(ident, "signal.read", "vivy") is True
-    assert authorize(CONTRACTOR, "signal.read", "vivy") is False
-    assert authorize(CONTRACTOR, "signal.create", "vivy") is False
+        assert authorize(ident, "signal.create", "alpha") is True
+        assert authorize(ident, "signal.read", "alpha") is True
+    assert authorize(CONTRACTOR, "signal.read", "alpha") is False
+    assert authorize(CONTRACTOR, "signal.create", "alpha") is False
 
 
 def test_customer_class_is_internal_team_only():
     # System B customer content: admin + member (internal team) hold signal_customer;
     # a generic agent and a contractor do not — no customer PII to automation/externals.
-    assert authorize(ADMIN, "signal.create_customer", "vivy") is True
-    assert authorize(MEMBER, "signal.read_customer", "vivy") is True
-    assert authorize(AGENT, "signal.create_customer", "vivy") is False
-    assert authorize(AGENT, "signal.read_customer", "vivy") is False
-    assert authorize(CONTRACTOR, "signal.read_customer", "vivy") is False
+    assert authorize(ADMIN, "signal.create_customer", "alpha") is True
+    assert authorize(MEMBER, "signal.read_customer", "alpha") is True
+    assert authorize(AGENT, "signal.create_customer", "alpha") is False
+    assert authorize(AGENT, "signal.read_customer", "alpha") is False
+    assert authorize(CONTRACTOR, "signal.read_customer", "alpha") is False
 
 
 def test_contractor_is_read_only():
-    assert authorize(CONTRACTOR, "decision.read", "vivy") is True
+    assert authorize(CONTRACTOR, "decision.read", "alpha") is True
     for action in ["decision.create", "decision.consume", "decision.comment", "decision.decide"]:
-        assert authorize(CONTRACTOR, action, "vivy") is False
+        assert authorize(CONTRACTOR, action, "alpha") is False
 
 
 def test_observer_reads_everything_writes_nothing():
     # ARCH-351: observer is the full-read internal role — both planes readable,
     # customer content included, with no write capability and no decide.
-    assert authorize(OBSERVER, "decision.read", "vivy") is True
-    assert authorize(OBSERVER, "signal.read", "vivy") is True
-    assert authorize(OBSERVER, "signal.read_customer", "vivy") is True
+    assert authorize(OBSERVER, "decision.read", "alpha") is True
+    assert authorize(OBSERVER, "signal.read", "alpha") is True
+    assert authorize(OBSERVER, "signal.read_customer", "alpha") is True
     for action in ["decision.create", "decision.consume", "decision.comment",
                    "decision.decide", "signal.create"]:
-        assert authorize(OBSERVER, action, "vivy") is False
+        assert authorize(OBSERVER, action, "alpha") is False
 
 
 CONTRIBUTOR = Identity("k@example.com", "human", "contributor", frozenset({"*"}))
@@ -87,14 +87,14 @@ def test_contributor_is_observer_plus_signal_capture():
     # ARCH-351 follow-up: contributor reads everything and CAPTURES signals
     # (internal and customer class — she logs customer calls), with no
     # decision-plane writes and no decide.
-    assert authorize(CONTRIBUTOR, "decision.read", "vivy") is True
-    assert authorize(CONTRIBUTOR, "signal.read", "vivy") is True
-    assert authorize(CONTRIBUTOR, "signal.read_customer", "vivy") is True
-    assert authorize(CONTRIBUTOR, "signal.create", "vivy") is True
-    assert authorize(CONTRIBUTOR, "signal.create_customer", "vivy") is True
+    assert authorize(CONTRIBUTOR, "decision.read", "alpha") is True
+    assert authorize(CONTRIBUTOR, "signal.read", "alpha") is True
+    assert authorize(CONTRIBUTOR, "signal.read_customer", "alpha") is True
+    assert authorize(CONTRIBUTOR, "signal.create", "alpha") is True
+    assert authorize(CONTRIBUTOR, "signal.create_customer", "alpha") is True
     for action in ["decision.create", "decision.consume", "decision.comment",
                    "decision.decide"]:
-        assert authorize(CONTRIBUTOR, action, "vivy") is False
+        assert authorize(CONTRIBUTOR, action, "alpha") is False
 
 
 def test_kb_write_matches_blog_write_roles():
@@ -129,25 +129,25 @@ def test_capture_roles_track_signal_write():
 
 def test_agent_can_write_but_never_decide():
     for action in ["decision.read", "decision.create", "decision.consume", "decision.comment"]:
-        assert authorize(AGENT, action, "vivy") is True
-    assert authorize(AGENT, "decision.decide", "vivy") is False  # THE invariant
+        assert authorize(AGENT, action, "alpha") is True
+    assert authorize(AGENT, "decision.decide", "alpha") is False  # THE invariant
 
 
 def test_agent_cannot_decide_even_if_roles_claim_admin():
     # a forged/compromised entry that hands an agent an admin role must not grant
     # decide — the effective role for kind=agent is pinned to "agent".
     forged = Identity("evil-agent", "agent", "admin", frozenset({"*"}))
-    assert authorize(forged, "decision.decide", "vivy") is False
-    assert authorize(forged, "decision.create", "vivy") is True  # writes still fine
+    assert authorize(forged, "decision.decide", "alpha") is False
+    assert authorize(forged, "decision.create", "alpha") is True  # writes still fine
 
 
 def test_product_owner_is_a_member_who_approves_its_own_products_epics():
     # issue_01M350CGZB6DR577FASP53K7WM; the operator, 2026-09-30: member permissions
     # plus epic_approve, scoped to the person's own products.
     assert authz.ROLE_CAPS["product_owner"] == authz.ROLE_CAPS["member"] | {"epic_approve"}
-    owner = Identity("po@example.com", "human", "product_owner", frozenset({"vivy"}))
-    assert authorize(owner, "epic.approve", "vivy") is True
-    assert authorize(owner, "epic.approve", "constance") is False
+    owner = Identity("po@example.com", "human", "product_owner", frozenset({"alpha"}))
+    assert authorize(owner, "epic.approve", "alpha") is True
+    assert authorize(owner, "epic.approve", "beta") is False
     assert "product_owner" in authz.EPIC_APPROVER_ROLES
 
 
@@ -156,13 +156,13 @@ def test_product_owner_is_never_an_agent_role():
     # not an agent role." An agent or system identity carrying the role
     # string, in its own product, still cannot approve.
     for kind in ("agent", "system"):
-        forged = Identity("evil-agent", kind, "product_owner", frozenset({"vivy"}))
-        assert authorize(forged, "epic.approve", "vivy") is False, kind
+        forged = Identity("evil-agent", kind, "product_owner", frozenset({"alpha"}))
+        assert authorize(forged, "epic.approve", "alpha") is False, kind
 
 
 def test_unknown_action_denied_by_default():
-    assert authorize(ADMIN, "decision.delete", "vivy") is False
-    assert authorize(ADMIN, "", "vivy") is False
+    assert authorize(ADMIN, "decision.delete", "alpha") is False
+    assert authorize(ADMIN, "", "alpha") is False
     assert authorize(ADMIN, "arbitrary", None) is False
 
 
@@ -178,9 +178,9 @@ def test_null_product_is_not_a_free_pass_for_a_write_capability():
     empty = Identity("empty@x.example", "human", "admin", frozenset())
 
     # named-product behaviour is untouched by this fix.
-    assert authorize(star, "signal.create", "vivy") is True
-    assert authorize(named, "signal.create", "vivy") is False
-    assert authorize(empty, "signal.create", "vivy") is False
+    assert authorize(star, "signal.create", "alpha") is True
+    assert authorize(named, "signal.create", "alpha") is False
+    assert authorize(empty, "signal.create", "alpha") is False
 
     # product=None is no longer a free pass for the WRITE capability
     # (signal.create -> signal_write), for any of the three scopes — a create
@@ -246,9 +246,9 @@ def test_every_action_cap_key_is_classified():
 def test_scope_star_vs_specific():
     star = Identity("a@x.example", "human", "member", frozenset({"*"}))
     assert authorize(star, "decision.decide", "anything") is True
-    narrow = Identity("b@x.example", "human", "member", frozenset({"vivy", "constance"}))
-    assert authorize(narrow, "decision.decide", "vivy") is True
-    assert authorize(narrow, "decision.decide", "sous-chef") is False
+    narrow = Identity("b@x.example", "human", "member", frozenset({"alpha", "beta"}))
+    assert authorize(narrow, "decision.decide", "alpha") is True
+    assert authorize(narrow, "decision.decide", "epsilon") is False
 
 
 # --- human_identity resolution from roles.json --------------------------------
@@ -265,14 +265,14 @@ def test_human_identity_unknown_email_is_bare_contractor(roles_file):
     roles_file.write_text(json.dumps({"operator@example.com": {"role": "admin"}}))
     ident = authz.human_identity("stranger@example.com", frozenset())
     assert ident.role == "contractor" and ident.products == frozenset()
-    assert authorize(ident, "decision.read", "vivy") is False  # no scope → nothing
-    assert authorize(ident, "decision.decide", "vivy") is False
+    assert authorize(ident, "decision.read", "alpha") is False  # no scope → nothing
+    assert authorize(ident, "decision.decide", "alpha") is False
 
 
 def test_human_identity_is_case_insensitive(roles_file):
     roles_file.write_text(json.dumps({"operator@example.com": {"role": "admin"}}))
     ident = authz.human_identity("Operator@Example.COM", frozenset({"*"}))
-    assert ident.role == "admin" and authorize(ident, "decision.decide", "vivy") is True
+    assert ident.role == "admin" and authorize(ident, "decision.decide", "alpha") is True
 
 
 def test_human_identity_unrecognized_role_falls_to_contractor(roles_file):
@@ -304,25 +304,25 @@ def test_missing_roles_file_denies_all(tmp_path, monkeypatch):
 
 def test_human_identity_carries_the_passed_products_even_for_a_bare_contractor(roles_file):
     roles_file.write_text(json.dumps({}))  # no entry at all → bare contractor
-    ident = authz.human_identity("nobody@example.com", frozenset({"vivy"}))
-    assert ident.role == "contractor" and ident.products == frozenset({"vivy"})
+    ident = authz.human_identity("nobody@example.com", frozenset({"alpha"}))
+    assert ident.role == "contractor" and ident.products == frozenset({"alpha"})
 
 
 def test_human_identity_carries_the_passed_products_for_a_known_role(roles_file):
     roles_file.write_text(json.dumps({"scoped@example.com": {"role": "admin"}}))
-    ident = authz.human_identity("scoped@example.com", frozenset({"vivy", "constance"}))
-    assert ident.role == "admin" and ident.products == frozenset({"vivy", "constance"})
+    ident = authz.human_identity("scoped@example.com", frozenset({"alpha", "beta"}))
+    assert ident.role == "admin" and ident.products == frozenset({"alpha", "beta"})
 
 
 def test_roles_json_has_no_products_key_read_by_human_identity(roles_file):
     # A roles.json entry that still carries a "products" list (a stale fixture,
     # an un-migrated grant file) must have no effect — proven by setting one
-    # that would grant "vivy" and showing the resolved identity's scope is
-    # exactly what the CALLER passed, "constance" only.
+    # that would grant "alpha" and showing the resolved identity's scope is
+    # exactly what the CALLER passed, "beta" only.
     roles_file.write_text(json.dumps(
-        {"x@example.com": {"role": "admin", "products": ["vivy"]}}))
-    ident = authz.human_identity("x@example.com", frozenset({"constance"}))
-    assert ident.products == frozenset({"constance"})
+        {"x@example.com": {"role": "admin", "products": ["alpha"]}}))
+    ident = authz.human_identity("x@example.com", frozenset({"beta"}))
+    assert ident.products == frozenset({"beta"})
 
 
 def test_no_code_reads_a_roles_json_entrys_products_key():
@@ -439,7 +439,7 @@ def test_the_mapping_detector_catches_each_shape(tmp_path):
         "def scope(email):\n"
         "    return entry(email).get('products', [])\n")
     (tmp_path / "table.py").write_text(
-        "PEOPLE_PROJECTS = {'a@example.com': ['vivy']}\n")
+        "PEOPLE_PROJECTS = {'a@example.com': ['alpha']}\n")
     (tmp_path / "grants.json").write_text(
         json.dumps({"a@example.com": {"role": "admin", "products": ["*"]}}))
     (tmp_path / "tokens.py").write_text(

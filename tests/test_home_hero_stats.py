@@ -17,7 +17,7 @@ import home_build
 # reader who clicks a number should land where that number is, not on an index
 # that makes them hunt for it again.
 EXPECTED = {
-    "Today's Agent-Run Spend": "/spending",
+    "Spend · All Sessions (API-Equivalent)": "/spending",
     "CI Health": "/health",
     "Waypoints Passed (7d)": "/velocity",
 }

@@ -10,11 +10,18 @@ Courses/bead ids read their own `library_client` functions.
 from __future__ import annotations
 
 import datetime as dt
+import json
 
 import pytest
 
 import chart_house_build as ch
 import library_client
+
+
+def _registry(tmp_path, monkeypatch, units):
+    path = tmp_path / "projects.json"
+    path.write_text(json.dumps(units))
+    monkeypatch.setenv("PROJECTS_JSON", str(path))
 
 
 def _course(course_id, product, title, *, version=1, entries):
@@ -91,13 +98,13 @@ def _finished_run(product, cost_usd):
 
 def test_cost_rollup_sums_per_product(monkeypatch):
     monkeypatch.setattr(library_client, "list_finished_runs", lambda since, until=None: [
-        _finished_run("vivy", 1.5),
-        _finished_run("vivy", 2.5),
-        _finished_run("constance", 3.0),
+        _finished_run("alpha", 1.5),
+        _finished_run("alpha", 2.5),
+        _finished_run("beta", 3.0),
     ])
     rollup = ch._cost_rollup()
-    assert rollup["vivy"] == {"cost_usd": 4.0, "runs": 2}
-    assert rollup["constance"] == {"cost_usd": 3.0, "runs": 1}
+    assert rollup["alpha"] == {"cost_usd": 4.0, "runs": 2}
+    assert rollup["beta"] == {"cost_usd": 3.0, "runs": 1}
 
 
 def test_cost_rollup_asks_the_library_for_the_trailing_window(monkeypatch):
@@ -116,22 +123,123 @@ def test_cost_rollup_asks_the_library_for_the_trailing_window(monkeypatch):
     assert abs((seen["since"] - expected).total_seconds()) < 5
 
 
-def test_cost_for_matches_the_hollis_canonicalization():
-    rollup = {"Hollis": {"cost_usd": 5.0, "runs": 1}}
-    assert ch._cost_for("hollis", rollup) == {"cost_usd": 5.0, "runs": 1}
+def test_cost_for_matches_the_gamma_canonicalization():
+    rollup = {"Gamma": {"cost_usd": 5.0, "runs": 1}}
+    assert ch._cost_for("gamma", rollup) == {"cost_usd": 5.0, "runs": 1}
 
 
 def test_cost_for_sums_selector_and_selector_backend():
-    rollup = {"selector": {"cost_usd": 2.0, "runs": 1},
-              "selector-backend": {"cost_usd": 18.03, "runs": 20}}
-    assert ch._cost_for("selector", rollup) == {"cost_usd": 20.03, "runs": 21}
+    rollup = {"delta": {"cost_usd": 2.0, "runs": 1},
+              "delta-backend": {"cost_usd": 18.03, "runs": 20}}
+    assert ch._cost_for("delta", rollup) == {"cost_usd": 20.03, "runs": 21}
 
 
 def test_cost_for_is_none_not_zero_when_none_of_the_aliases_appear():
     # The property that matters: "no data this window" must stay distinguishable
     # from "$0.00" so the page never claims a false zero.
-    assert ch._cost_for("selector", {}) is None
+    assert ch._cost_for("delta", {}) is None
     assert ch._cost_for("no-such-project", {}) is None
+
+
+# --- _repo_aliases / _cost_aliases come from the install's registry --------
+#
+# Captured on main against the live registry (2026-10-22), before either
+# function read the registry at all:
+#   _REPO_ALIASES = {"bosun": ("agent-platform",),
+#                     "delta": ("delta", "delta-backend")}
+#   _COST_ALIASES = {"gamma": ("Gamma",), "delta": ("delta-backend",),
+#                     "zeta-studio": ("Omega Tools", "Omega Circle", "Omega Villa")}
+# These two tests pin the registry-derived functions to those exact values,
+# so a behaviour change here is a regression, not a readjustment. Which keys
+# fold is now each unit's or `_products` entry's own `rollup` field (CQ-171
+# revise round 2) — `conftest.py`'s pinned registry fixture carries
+# `rollup: ["repos"]` on bosun, `["repos", "cost"]` on delta, `["cost"]` on
+# gamma, and `["cost"]` on the `zeta-studio` product, so the default fixture
+# these tests read (no override) reproduces the same fold with no key named
+# in this file.
+
+
+def test_repo_aliases_matches_the_values_captured_on_main():
+    assert ch._repo_aliases() == {
+        "bosun": ("agent-platform",),
+        "delta": ("delta", "delta-backend"),
+    }
+
+
+def test_cost_aliases_matches_the_values_captured_on_main():
+    assert ch._cost_aliases() == {
+        "gamma": ("Gamma",),
+        "delta": ("delta-backend",),
+        "zeta-studio": ("Omega Tools", "Omega Circle", "Omega Villa"),
+    }
+
+
+def test_repo_aliases_comes_from_a_made_up_registry(tmp_path, monkeypatch):
+    """No Convivy name: a made-up crew ('alpha') whose Course key differs
+    from its own GitHub repo drives `_repo_names_for` the same way bosun
+    does in production, entirely from the fixture registry's own `rollup`
+    field — no key named in this file."""
+    _registry(tmp_path, monkeypatch, {
+        "alpha": {"display": "Alpha", "repos": ["alpha-infra"], "rollup": ["repos"]},
+    })
+    assert ch._repo_names_for("alpha") == ("alpha-infra",)
+    assert ch._repo_names_for("beta-studio") == ("beta-studio",)
+
+
+def test_cost_aliases_comes_from_a_made_up_registry(tmp_path, monkeypatch):
+    """No Convivy name: three made-up sibling projects building one product
+    ('beta-studio') each fold to their own display, the same shape zeta-studio's
+    three repos take in production, driven by the product's own `rollup`
+    field — no key named in this file."""
+    _registry(tmp_path, monkeypatch, {
+        "wing-east": {"display": "East Wing", "products": ["beta-studio"]},
+        "wing-west": {"display": "West Wing", "products": ["beta-studio"]},
+        "_products": {"beta-studio": {"display": "Beta Studio", "rollup": ["cost"]}},
+    })
+    assert ch._cost_aliases() == {"beta-studio": ("East Wing", "West Wing")}
+
+
+def test_repo_aliases_is_empty_on_an_unreadable_registry(tmp_path, monkeypatch):
+    """Never falls back to a literal list — an unreadable registry answers
+    the empty dict, same as `crew_registry`'s own scope queries."""
+    monkeypatch.setenv("PROJECTS_JSON", str(tmp_path / "absent.json"))
+    assert ch._repo_aliases() == {}
+    assert ch._cost_aliases() == {}
+
+
+# --- _bead_project_aliases comes from the install's registry ----------------
+#
+# Captured on main against the live registry (2026-10-22), before the
+# function read the registry at all:
+#   _BEAD_PROJECT_ALIASES = {"bosun": "agent-platform", "convivy-deck": "deck",
+#                             "shipwright": "company"}
+# This test pins the registry-derived function to those exact values, so a
+# behaviour change here is a regression, not a readjustment.
+
+
+def test_bead_project_aliases_matches_the_values_captured_on_main():
+    assert ch._bead_project_aliases() == {
+        "bosun": "agent-platform",
+        "convivy-deck": "deck",
+        "shipwright": "company",
+    }
+
+
+def test_bead_project_aliases_comes_from_a_made_up_registry(tmp_path, monkeypatch):
+    """No Convivy name: a made-up crew ('alpha') whose Course key disagrees
+    with its own KB project, read entirely from the fixture registry."""
+    _registry(tmp_path, monkeypatch, {
+        "alpha": {"display": "Alpha", "kb_project": "alpha-infra"},
+    })
+    monkeypatch.setattr(ch, "_BEAD_PROJECT_ALIAS_KEYS", ("alpha",))
+    assert ch._bead_project_aliases() == {"alpha": "alpha-infra"}
+
+
+def test_bead_project_aliases_is_empty_on_an_unreadable_registry(tmp_path, monkeypatch):
+    """Never falls back to a literal list — an unreadable registry answers
+    the empty dict, same as `_repo_aliases`/`_cost_aliases` above."""
+    monkeypatch.setenv("PROJECTS_JSON", str(tmp_path / "absent.json"))
+    assert ch._bead_project_aliases() == {}
 
 
 # --- _step_class (the track cell classification) ---------------------------
@@ -224,7 +332,7 @@ def test_course_rows_falls_back_to_the_list_row_if_get_course_races_it_away(monk
     """A course deleted between `list_courses` and `get_course` answers None;
     the row still renders (steps read "u", conservatively) rather than
     dropping the product from the page."""
-    course = _course("course_1", "vivy", "Ship it", entries=[_entry("issue_1", None)])
+    course = _course("course_1", "alpha", "Ship it", entries=[_entry("issue_1", None)])
     monkeypatch.setattr(library_client, "list_courses", lambda **k: [course])
     monkeypatch.setattr(library_client, "get_course", lambda cid: None)
     rows = ch._course_rows()
@@ -246,12 +354,12 @@ def test_course_rows_raises_when_list_courses_fails(monkeypatch):
 
 
 def test_one_courses_detail_failing_degrades_that_row_and_not_the_others(monkeypatch, capsys):
-    good = _course("course_1", "vivy", "Ship it",
+    good = _course("course_1", "alpha", "Ship it",
                    entries=[_entry("issue_1", "fixed"), _entry("issue_2", "open")])
     # The list-route fallback entry carries no state/maturity, matching what
     # list_courses() actually serves — a real fallback race, not an entry
     # that happens to already carry the detail route's resolution.
-    bad = _course("course_2", "selector", "Make playlists good",
+    bad = _course("course_2", "delta", "Make playlists good",
                   entries=[_entry("issue_3", None)])
     monkeypatch.setattr(library_client, "list_courses", lambda **k: [good, bad])
 
@@ -264,15 +372,15 @@ def test_one_courses_detail_failing_degrades_that_row_and_not_the_others(monkeyp
     rows = ch._course_rows()
     assert len(rows) == 2                         # neither row is dropped
     by_product = {r["product"]: r for r in rows}
-    assert by_product["vivy"]["done"] == 1        # the healthy row is unaffected
+    assert by_product["alpha"]["done"] == 1        # the healthy row is unaffected
     # the degraded row falls back to the list record (steps unresolved -> "u")
-    assert by_product["selector"]["title"] == "Make playlists good"
-    assert by_product["selector"]["steps"] == ["u"]
+    assert by_product["delta"]["title"] == "Make playlists good"
+    assert by_product["delta"]["steps"] == ["u"]
     assert "course_2" in capsys.readouterr().err   # and the swallowed failure is not silent
 
 
 def test_a_swallowed_exception_cannot_forge_a_log_line(monkeypatch, capsys):
-    course = _course("course_1", "vivy", "Ship it", entries=[_entry("issue_1", "open")])
+    course = _course("course_1", "alpha", "Ship it", entries=[_entry("issue_1", "open")])
     monkeypatch.setattr(library_client, "list_courses", lambda **k: [course])
 
     def boom(cid):
@@ -401,11 +509,11 @@ def test_state_chip_not_yet_specified_when_nothing_is_charted_and_no_spend():
 
 def test_live_html_links_a_project_with_a_bead_and_leaves_one_without_unlinked(monkeypatch):
     """Plants both cases in one render: a project with a bead doc gets an
-    href; vivy, with none, renders unlinked with a stated reason. A test
-    covering only the happy path would pass while vivy's row silently 404s."""
+    href; alpha, with none, renders unlinked with a stated reason. A test
+    covering only the happy path would pass while alpha's row silently 404s."""
     with_bead = _course("course_1", "convivy-orient", "Orient's route", entries=[
         _entry("i1", "fixed")])
-    without_bead = _course("course_2", "vivy", "Make the numbers act on", entries=[
+    without_bead = _course("course_2", "alpha", "Make the numbers act on", entries=[
         _entry("i2", "open")])
     monkeypatch.setattr(library_client, "list_courses", lambda **k: [with_bead, without_bead])
     monkeypatch.setattr(library_client, "get_course", lambda cid:
@@ -414,8 +522,8 @@ def test_live_html_links_a_project_with_a_bead_and_leaves_one_without_unlinked(m
                         lambda **k: [_bead_doc("convivy-orient")])
     html = ch.live_html()
     assert 'href="/reference/doc/convivy-orient/bead/convivy-orient"' in html
-    # vivy carries no href to any /reference/doc/ URL at all...
-    assert "/reference/doc/vivy" not in html
+    # alpha carries no href to any /reference/doc/ URL at all...
+    assert "/reference/doc/alpha" not in html
     # ...and the row visibly says why, rather than looking like any other
     # unlinked-by-accident row.
     assert "no bead on file" in html
@@ -472,11 +580,11 @@ def test_live_html_raises_when_the_library_is_down(monkeypatch):
 
 
 def test_live_html_shows_pr_and_cost_figures_when_present(monkeypatch):
-    course = _course("course_1", "vivy", "Ship it", entries=[_entry("i1", "open")])
+    course = _course("course_1", "alpha", "Ship it", entries=[_entry("i1", "open")])
     monkeypatch.setattr(library_client, "list_courses", lambda **k: [course])
     monkeypatch.setattr(library_client, "get_course", lambda cid: course)
     monkeypatch.setattr(library_client, "list_finished_runs",
-                        lambda since, until=None: [_finished_run("vivy", 12.5)])
+                        lambda since, until=None: [_finished_run("alpha", 12.5)])
     html = ch.live_html()
     assert "$12.50" in html
     assert "1 run<" in html
@@ -500,7 +608,7 @@ def test_live_html_escapes_a_course_version_containing_markup(monkeypatch):
     (library_client.py) — plant markup in it and confirm the row escapes it
     like every other Library-sourced value on the page, rather than emitting
     it as live HTML."""
-    course = _course("course_1", "vivy", "Ship it", version="<script>boom</script>",
+    course = _course("course_1", "alpha", "Ship it", version="<script>boom</script>",
                      entries=[_entry("i1", "open")])
     monkeypatch.setattr(library_client, "list_courses", lambda **k: [course])
     monkeypatch.setattr(library_client, "get_course", lambda cid: course)
@@ -563,7 +671,7 @@ def test_live_html_row_never_claims_the_operator_is_blocking_a_purely_unspecifie
     the operator. The chip and counts text must say so — never "awaits your
     sign-off" or "awaiting you" for a row where every proposed step is
     unspecified — while the banner still tells the crew the steps exist."""
-    course = _course("course_1", "vivy", "Make the numbers act on", entries=[
+    course = _course("course_1", "alpha", "Make the numbers act on", entries=[
         _entry("i1", "open", maturity="proposed"),
         _entry("i2", "open", maturity="proposed"),
         _entry("i3", "open", maturity="proposed"),
@@ -586,7 +694,7 @@ def test_live_html_does_not_count_a_specification_with_unset_maturity_as_awaitin
     early-fill case `issue_build.py` handles on the epic's own page). It must
     not be counted as awaiting the operator, and must not be counted as proposed-and-
     unspecified either — it isn't proposed at all yet."""
-    course = _course("course_1", "vivy", "Ship it", entries=[
+    course = _course("course_1", "alpha", "Ship it", entries=[
         _entry("i1", "open", maturity=None, specification="written ahead of maturity")])
     monkeypatch.setattr(library_client, "list_courses", lambda **k: [course])
     monkeypatch.setattr(library_client, "get_course", lambda cid: course)
@@ -678,12 +786,12 @@ def test_no_proposed_steps_renders_no_sign_off_link(monkeypatch):
 
 
 def test_live_html_flags_running_uncharted_with_an_anomaly_note(monkeypatch):
-    course = _course("course_1", "vivy", "Make the numbers act on", version=1,
+    course = _course("course_1", "alpha", "Make the numbers act on", version=1,
                      entries=[_entry("i1", "open", maturity=None)])
     monkeypatch.setattr(library_client, "list_courses", lambda **k: [course])
     monkeypatch.setattr(library_client, "get_course", lambda cid: course)
     monkeypatch.setattr(library_client, "list_finished_runs",
-                        lambda since, until=None: [_finished_run("vivy", 903.49)])
+                        lambda since, until=None: [_finished_run("alpha", 903.49)])
     html = ch.live_html()
     assert "running uncharted" in html
     assert "row-anomaly" in html
@@ -705,9 +813,9 @@ def test_merge_counts_by_repo_counts_within_the_window_only(monkeypatch):
     old = now - dt.timedelta(days=ch.MERGE_WINDOW_DAYS + 1)
     monkeypatch.setattr(library_client, "list_signals", lambda **k: [
         _signal("library", now), _signal("library", now), _signal("library", old),
-        _signal("vivy", now),
+        _signal("alpha", now),
     ])
-    assert ch._merge_counts_by_repo() == {"library": 2, "vivy": 1}
+    assert ch._merge_counts_by_repo() == {"library": 2, "alpha": 1}
 
 
 def test_merge_counts_by_repo_filters_on_github_changelog_signals(monkeypatch):
@@ -766,11 +874,11 @@ def test_ribbon_renders_each_of_the_four_dot_states():
 
 
 def test_ribbon_sums_open_prs_and_merges_across_the_selector_repo_alias():
-    """selector spans two real GitHub repos (selector, selector-backend) —
+    """delta spans two real GitHub repos (delta, delta-backend) —
     the same pair _COST_ALIASES sums for the run ledger."""
-    prs = [_pr("selector", 1, "draft", "passing"),
-           _pr("selector-backend", 2, "blocked", "failing")]
-    html = ch._ribbon_html("selector", prs, {"selector": 3, "selector-backend": 7})
+    prs = [_pr("delta", 1, "draft", "passing"),
+           _pr("delta-backend", 2, "blocked", "failing")]
+    html = ch._ribbon_html("delta", prs, {"delta": 3, "delta-backend": 7})
     assert "10 merged, 7 days" in html
     assert "rdot err" in html  # the worse bucket, across both aliased repos, wins
     assert "1 blocked — CI failing" in html
@@ -786,12 +894,12 @@ def test_ribbon_resolves_bosun_through_the_agent_platform_repo_alias():
 def test_live_html_never_renders_a_false_zero_when_the_pr_feed_is_cold(monkeypatch):
     """The None-handling wired through live_html(), not just the isolated
     _ribbon_html unit above."""
-    course = _course("course_1", "vivy", "Ship it", entries=[_entry("i1", "open")])
+    course = _course("course_1", "alpha", "Ship it", entries=[_entry("i1", "open")])
     monkeypatch.setattr(library_client, "list_courses", lambda **k: [course])
     monkeypatch.setattr(library_client, "get_course", lambda cid: course)
     monkeypatch.setattr(ch.merge_queue_build, "cached_open_prs", lambda: None)
     today = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
-    monkeypatch.setattr(library_client, "list_signals", lambda **k: [_signal("vivy", today)])
+    monkeypatch.setattr(library_client, "list_signals", lambda **k: [_signal("alpha", today)])
     html = ch.live_html()
     assert "PR feed unavailable" in html
     # a real, nonzero merge count still renders — the assertion above isn't
@@ -800,11 +908,11 @@ def test_live_html_never_renders_a_false_zero_when_the_pr_feed_is_cold(monkeypat
 
 
 def test_live_html_wires_the_open_pr_ribbon_per_row(monkeypatch):
-    course = _course("course_1", "vivy", "Ship it", entries=[_entry("i1", "open")])
+    course = _course("course_1", "alpha", "Ship it", entries=[_entry("i1", "open")])
     monkeypatch.setattr(library_client, "list_courses", lambda **k: [course])
     monkeypatch.setattr(library_client, "get_course", lambda cid: course)
     monkeypatch.setattr(ch.merge_queue_build, "cached_open_prs",
-                        lambda: [_pr("vivy", 1, "cleared", "passing")])
+                        lambda: [_pr("alpha", 1, "cleared", "passing")])
     html = ch.live_html()
     assert "1 ready to merge" in html
     assert 'href="/engineering/merge-queue"' in html
@@ -822,7 +930,7 @@ def test_live_html_wires_the_open_pr_ribbon_per_row(monkeypatch):
 # every newly filed one, exactly the set that most needs approving.
 
 
-def _item(issue_id, *, product="vivy", maturity="proposed", itype="epic",
+def _item(issue_id, *, product="alpha", maturity="proposed", itype="epic",
           state="open", title=None, specification="spec text"):
     import datetime as dt
     return library_client.IssueRecord(
@@ -1022,7 +1130,7 @@ def test_an_unset_maturity_step_reaches_no_signal_line(monkeypatch):
 
     Asserted on the rendered page rather than by calling the predicate, so it
     covers the whole path a reader would have to trace by hand."""
-    course = _course("c1", "vivy", "Vivy Course", entries=[
+    course = _course("c1", "alpha", "Alpha Course", entries=[
         _entry("issue_unset", "open", maturity=None, specification=None),
     ])
     monkeypatch.setattr(library_client, "list_issue_items", lambda: [])
@@ -1038,22 +1146,22 @@ def test_an_unset_maturity_step_reaches_no_signal_line(monkeypatch):
 def test_the_chart_house_shows_only_the_viewers_projects(monkeypatch):
     """Review round 3 on PR #372: /chart-house listed every project's Course
     and every epic awaiting approval to any full-tier viewer. A viewer scoped
-    to vivy sees neither bosun's Course nor its epic; a viewer scoped to both
+    to alpha sees neither bosun's Course nor its epic; a viewer scoped to both
     sees both, so the omission is the scope filter."""
-    vivy = _course("course_v", "vivy", "VIVY-COURSE-TITLE", entries=[_entry("v1", "open", maturity="approved")])
+    alpha = _course("course_v", "alpha", "ALPHA-COURSE-TITLE", entries=[_entry("v1", "open", maturity="approved")])
     bosun = _course("course_b", "bosun", "BOSUN-COURSE-TITLE", entries=[_entry("b1", "open", maturity="approved")])
-    courses = {"course_v": vivy, "course_b": bosun}
-    monkeypatch.setattr(library_client, "list_courses", lambda **k: [vivy, bosun])
+    courses = {"course_v": alpha, "course_b": bosun}
+    monkeypatch.setattr(library_client, "list_courses", lambda **k: [alpha, bosun])
     monkeypatch.setattr(library_client, "get_course", lambda cid: courses.get(cid))
     monkeypatch.setattr(library_client, "list_issue_items", lambda: [
-        _item("issue_vivy_ep", product="vivy", title="VIVY-EPIC-TITLE"),
+        _item("issue_alpha_ep", product="alpha", title="ALPHA-EPIC-TITLE"),
         _item("issue_bosun_ep", product="bosun", title="BOSUN-EPIC-TITLE")])
-    scoped = ch.live_html(frozenset({"vivy"}))
-    assert "VIVY-COURSE-TITLE" in scoped and "VIVY-EPIC-TITLE" in scoped
+    scoped = ch.live_html(frozenset({"alpha"}))
+    assert "ALPHA-COURSE-TITLE" in scoped and "ALPHA-EPIC-TITLE" in scoped
     assert "BOSUN-COURSE-TITLE" not in scoped
     assert "BOSUN-EPIC-TITLE" not in scoped and "issue_bosun_ep" not in scoped
     assert "1 project " in scoped
-    both = ch.live_html(frozenset({"vivy", "bosun"}))
+    both = ch.live_html(frozenset({"alpha", "bosun"}))
     assert "BOSUN-COURSE-TITLE" in both and "BOSUN-EPIC-TITLE" in both
 
 
@@ -1062,18 +1170,18 @@ def test_the_static_fallback_names_no_project(monkeypatch, tmp_path):
     viewer whose live render failed, so the deploy-time fallback must not be a
     snapshot of every project. With two projects' Courses and epics in the
     Library, the written file names neither and says the view is unavailable."""
-    vivy = _course("course_v", "vivy", "VIVY-COURSE-TITLE", entries=[_entry("v1", "open", maturity="approved")])
+    alpha = _course("course_v", "alpha", "ALPHA-COURSE-TITLE", entries=[_entry("v1", "open", maturity="approved")])
     bosun = _course("course_b", "bosun", "BOSUN-COURSE-TITLE", entries=[_entry("b1", "open", maturity="approved")])
-    courses = {"course_v": vivy, "course_b": bosun}
-    monkeypatch.setattr(library_client, "list_courses", lambda **k: [vivy, bosun])
+    courses = {"course_v": alpha, "course_b": bosun}
+    monkeypatch.setattr(library_client, "list_courses", lambda **k: [alpha, bosun])
     monkeypatch.setattr(library_client, "get_course", lambda cid: courses.get(cid))
     monkeypatch.setattr(library_client, "list_issue_items", lambda: [
-        _item("issue_vivy_ep", product="vivy", title="VIVY-EPIC-TITLE"),
+        _item("issue_alpha_ep", product="alpha", title="ALPHA-EPIC-TITLE"),
         _item("issue_bosun_ep", product="bosun", title="BOSUN-EPIC-TITLE")])
     monkeypatch.setattr(ch, "OUT", tmp_path)
     ch.build_static()
     written = (tmp_path / "chart-house.html").read_text(encoding="utf-8")
-    for name in ("VIVY-COURSE-TITLE", "BOSUN-COURSE-TITLE", "VIVY-EPIC-TITLE",
-                 "BOSUN-EPIC-TITLE", "issue_vivy_ep", "issue_bosun_ep"):
+    for name in ("ALPHA-COURSE-TITLE", "BOSUN-COURSE-TITLE", "ALPHA-EPIC-TITLE",
+                 "BOSUN-EPIC-TITLE", "issue_alpha_ep", "issue_bosun_ep"):
         assert name not in written
     assert "Live view unavailable" in written

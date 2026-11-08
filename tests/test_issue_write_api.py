@@ -43,7 +43,7 @@ def client(tmp_path, monkeypatch):
     roles.write_text(json.dumps({
         "operator@example.com": {"role": "admin", "products": ["*"]},
         "mem@example.com": {"role": "member", "products": ["*"]},
-        "scoped@example.com": {"role": "member", "products": ["vivy"]},
+        "scoped@example.com": {"role": "member", "products": ["alpha"]},
         "ro@example.com": {"role": "observer", "products": ["*"]},
     }))
     monkeypatch.setattr(authz, "ROLES", roles)
@@ -163,7 +163,7 @@ def test_a_resolve_outside_scope_is_404(client, lib):
 
 def test_the_same_scoped_member_resolves_in_their_own_product(client, lib, monkeypatch):
     """The positive control for the test above."""
-    monkeypatch.setattr(library_client, "get_issue_item", lambda _id: _item(product="vivy"))
+    monkeypatch.setattr(library_client, "get_issue_item", lambda _id: _item(product="alpha"))
     assert _resolve(client, _human("scoped@example.com")).status_code == 200
 
 
@@ -178,7 +178,7 @@ def test_an_out_of_scope_resolve_and_a_missing_item_answer_byte_identically(clie
     scope must read exactly like one that does not exist, never a distinct
     refusal that would confirm the item is there. `client`'s default
     `get_issue_item` already answers a `convivy-orient` item, out of
-    `scoped@example.com`'s own `vivy` scope."""
+    `scoped@example.com`'s own `alpha` scope."""
     out_of_scope = _resolve(client, _human("scoped@example.com"))
     monkeypatch.setattr(library_client, "get_issue_item", lambda _id: None)
     missing = _resolve(client, _human("scoped@example.com"))
@@ -199,12 +199,12 @@ def test_a_malformed_resolve_is_400(client, lib, body):
 
 def test_a_library_refusal_keeps_its_status_and_wording(client, monkeypatch):
     def held(issue_id, **kw):
-        raise library_client.ItemWriteRefused(409, "held by co-selector until 18:00")
+        raise library_client.ItemWriteRefused(409, "held by co-delta until 18:00")
 
     monkeypatch.setattr(library_client, "resolve_item", held)
     r = _resolve(client, _human("operator@example.com"))
     assert r.status_code == 409
-    assert r.json()["error"] == "held by co-selector until 18:00"
+    assert r.json()["error"] == "held by co-delta until 18:00"
 
 
 def test_a_library_fault_is_not_dressed_up_as_a_refusal(client, monkeypatch):
@@ -269,7 +269,7 @@ def test_a_filing_outside_scope_is_404(client, lib):
 
 
 def test_the_same_scoped_member_files_in_their_own_product(client, lib):
-    r = _file(client, _human("scoped@example.com"), {"product": "vivy", "title": "T"})
+    r = _file(client, _human("scoped@example.com"), {"product": "alpha", "title": "T"})
     assert r.status_code == 200, r.text
 
 

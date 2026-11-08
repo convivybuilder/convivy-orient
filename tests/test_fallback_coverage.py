@@ -73,12 +73,16 @@ def _quoted(name: str) -> re.Pattern[str]:
 # Every quoted `name.html` literal in `handle_get`: the explicit blocks E19·3
 # and E19·4 moved pages into (SCOPED_DASHBOARDS, SCOPED_ROUTES, the ARCH log
 # and the per-page blocks) each name their fallback file there, so reading the
-# source covers a block added later without a hand-kept list.
+# source covers a block added later without a hand-kept list. `_scoped_pages`
+# holds the scoped block's own path -> filename table (CQ·163 review), so it is
+# read through its return value rather than through this scan, which sees only
+# `handle_get`.
 _HANDLE_GET_HTML = re.compile(r'"([a-z0-9][a-z0-9.-]*\.html)"')
 
 
 def _fallback_filenames_from_route_map() -> set[str]:
     names = {page for page, _renderer in srv._full_only_routes().values()}
+    names |= {page for page, _renderer in srv._scoped_pages(frozenset(), False).values()}
     names |= _EXTRA_FALLBACK_FILENAMES
     names |= set(_HANDLE_GET_HTML.findall(inspect.getsource(srv.handle_get)))
     assert names, "no fallback filenames found — _full_only_routes() moved or emptied"

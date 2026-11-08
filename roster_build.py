@@ -16,12 +16,12 @@ Data sources (TWO, deliberately — ARCH-361 follow-up):
    the audience_contains list names which catalog agents are individuated for that
    product+lane.
 3. **Repo-local crews** — <repo>/.claude/agents/*.md. Some projects have agents
-   that exist ONLY here and in no central catalog entry (selector's sel-coder,
-   hollis-*, svc-*, substrate's scout, write-better's editor…). Three of those
-   projects have no profiles YAML at all, so the profile path can never surface
-   them. Reading the repo dir is the only way the page can reflect what is
-   actually dispatchable, and that dir is the source of truth agentctl itself
-   dispatches from.
+   that exist ONLY here and in no central catalog entry (a product's own
+   coder, a crew's own repo-local agents, substrate's scout, write-better's
+   editor…). Three of those projects have no profiles YAML at all, so the
+   profile path can never surface them. Reading the repo dir is the only way
+   the page can reflect what is actually dispatchable, and that dir is the
+   source of truth agentctl itself dispatches from.
 
 These use DIFFERENT frontmatter schemas and both are parsed: the catalog uses the
 knowledge schema (`kind: agent`, `audience: [slug]`, `title`), while a repo-local
@@ -38,7 +38,6 @@ Full-tier only (server.py gates /engineering/roster); a contractor gets 404.
 from __future__ import annotations
 
 import json
-import re
 import sys
 from pathlib import Path
 
@@ -73,37 +72,71 @@ OUT = STATE_ROOT / "site"
 
 CONVIVY_ROOT = Path.home() / "Convivy"
 
-# Projects shown on the page, in display order. Each entry is:
-#   (project_slug, display_label, repo_path, [profile_names_in_order])
-# Profile names map to <knowledge>/projects/<slug>/profiles/<name>.yaml.
-# An empty profile list means no interactive crew (autonomous-only).
-PROJECTS = [
-    ("vivy",              "Vivy",              str(CONVIVY_ROOT / "vivy"),
-     ["daytime", "commercial", "overnight"]),
-    ("constance",         "Constance",         str(CONVIVY_ROOT / "constance"),
-     ["daytime", "commercial", "overnight"]),
-    ("sous-chef",         "Sous Chef",         str(CONVIVY_ROOT / "sous-chef"),
-     ["daytime", "overnight"]),
-    ("agent-platform",    "Agent Platform",    str(CONVIVY_ROOT / "agent-platform"),
-     ["daytime"]),
-    ("convivy-commercial","Convivy Commercial",str(CONVIVY_ROOT / "convivy-commercial"),
-     ["commercial"]),
-    # These render entirely from their .claude/agents dir BY CHOICE, not because
-    # a profiles YAML is absent: selector, hollis, convivy-app-kit, write-better
-    # and convivy-orient all have one under knowledge/projects/<slug>/profiles/
-    # (only substrate genuinely has none). The repo-crew path renders repo-local
-    # descriptions and the real `agentctl spawn` launch command; a profiles YAML
-    # would instead render the `co <slug>` form and generic central-catalog
-    # descriptions for agents that also live there. Listed explicitly for
-    # display order + label; discovery below would otherwise pick them up
-    # unlabelled.
-    ("selector",          "Selector",          str(CONVIVY_ROOT / "selector"), []),
-    ("hollis",            "Hollis",            str(CONVIVY_ROOT / "hollis"), []),
-    ("convivy-app-kit",   "Convivy App Kit",   str(CONVIVY_ROOT / "convivy-app-kit"), []),
-    ("write-better",      "Write Better",      str(CONVIVY_ROOT / "write-better"), []),
-    ("substrate",         "Substrate",         str(CONVIVY_ROOT / "substrate"), []),
-    ("convivy-orient",    "Convivy Orient",    str(CONVIVY_ROOT / "convivy-orient"), []),
-]
+# Projects shown on the page, in the registry's own top-level unit order
+# (CQ-171 slice 6 — this reorders the page from the hand-maintained order the
+# old `PROJECT_PROFILE_LANES` literal held; see the PR body). A unit
+# contributes a row only when it owns at least one repo AND that repo's
+# `activation_lanes` is non-empty (`_registry_rows()` below) — a unit with no
+# declared lanes contributes no explicit row at all. It may still appear on
+# the page through `discover_projects()`'s own filesystem scan below, with a
+# generic label and in scan order rather than a curated one; see the PR body
+# for which of today's rows that affects.
+#
+# `activation_lanes` lives on the unit that OWNS a row's repo, not
+# necessarily a unit keyed by that repo's own name (`crew_registry.
+# activation_lanes_for_repo`'s own reverse lookup over each unit's `repos`)
+# — a project's repo and its owning unit's registry key can differ.
+
+
+# A roster row with no registry unit at all keeps its historical label —
+# today only `substrate`, which the registry has no unit for yet (build.py's
+# `_PROJECT_LABEL_FALLBACK` carries the same gap, same reason).
+_ROW_LABEL_FALLBACK = {"substrate": "Substrate"}
+
+
+def _row_label(slug: str, unit: dict | None) -> str:
+    """A roster row's display label: the registry unit's own `display`
+    (CQ-171 ruling 2) when one was found, else the historical literal."""
+    if unit is not None and isinstance(unit.get("display"), str) and unit["display"].strip():
+        return unit["display"]
+    return _ROW_LABEL_FALLBACK.get(slug, slug.replace("-", " ").title())
+
+
+def _row_repo_path(slug: str, unit: dict | None) -> str:
+    """A roster row's repo path: the registry unit's own `home_dir` resolved
+    against this install's root, when one was found and resolves, else the
+    conventional ~/Convivy/<slug>."""
+    if unit is not None:
+        home = crew_registry.resolve_home_dir(unit.get("home_dir"))
+        if home is not None:
+            return str(home)
+    return str(CONVIVY_ROOT / slug)
+
+
+def _registry_rows() -> list[tuple[str, str, str, list[str]]]:
+    """The roster's explicit rows, in the registry's own top-level unit
+    order (CQ-171 slice 6, replacing `PROJECT_PROFILE_LANES`): one row per
+    unit that owns at least one repo whose `activation_lanes` is non-empty,
+    keyed by that unit's own FIRST `repos` entry — the repo this page has
+    historically shown for a unit that owns more than one (e.g. a unit
+    whose `repos` lists both an app and its backend repo renders only the
+    app). `[]` on an unreadable registry, same as every other registry read
+    in this module."""
+    try:
+        unit_map = crew_registry.units()
+    except crew_registry.RegistryUnavailable:
+        return []
+    rows = []
+    for unit in unit_map.values():
+        repos = unit.get("repos") or ()
+        if not repos:
+            continue
+        repo = repos[0]
+        lanes = crew_registry.activation_lanes_for_repo(repo)
+        if not lanes:
+            continue
+        rows.append((repo, _row_label(repo, unit), _row_repo_path(repo, unit), lanes))
+    return rows
 
 
 # Repos never shown as projects: infrastructure, mirrors, and scratch checkouts
@@ -122,8 +155,8 @@ _DISCOVERY_SKIP = {
 
 # Any dir ending in this is a worktree POOL, never a project. Worth matching by
 # suffix rather than listing names: a worktree is a full checkout and therefore
-# HAS a .claude/agents dir, so a new pool (hollis-worktrees, convivy-app-kit-worktrees)
-# would otherwise appear as a phantom project the first time one is created.
+# HAS a .claude/agents dir, so a new pool for any project would otherwise
+# appear as a phantom project the first time one is created.
 _WORKTREE_POOL_SUFFIX = "-worktrees"
 
 # Human-readable lane labels for profile names.
@@ -134,70 +167,54 @@ LANE_LABEL = {
     "repo-crew":  "Repo crew (product-specific)",
 }
 
-# Maps a project_slug to its knowledge-project directory when the two differ.
-# Read live from agent-platform's EXPLICIT_PROJECT_BY_NAME (see
-# _load_knowledge_slug_map) rather than hand-copied here. If a slug is absent
+# Maps a project_slug to its knowledge-project directory when the two differ,
+# built from the registry (see _load_knowledge_slug_map). If a slug is absent
 # from that map, it maps to itself.
-_PROJECTS_PY_PATH = (
-    Path.home() / "Convivy" / "agent-platform" / "lib" / "agent-platform" / "projects.py"
-)
 
 
 def _load_knowledge_slug_map() -> dict[str, str]:
-    """Parse `EXPLICIT_PROJECT_BY_NAME` out of agent-platform's projects.py.
+    """Every name the registry maps to a knowledge project: each unit's
+    `kb_project_by_repo` entries, then its `kb_scope_exceptions`, the same two
+    fields and order agent-platform's `projects._explicit_project_by_name`
+    reads, so the roster and agentctl resolve a workspace alike.
 
-    This used to be a dict hand-copied into this file. It drifted: it held
-    convivy-commercial to the retired `convivy` scope for an unknown stretch
-    after ARCH-438 re-pointed agent-platform's own copy to `company`, and
-    nothing caught it because nothing read the two together
-    (issue_01M0VMAZZMN4VCGJF197GASR6Y). Reading the literal at render time
-    means there is no second copy to forget.
+    This parsed an `EXPLICIT_PROJECT_BY_NAME` literal out of agent-platform's
+    projects.py until agent-platform c64efd104 (2026-10-22) computed that map
+    from the registry instead. The parse found nothing from then on, and the
+    roster mapped every workspace to itself (CQ·178,
+    issue_01M67XWNTMQ3TK62ZK1581MXKN). Reading the registry leaves no second
+    copy and no source file to parse.
 
-    The map lived in bin/knowledge-ctx as `_PRODUCT_MAP` until agent-platform
-    2bc24392 (2026-09-25) moved it into projects.py, where knowledge-ctx and
-    agentctl now share it. The roster read an empty map from then until
-    issue_01M3HRHPXH4D68PHRWYK7XFVB8, and the stderr warning below is how that
-    showed up.
-
-    Depends on `EXPLICIT_PROJECT_BY_NAME` staying a FLAT str -> str dict: the
-    pattern stops at the first line-starting brace, which would be the wrong
-    one if the map ever nested.
-
-    Returns {} if the file is missing or the literal can't be found, so a
-    project_slug falls back to mapping to itself — the same behavior an absent
-    entry always had — rather than the roster page crashing. Those two are NOT
-    the same condition and only one is expected, so the second is announced on
-    stderr: a missing checkout is normal on some machines, while a file that
-    exists whose literal no longer parses means this anti-drift mechanism has
-    silently stopped working. Staying quiet about that would reproduce the
-    silent failure this function was written to end.
-    """
+    Returns {} when the registry cannot be read, so a project_slug maps to
+    itself rather than the roster page crashing, matching agent-platform's
+    own degrade. That is announced on stderr, since an unreadable registry is
+    not the normal case."""
     try:
-        text = _PROJECTS_PY_PATH.read_text(encoding="utf-8")
-    except OSError:
-        return {}
-    m = re.search(r'EXPLICIT_PROJECT_BY_NAME = \{(.*?)^\}', text, re.S | re.M)
-    if not m:
-        # Guarded the way chart_house_build.py guards its own stderr logging,
-        # and for the reason server.py's _log_render_failure states outright:
-        # never let a logging failure break the response. An unguarded print
-        # here could raise out of the very function whose contract is to return
-        # {} rather than crash the roster page.
+        unit_map = crew_registry.units()
+    except crew_registry.RegistryUnavailable as e:
+        # Guarded the way chart_house_build.py guards its own stderr logging:
+        # a logging failure must not break the roster page.
         try:
-            print(f"roster: {_PROJECTS_PY_PATH} exists but no EXPLICIT_PROJECT_BY_NAME "
-                  f"literal parsed out of it — the roster's project mapping is "
-                  f"falling back to identity, which silently drops any workspace "
-                  f"whose slug differs from its knowledge project. Check whether "
-                  f"that file's format changed.", file=sys.stderr)
+            print(f"roster: the registry could not be read ({e}); the roster's "
+                  f"project mapping falls back to identity this render.", file=sys.stderr)
         except Exception:
             pass
         return {}
-    return dict(re.findall(r'"([A-Za-z0-9._-]+)"\s*:\s*"([A-Za-z0-9._-]+)"', m.group(1)))
+    out: dict[str, str] = {}
+    for unit in unit_map.values():
+        for name, entry in (unit.get("kb_project_by_repo") or {}).items():
+            if isinstance(entry, dict) and isinstance(entry.get("kb_project"), str):
+                out[name] = entry["kb_project"]
+        for repo, exc in (unit.get("kb_scope_exceptions") or {}).items():
+            if isinstance(exc, dict) and isinstance(exc.get("kb_project"), str):
+                out[repo] = exc["kb_project"]
+    return out
 
 
 # Shorthand aliases from the `co` script (lines 857-864 in agent-platform/bin/co).
-# These match only in product repos (not convivy-commercial, which has its own
-# alias set). Keys are agent slugs; values are the shortest alias.
+# These match only in product repos (not the company-level commercial
+# workspace below, which has its own alias set). Keys are agent slugs;
+# values are the shortest alias.
 _PRODUCT_CO_ALIASES: dict[str, str] = {
     "planning-orchestrator": "co",
     "planner":               "co p",
@@ -209,7 +226,13 @@ _PRODUCT_CO_ALIASES: dict[str, str] = {
     "reviewer":              "co rev",
 }
 
-# Aliases specific to convivy-commercial (co script lines 711-714).
+# Aliases specific to the company-level commercial workspace (co script
+# lines 711-714). Which repo that is comes from the registry's own
+# `company_workspace` field (CQ-171 slice 6, replacing `_COMMERCIAL_SLUG`):
+# the one unit so marked, as opposed to every per-product
+# `<product>-commercial` workspace, which uses `_PRODUCT_CO_ALIASES` above
+# instead. None marked, or more than one, fails closed — no alias applied —
+# the same shape `crew_registry.company_workspace()` itself fails closed on.
 _COMMERCIAL_CO_ALIASES: dict[str, str] = {
     "positioning-strategist": "co",
     "commercial-writer":      "co writer",
@@ -336,15 +359,20 @@ def load_repo_agents(repo_path: str) -> dict[str, dict]:
 
 
 def discover_projects() -> list[tuple[str, str, str, list[str]]]:
-    """PROJECTS, plus any ~/Convivy/<repo> with a non-empty .claude/agents dir.
+    """`_registry_rows()`, plus any ~/Convivy/<repo> with a non-empty
+    .claude/agents dir.
 
-    The page's whole failure mode was going stale: PROJECTS was a hand-maintained
-    list of five, so five projects' crews (~21 agents) were invisible and nobody
-    noticed until the operator went looking for sel-coder. Discovery makes a NEW project
-    with a crew appear on its own, so the page can't silently drift again.
+    The page's whole failure mode was going stale: the explicit row list was a
+    hand-maintained list of five, so five projects' crews (~21 agents) were
+    invisible and nobody noticed until the operator went looking for one
+    product crew's coder.
+    Discovery makes a NEW project with a crew appear on its own, so the page
+    can't silently drift again — and is also what now surfaces a unit with no
+    declared `activation_lanes` (CQ-171 slice 6), with a generic label and in
+    scan order rather than a curated one.
     """
-    out = list(PROJECTS)
-    known = {slug for slug, _, _, _ in PROJECTS}
+    out = _registry_rows()
+    known = {slug for slug, _, _, _ in out}
     if not CONVIVY_ROOT.is_dir():
         return out
     for repo in sorted(CONVIVY_ROOT.iterdir()):
@@ -433,7 +461,7 @@ def _launch_command(slug: str, repo_path: str, project_slug: str,
     """
     if lane == "overnight":
         return _agentctl_launch(slug, project_slug)
-    if project_slug == "convivy-commercial":
+    if project_slug == crew_registry.company_workspace():
         alias = _COMMERCIAL_CO_ALIASES.get(slug, f"co {slug}")
         return f"cd {repo_path} && {alias}"
     alias = _PRODUCT_CO_ALIASES.get(slug)
@@ -502,10 +530,10 @@ def load_roster() -> dict:
         # above for this project.
         #
         # The test is `shown_slugs`, not "is it in the central catalog". Those
-        # differ in a way that matters: a project with profiles (vivy) already
-        # shows its generic agents in a profile lane, so skipping them here
+        # differ in a way that matters: a project with profiles already shows
+        # its generic agents in a profile lane, so skipping them here
         # correctly avoids fourteen duplicates. But a project with NO profiles
-        # (vivy-ownerrez-sandbox-tools, the *-commercial repos) has rendered
+        # (a product's own sandbox repo, the *-commercial repos) has rendered
         # nothing yet — deduping against the catalog there would drop its entire
         # crew and show an empty project that really has fourteen dispatchable
         # agents. Dedupe against what the page has actually shown.

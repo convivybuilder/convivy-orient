@@ -80,6 +80,21 @@ MAX_BODY = 4 * 1024
 MAX_FIELD = 500
 
 
+def _crew_in_scope(ident, crew: str) -> bool:
+    """Whether `ident` may write a row for `crew`. Scope holds project slugs
+    and a row names a crew, so the crew is checked through every project the
+    registry lists under it: `deck` is the crew of project `convivy-deck`,
+    and checking the crew name itself refused every "every public crew" save
+    for a viewer without `*` (the operator, 2026-10-27). A crew no project
+    lists, or an unreadable registry, falls back to the crew name, the check
+    this route made before."""
+    try:
+        projects = crew_registry.projects_for_crew(crew)
+    except crew_registry.RegistryUnavailable:
+        projects = frozenset()
+    return all(authorize(ident, "policy.write", p) for p in (projects or {crew}))
+
+
 def _clean_field(payload: dict, name: str) -> tuple[str | None, JSONResponse | None]:
     """`payload[name]`, type-checked to REFUSE before it is stripped — never
     the reverse (Library `PUT /policy` review, round 2: letting `isinstance`
@@ -179,7 +194,7 @@ async def write_policy(request: Request):
         crews = [fields["crew"]]
     # Every crew is checked before anything is written, so a writer scoped to
     # some of them is refused whole rather than left with a partial grant.
-    if not all(authorize(ident, "policy.write", crew) for crew in crews):
+    if not all(_crew_in_scope(ident, crew) for crew in crews):
         return _json(404, {"error": "not found"})
 
     written: list[str] = []

@@ -2,9 +2,9 @@
 
 **The Library holds the vaults. The cutover ran at about 04:00 on 2026-08-17**,
 moving the Chart House, the Archives and the decision plane into the Library's own
-file (Phase 3 §4). This job, `github_capture`, is an HTTP client of that surface
-exactly like the fleet's agents are, so it moved with the fleet. It is in this
-repo because it runs beside Orient, not because it is part of it. (`market_digest`
+file (Phase 3 §4). Orient's scheduled jobs, `deploy_watch` today, are HTTP clients of that surface
+exactly like the fleet's agents are, so they moved with the fleet. (`github_capture`
+retired on 2026-10-31, when the Keel took over GitHub capture, CQ·111. `market_digest`
 was another such client; it retired with the /market page it fed, the operator
 2026-08-26. `parked_sweep` retired on 2026-09-12 without ever having run: The operator
 ruled that a job judging and writing work items does not belong in a

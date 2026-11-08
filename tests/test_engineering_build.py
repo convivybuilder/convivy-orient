@@ -159,7 +159,7 @@ def _docs():
          "status": "current", "reviewed": "2026-06-01",
          "ref": "projects/shared/decisions/0001-foo.md", "human": True,
          "blurb": "A human-readable explainer.", "len": 120, "body": "## Foo\nshort\n"},
-        {"id": "vivy/architecture/big", "project": "vivy", "kind": "architecture",
+        {"id": "alpha/architecture/big", "project": "alpha", "kind": "architecture",
          "title": "Big arch", "reflabel": "big", "status": "draft", "reviewed": "", "ref": "",
          "human": False, "blurb": "no ref here", "len": 9000, "body": "long body\n"},
     ]
@@ -230,19 +230,19 @@ def test_edit_and_open_withheld_for_non_team_audience_and_arch_docs():
     it, rather than asserting on kind alone."""
     data = {
         "docs": [
-            {"id": "vivy/skill/x", "project": "vivy", "kind": "skill",
+            {"id": "alpha/skill/x", "project": "alpha", "kind": "skill",
              "title": "Skill doc", "reflabel": "skill-x", "status": "current",
              "reviewed": "", "ref": "", "human": False, "blurb": "b", "len": 10},
             {"id": "substrate/arch/arch-1", "project": "substrate", "kind": "arch",
              "title": "Arch entry", "reflabel": "ARCH-1", "status": "current",
              "reviewed": "", "ref": "substrate/decisions.md", "human": False,
              "blurb": "b", "len": 10},
-            {"id": "vivy/decisions/0001-ok", "project": "vivy", "kind": "skill",
+            {"id": "alpha/decisions/0001-ok", "project": "alpha", "kind": "skill",
              "title": "Team doc", "reflabel": "ADR-0001", "status": "current",
              "reviewed": "", "ref": "", "human": True, "blurb": "b", "len": 10},
         ],
-        "projectLabel": {"vivy": "Vivy", "substrate": "Substrate"},
-        "projectOrder": ["vivy", "substrate"],
+        "projectLabel": {"alpha": "Alpha", "substrate": "Substrate"},
+        "projectOrder": ["alpha", "substrate"],
         "kindOrder": ["skill", "arch"],
         "kindLabel": {"skill": "Skills", "arch": "ARCH"},
         "kindTooltip": {}, "drawerThreshold": 3000,
@@ -392,20 +392,20 @@ def _kb_landing_search_data():
              "title": "Foo decision", "reflabel": "ADR-0001", "status": "current",
              "reviewed": "2026-06-01", "ref": "projects/shared/decisions/0001-foo.md",
              "human": True, "blurb": "A human-readable explainer.", "len": 120},
-            {"id": "vivy/runbooks/deploy", "project": "vivy", "kind": "runbook",
+            {"id": "alpha/runbooks/deploy", "project": "alpha", "kind": "runbook",
              "title": "Deploy runbook", "reflabel": "deploy", "status": "current",
-             "reviewed": "2026-06-01", "ref": "projects/vivy/runbooks/deploy.md",
+             "reviewed": "2026-06-01", "ref": "projects/alpha/runbooks/deploy.md",
              "human": False, "blurb": "how to deploy", "len": 300},
             # Matches NEITHER title, reflabel, id nor blurb — only a
             # server-side body search (runBodySearch -> /api/memory/search)
             # can find it.
-            {"id": "vivy/architecture/zzzneedle", "project": "vivy", "kind": "architecture",
+            {"id": "alpha/architecture/zzzneedle", "project": "alpha", "kind": "architecture",
              "title": "Some Arch Doc", "reflabel": "arch-1", "status": "current",
              "reviewed": "2026-06-01", "ref": "",
              "human": False, "blurb": "nothing matching here", "len": 500},
         ],
-        "projectLabel": {"shared": "Shared", "vivy": "Vivy"},
-        "projectOrder": ["shared", "vivy"],
+        "projectLabel": {"shared": "Shared", "alpha": "Alpha"},
+        "projectOrder": ["shared", "alpha"],
         "kindOrder": ["decision", "runbook", "architecture"],
         "kindLabel": {"decision": "Decisions", "runbook": "Runbooks", "architecture": "Architecture"},
         "kindTooltip": {},
@@ -526,7 +526,7 @@ global.fetch = (url) => {
   const m = /[?&]q=([^&]+)/.exec(url);
   const q = m ? decodeURIComponent(m[1]) : '';
   return new Promise((resolve) => setTimeout(() => {
-    if (q === 'bodyneedle') resolve({ ok: true, json: async () => ({ ids: ['vivy/architecture/zzzneedle'] }) });
+    if (q === 'bodyneedle') resolve({ ok: true, json: async () => ({ ids: ['alpha/architecture/zzzneedle'] }) });
     else resolve({ ok: true, json: async () => ({ ids: [] }) });
   }, 1));
 };
@@ -710,6 +710,52 @@ def test_arch_log_missing_file_degrades(tmp_path, monkeypatch):
 
 
 # --- project ordering + reference search (ARCH-195) --------------------------
+#
+# Captured on main against the live registry (2026-10-22), before
+# PROJECT_ORDER's product run was spread in from `build.PRODUCT_ORDER` and
+# PROJECT_LABEL became a passthrough to it:
+#   PROJECT_ORDER = ["company", "alpha", "beta", "gamma", "delta",
+#                     "epsilon", "platform", "engineering-practice",
+#                     "agent-platform", "substrate", "knowledge", "convivy-orient"]
+# This test pins the order to those exact values, so a behaviour change here
+# is a regression, not a readjustment.
+
+
+def test_project_order_matches_the_values_captured_on_main(monkeypatch):
+    # build.PRODUCT_ORDER's own derivation is pinned in test_build.py against
+    # the registry shape the Bosun's rearrange produces; this pins the order
+    # engineering_build builds around it. Patch the function, never the
+    # attribute: monkeypatch's undo would leave a plain attribute behind that
+    # shadows build's __getattr__ for every later test.
+    import build
+    monkeypatch.setattr(build, "_product_order",
+                        lambda: ["alpha", "beta", "gamma", "delta", "epsilon"])
+    assert E.PROJECT_ORDER == [
+        "company", "alpha", "beta", "gamma", "delta", "epsilon",
+        "platform", "engineering-practice", "agent-platform",
+        "substrate", "knowledge", "convivy-orient"]
+
+
+def test_project_order_tracks_build_product_order(monkeypatch):
+    """No Convivy name: the product run comes from `build.PRODUCT_ORDER`
+    itself, so a made-up product list is picked up with no edit here."""
+    import build
+    monkeypatch.setattr(build, "_product_order", lambda: ["alpha", "beta-studio"])
+    assert E.PROJECT_ORDER == [
+        "company", "alpha", "beta-studio",
+        "platform", "engineering-practice", "agent-platform",
+        "substrate", "knowledge", "convivy-orient"]
+
+
+def test_project_label_is_build_project_label():
+    """The old hand-kept `"agent-platform": "Agent Platform"` overlay is now
+    a passthrough to `build.PROJECT_LABEL`, which already carries that value
+    (its own `_PROJECT_LABEL_FALLBACK` entry) — a registry change build.py
+    picks up reaches this module with no copy of its own to go stale."""
+    import build
+    assert E.PROJECT_LABEL == build.PROJECT_LABEL
+    assert E.PROJECT_LABEL["agent-platform"] == "Agent Platform"
+
 
 def test_every_ordered_project_has_a_label():
     """PROJECT_ORDER and PROJECT_LABEL drift apart silently. The browse UI falls
@@ -756,23 +802,23 @@ def test_render_makes_doc_id_searchable():
 # --- references + ARCH-in-KB (ARCH-196) --------------------------------------
 
 def test_ref_label_decisions_get_adr_others_get_slug():
-    assert E._ref_label("decision", "vivy/decisions/0021-ledger-engine") == "ADR-0021"
-    assert E._ref_label("decision", "constance/decisions/0001-foo") == "ADR-0001"
+    assert E._ref_label("decision", "alpha/decisions/0021-ledger-engine") == "ADR-0021"
+    assert E._ref_label("decision", "beta/decisions/0001-foo") == "ADR-0001"
     # a decision id without a numeric prefix falls back to the slug
     assert E._ref_label("decision", "shared/decisions/charter") == "charter"
     # non-decision kinds show their slug name
-    assert E._ref_label("reference", "vivy/reference/overnight-queue") == "overnight-queue"
-    assert E._ref_label("runbook", "vivy/runbooks/release") == "release"
+    assert E._ref_label("reference", "alpha/reference/overnight-queue") == "overnight-queue"
+    assert E._ref_label("runbook", "alpha/runbooks/release") == "release"
 
 
 def test_load_docs_carries_reflabel(tmp_path, monkeypatch):
     _seed_kb(monkeypatch, [
-        _row(id="vivy/decisions/0007-foo", kind="decision"),
-        _row(id="vivy/runbooks/deploy", kind="runbook"),
+        _row(id="alpha/decisions/0007-foo", kind="decision"),
+        _row(id="alpha/runbooks/deploy", kind="runbook"),
     ])
     by = {d["id"]: d for d in E.load_docs()}
-    assert by["vivy/decisions/0007-foo"]["reflabel"] == "ADR-0007"
-    assert by["vivy/runbooks/deploy"]["reflabel"] == "deploy"
+    assert by["alpha/decisions/0007-foo"]["reflabel"] == "ADR-0007"
+    assert by["alpha/runbooks/deploy"]["reflabel"] == "deploy"
 
 
 def test_arch_docs_surfaces_log_entries_as_arch_kind(tmp_path, monkeypatch):

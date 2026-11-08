@@ -34,7 +34,7 @@ def db(tmp_path, monkeypatch):
 
 def _mk(**kw):
     base = dict(id=control_db.new_signal_id(), source="ci", kind="test-result",
-                actor="ci-bot", ingested_by="ci-bot", product="vivy",
+                actor="ci-bot", ingested_by="ci-bot", product="alpha",
                 stream="e2e-stage-smoke", body="", meta={"status": "pass"},
                 privacy_class="internal")
     base.update(kw)
@@ -65,9 +65,9 @@ def test_latest_tile_is_the_newest_run_for_the_suite(db):
 def test_distinct_suites_each_get_their_own_tile(db):
     _seed(_mk(stream="e2e-stage-smoke", body="SMOKE-RUN"),
           _mk(stream="e2e-full", body="FULL-RUN"),
-          _mk(product="constance", stream="e2e-stage-smoke", body="CONSTANCE-RUN"))
+          _mk(product="beta", stream="e2e-stage-smoke", body="BETA-RUN"))
     html = e2e.live_html()
-    assert "SMOKE-RUN" in html and "FULL-RUN" in html and "CONSTANCE-RUN" in html
+    assert "SMOKE-RUN" in html and "FULL-RUN" in html and "BETA-RUN" in html
 
 
 def test_malformed_status_degrades_to_unknown(db):
@@ -357,12 +357,12 @@ def test_latest_tile_is_max_by_clock_not_first_in_fetch_order(db, monkeypatch):
     now = dt.datetime(2026, 9, 1, 12, 0, 0)
     older = library_client.SignalRecord(
         id="s-older", source="ci", stream="suite", kind="test-result",
-        actor="ci-bot", ingested_by="ci-bot", product="vivy", body="OLDER-RUN",
+        actor="ci-bot", ingested_by="ci-bot", product="alpha", body="OLDER-RUN",
         refs={}, meta={"status": "fail"}, privacy_class="internal",
         produced_at=now - dt.timedelta(days=1), ingested_at=now - dt.timedelta(days=1))
     newer = library_client.SignalRecord(
         id="s-newer", source="ci", stream="suite", kind="test-result",
-        actor="ci-bot", ingested_by="ci-bot", product="vivy", body="NEWER-RUN",
+        actor="ci-bot", ingested_by="ci-bot", product="alpha", body="NEWER-RUN",
         refs={}, meta={"status": "pass"}, privacy_class="internal",
         produced_at=now, ingested_at=now)
     # Deliberately out of produced_at order — newer sorts LAST here, so a
@@ -373,14 +373,14 @@ def test_latest_tile_is_max_by_clock_not_first_in_fetch_order(db, monkeypatch):
     assert '<div class="verdict">PASS</div>' in html
 
 
-# --- the copy explains why the page is vivy-only, not just scoped that way --
+# --- the copy explains why the page is alpha-only, not just scoped that way --
 #
 # The operator's ruling on this issue: /engineering/e2e is a staging-smoke page, not a
-# fleet CI dashboard, so it stays scoped to vivy. The one thing missing was a
+# fleet CI dashboard, so it stays scoped to alpha. The one thing missing was a
 # reason a reader can find at the moment of confusion.
 
 
-def test_copy_explains_why_only_vivy_is_tracked(db):
+def test_copy_explains_why_only_alpha_is_tracked(db):
     html = e2e.live_html()
     assert "only end-to-end suite on the fleet" in html
     assert "per-PR CI" in html

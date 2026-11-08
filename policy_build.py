@@ -144,7 +144,7 @@ def _form_html(agent: str, crew: str, model: str, table: dict[str, str] | None,
         f'<label>Agent<br><input type="text" name="agent" list="polAgents" '
         f'value="{escape(agent, quote=True)}" placeholder="e.g. scout"></label>'
         f'<label>Crew<br><input type="text" name="crew" list="polCrews" '
-        f'value="{escape(crew, quote=True)}" placeholder="e.g. vivy"></label>'
+        f'value="{escape(crew, quote=True)}" placeholder="e.g. acme"></label>'
         f'<label>Model<br><input type="text" name="model" list="polModels" '
         f'value="{escape(model, quote=True)}" placeholder="e.g. claude-sonnet-5"></label>'
         f'<button type="submit">Check</button>'
@@ -155,47 +155,38 @@ def _form_html(agent: str, crew: str, model: str, table: dict[str, str] | None,
     )
 
 
-def _policy_rows(resolution: library_client.PolicyResolution,
-                 crew_is_public: bool) -> list[tuple[str, str, str]]:
+_CLASS_DEFAULT_WHY = ("class default — {kind}; denied on every dispatch, whatever "
+                      "the crew, unless an explicit allow exempts it")
+
+
+def _policy_rows(resolution: library_client.PolicyResolution) -> list[tuple[str, str, str]]:
     """One row per target this triple has an opinion about: every explicit
     override plus every member of the two default classes. Each row carries
     (target, decision, why) — "why" is what lets a reader tell an explicit
     override (something a person set) from a class default (something the
     tool's own class carries).
 
-    **An exfiltration-class target on a public crew renders "allow".** The
-    Library serves `exfiltration_builtins` as denied for every crew, but the
-    decision that binds is agentctl's: it merges only the Library's `explicit`
-    rows (`_library_denials`) and adds its own `_EXFIL_DENY` only on a
-    private-crew dispatch or one with no repo. Showing the Library's "deny"
-    here told the operator WebFetch was denied to reviewer on convivy-orient, and
-    run-ec2be7ff fetched example.com under exactly that triple
-    (issue_01M1QY3HJTFHYDY3ZJPQ1PNHE5). Connector servers keep the Library's
-    answer: how agentctl enforces them has not been traced, so this page has
-    no evidence to relabel them with.
-
-    A crew not in the public list, including every crew while the registry is
-    unavailable, keeps "deny", which is what a private dispatch gets."""
+    **Every decision is the Library's.** agentctl's `_library_denials` applies
+    both classes to every dispatch, whatever the crew, and an explicit allow
+    exempts one target (platform/decisions/0048), which is the order
+    `PolicyResolution.decision` follows. This page used to relabel an
+    exfiltration-class target "allow" on a public crew, from when agentctl
+    denied that class only on private dispatches, and that told the operator
+    no row was needed on crews where WebFetch was denied
+    (issue_01M6ACT7T90P9R81ZSSH5K545N)."""
     targets = sorted(
         set(resolution.explicit)
         | set(resolution.connector_servers)
         | set(resolution.exfiltration_builtins))
     rows = []
     for target in targets:
-        decision = resolution.decision(target)
         if target in resolution.explicit:
             why = "explicit override"
         elif target in resolution.connector_servers:
-            why = "class default — account connector"
-        elif crew_is_public:
-            decision = "allow"
-            why = ("class default — exfiltration-capable built-in; agentctl "
-                   "denies it only on private-crew dispatches, so this public "
-                   "crew has it unless denied explicitly")
+            why = _CLASS_DEFAULT_WHY.format(kind="account connector")
         else:
-            why = ("class default — exfiltration-capable built-in; agentctl "
-                   "denies it on private-crew dispatches")
-        rows.append((target, decision, why))
+            why = _CLASS_DEFAULT_WHY.format(kind="exfiltration-capable built-in")
+        rows.append((target, resolution.decision(target), why))
     return rows
 
 
@@ -336,13 +327,13 @@ def _result_html(agent: str, crew: str, model: str, crews: list[str] | None,
     form's "every public crew" box names every crew in the registry, so a
     scoped viewer is given the form without it (E19·4)."""
     resolution = library_client.resolve_policy(agent, crew, model)
-    rows = _policy_rows(resolution, crews is not None and crew in crews)
+    rows = _policy_rows(resolution)
     if not resolution.explicit:
         lead = ds.empty_state(
             f'Nothing is explicitly denied — or allowed — for agent="{agent}" '
-            f'crew="{crew}" model="{model}". Account connectors are denied by '
-            f'default; exfiltration-capable built-ins are denied only on '
-            f'private-crew dispatches; everything else resolves to '
+            f'crew="{crew}" model="{model}". Account connectors and '
+            f'exfiltration-capable built-ins are denied on every crew unless '
+            f'an explicit allow exempts them; everything else resolves to '
             f'"{resolution.default}".')
     else:
         lead = (

@@ -64,6 +64,22 @@ def listed_models(monkeypatch):
     return catalog
 
 
+@pytest.fixture(autouse=True)
+def registry(tmp_path, monkeypatch):
+    """The project registry the crew-scope check reads, pinned so no test
+    here reads the machine's own. `convivy-deck`'s crew is `deck`, the one
+    live project whose crew key is not its slug."""
+    path = tmp_path / "projects.json"
+    path.write_text(json.dumps({
+        "_meta": {},
+        "alpha": {"crew": "alpha", "lifecycle": "active"},
+        "bosun": {"crew": "bosun", "lifecycle": "active"},
+        "convivy-deck": {"crew": "deck", "lifecycle": "active"},
+    }))
+    monkeypatch.setenv("PROJECTS_JSON", str(path))
+    return path
+
+
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setattr(control_db, "CONTROL_DB", tmp_path / "control.db")
@@ -74,7 +90,7 @@ def client(tmp_path, monkeypatch):
     roles = tmp_path / "roles.json"
     roles.write_text(json.dumps({
         "operator@example.com": {"role": "admin", "products": ["*"]},
-        "scoped@example.com": {"role": "policy_writer", "products": ["vivy"]},
+        "scoped@example.com": {"role": "policy_writer", "products": ["alpha"]},
     }))
     monkeypatch.setattr(authz, "ROLES", roles)
     # The project scope now comes from the Library (E19·1,
@@ -98,7 +114,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(access_identity, "JWT_CONFIG", jwtc)
 
     toks = tmp_path / "api-tokens.json"
-    toks.write_text(json.dumps({"agent-secret": {"name": "an-agent", "products": ["vivy"]}}))
+    toks.write_text(json.dumps({"agent-secret": {"name": "an-agent", "products": ["alpha"]}}))
     monkeypatch.setattr(api_common, "API_TOKENS", toks)
 
     with TestClient(srv.app, follow_redirects=False) as c:
@@ -114,7 +130,7 @@ def _agent(token="agent-secret"):
 
 
 def _body(**over):
-    base = {"agent": "scout", "crew": "vivy", "model": "claude-sonnet-5",
+    base = {"agent": "scout", "crew": "alpha", "model": "claude-sonnet-5",
             "target": "WebFetch", "decision": "deny"}
     base.update(over)
     return base
@@ -229,20 +245,57 @@ def test_a_role_granted_policy_write_can_write(client, monkeypatch):
 def test_a_product_scoped_writer_is_refused_for_a_crew_outside_its_scope(
         client, monkeypatch):
     """The PR #179 shape, applied here: scoped@example.com holds policy_write
-    but is scoped to product "vivy" only. A request CLAIMING crew="vivy"
+    but is scoped to product "alpha" only. A request CLAIMING crew="alpha"
     (this fixture's default body) must succeed; the same identity writing
-    for crew="constance" — a crew outside its own resolved product scope —
+    for crew="beta" — a crew outside its own resolved product scope —
     must be refused the same way a missing capability is, not treated as
     'holds policy_write, so anything goes'."""
     _grant_policy_write(monkeypatch)
     monkeypatch.setattr(library_client, "write_policy", lambda **kw: {
         **kw, "attested_by": "orient", "version": 1})
 
-    ok = _post(client, _human("scoped@example.com"), crew="vivy")
+    ok = _post(client, _human("scoped@example.com"), crew="alpha")
     assert ok.status_code == 200, ok.text
 
-    out_of_scope = _post(client, _human("scoped@example.com"), crew="constance")
+    out_of_scope = _post(client, _human("scoped@example.com"), crew="beta")
     assert out_of_scope.status_code == 404, out_of_scope.text
+
+
+def test_a_crew_is_checked_through_the_project_that_lists_it(client, monkeypatch):
+    """Scope holds project slugs and a row names a crew. `deck` is the crew
+    of project `convivy-deck`, so a writer scoped to `convivy-deck` may write
+    for `deck`, and one scoped to a project literally named `deck` may not
+    (the operator, 2026-10-27: every "every public crew" save 404'd on
+    `deck`)."""
+    _grant_policy_write(monkeypatch)
+    monkeypatch.setattr(library_client, "write_policy", lambda **kw: {
+        **kw, "attested_by": "orient", "version": 1})
+
+    authz.ROLES.write_text(json.dumps(
+        {"scoped@example.com": {"role": "policy_writer", "products": ["convivy-deck"]}}))
+    ok = _post(client, _human("scoped@example.com"), crew="deck")
+    assert ok.status_code == 200, ok.text
+
+    authz.ROLES.write_text(json.dumps(
+        {"scoped@example.com": {"role": "policy_writer", "products": ["deck"]}}))
+    refused = _post(client, _human("scoped@example.com"), crew="deck")
+    assert refused.status_code == 404, refused.text
+
+
+def test_a_crew_no_project_lists_is_checked_by_its_own_name(client, monkeypatch, registry):
+    """The fallback for a crew outside the registry, and for an unreadable
+    registry: the crew name against scope, the check this route made before."""
+    _grant_policy_write(monkeypatch)
+    monkeypatch.setattr(library_client, "write_policy", lambda **kw: {
+        **kw, "attested_by": "orient", "version": 1})
+    authz.ROLES.write_text(json.dumps(
+        {"scoped@example.com": {"role": "policy_writer", "products": ["gamma"]}}))
+    assert _post(client, _human("scoped@example.com"), crew="gamma").status_code == 200
+    assert _post(client, _human("scoped@example.com"), crew="alpha").status_code == 404
+
+    registry.unlink()
+    assert _post(client, _human("scoped@example.com"), crew="gamma").status_code == 200
+    assert _post(client, _human("scoped@example.com"), crew="alpha").status_code == 404
 
 
 def test_a_wildcard_scoped_writer_may_write_any_crew(client, monkeypatch):
@@ -440,7 +493,7 @@ def _all_crews_body(**over):
 
 @pytest.fixture
 def public_crews(monkeypatch):
-    crews = {"value": ["bosun", "deck", "vivy"]}
+    crews = {"value": ["bosun", "deck", "alpha"]}
 
     def load():
         if crews["value"] is None:
@@ -471,24 +524,38 @@ def test_all_public_crews_writes_the_row_once_per_crew(client, monkeypatch, publ
     r = client.post("/api/policy", json=_all_crews_body(decision="allow", model="sonnet"),
                     headers=_human("operator@example.com"))
     assert r.status_code == 200, r.text
-    assert [w["crew"] for w in written] == ["bosun", "deck", "vivy"]
+    assert [w["crew"] for w in written] == ["bosun", "deck", "alpha"]
     assert {(w["agent"], w["model"], w["target"], w["decision"]) for w in written} == {
         ("scout", "claude-sonnet-5", "WebFetch", "allow")}
     assert all(w["acting_human"] == "operator@example.com" for w in written)
-    assert r.json()["crews"] == ["bosun", "deck", "vivy"]
+    assert r.json()["crews"] == ["bosun", "deck", "alpha"]
 
 
 def test_a_writer_scoped_to_one_crew_is_refused_whole_and_nothing_is_written(
         client, monkeypatch, public_crews):
-    """scoped@example.com may write for vivy only. Every crew is checked before
+    """scoped@example.com may write for alpha only. Every crew is checked before
     the first write, so it gets the same 404 as any out-of-scope write and
-    vivy is not written either."""
+    alpha is not written either."""
     _grant_policy_write(monkeypatch)
     written = _recording_write(monkeypatch)
     r = client.post("/api/policy", json=_all_crews_body(),
                     headers=_human("scoped@example.com"))
     assert r.status_code == 404, r.text
     assert written == []
+
+
+def test_a_writer_scoped_to_every_public_project_writes_every_public_crew(
+        client, monkeypatch, public_crews):
+    """The operator's save on 2026-10-27, with scope listing project slugs and
+    no `*`: `deck` passes through `convivy-deck`, so all three are written."""
+    _grant_policy_write(monkeypatch)
+    authz.ROLES.write_text(json.dumps({"scoped@example.com": {
+        "role": "policy_writer", "products": ["alpha", "bosun", "convivy-deck"]}}))
+    written = _recording_write(monkeypatch)
+    r = client.post("/api/policy", json=_all_crews_body(),
+                    headers=_human("scoped@example.com"))
+    assert r.status_code == 200, r.text
+    assert [w["crew"] for w in written] == ["bosun", "deck", "alpha"]
 
 
 def test_crew_and_all_public_crews_together_are_refused(client, monkeypatch, public_crews):
@@ -532,14 +599,14 @@ def test_a_library_failure_part_way_names_what_was_written(client, monkeypatch, 
 
 
 def test_a_single_crew_write_answers_as_before(client, monkeypatch, public_crews):
-    """Without the flag the registry is not read and the response keeps its
-    single `crew` field."""
+    """Without the flag the public-crew list is not read and the response
+    keeps its single `crew` field."""
     public_crews["value"] = None
     written = _recording_write(monkeypatch)
-    r = _post(client, _human("operator@example.com"), crew="vivy")
+    r = _post(client, _human("operator@example.com"), crew="alpha")
     assert r.status_code == 200, r.text
-    assert r.json()["crew"] == "vivy"
-    assert [w["crew"] for w in written] == ["vivy"]
+    assert r.json()["crew"] == "alpha"
+    assert [w["crew"] for w in written] == ["alpha"]
 
 
 def test_a_registry_with_no_public_crew_writes_nothing_and_says_so(

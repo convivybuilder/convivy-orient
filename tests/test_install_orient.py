@@ -1,4 +1,4 @@
-"""bin/install-orient — the deploy-pin installer for Orient's seven launchd
+"""bin/install-orient — the deploy-pin installer for Orient's five launchd
 jobs (platform/decisions/0059).
 
 Every case here runs against a from-scratch fixture repository, never this
@@ -9,10 +9,11 @@ real `~/.local/deploy/convivy-orient` or a real `~/Library/LaunchAgents`, and
 nothing here touches this checkout's own credential files or `site/` output —
 the last of which is the point of the "never writes outside" test below.
 
-The fixture repo's `requirements.txt` is deliberately empty: the installer
-builds a real venv and runs a real `pip install -r requirements.txt` against
-it, and a requirements file with nothing in it needs no network access to
-satisfy, which is what keeps every case here hermetic and fast.
+The fixture repo's `requirements.lock.txt` is deliberately empty: the
+installer builds a real venv and runs a real hash-checked `pip install -r
+requirements.lock.txt` against it, and a lock with nothing in it needs no
+network access to satisfy, which is what keeps every case here hermetic and
+fast. An empty `requirements.txt` sits beside it, as in the real tree.
 
 The fixture's `serve.sh` is a stub, not a real copy — `test_serve_check.py`
 already covers the real preflight exhaustively, and re-running it here
@@ -61,7 +62,6 @@ PLIST_NAMES = [
     "com.convivy.orient-dashboard.plist",
     "com.convivy.code-health.plist",
     "com.convivy.kb-observability.plist",
-    "com.convivy.orient-github-capture.plist",
     "com.convivy.orient-deploy-watch.plist",
 ]
 
@@ -92,6 +92,7 @@ def _write_fixture_files(repo: Path, version_marker: str, extra: dict[str, str] 
     (repo / "serve.sh").write_text(STUB_SERVE_SH)
     (repo / "serve.sh").chmod(0o755)
     (repo / "requirements.txt").write_text("")
+    (repo / "requirements.lock.txt").write_text("")
     (repo / "server.py").write_text(f"VERSION = {version_marker!r}\n")
     (repo / "launchd").mkdir(exist_ok=True)
     for name in PLIST_NAMES:
@@ -177,7 +178,7 @@ def test_fresh_install_copies_code_builds_venv_and_records_commit(seed_repo, hom
     assert "deploy/convivy-orient/serve.sh" in plist.read_text()
 
 
-def test_all_seven_plists_are_installed(seed_repo, home):
+def test_all_six_plists_are_installed(seed_repo, home):
     repo = seed_repo("v1")
     result = run_installer("--repo=" + str(repo), home=home)
     assert result.returncode == 0, result.stdout + result.stderr
@@ -402,7 +403,7 @@ def test_a_drifted_live_plist_is_not_clobbered_without_force(seed_repo, home):
     assert "not overwritten" in (result.stdout + result.stderr).lower()
     assert live_plist.read_text() == "<!-- hand-edited, not the template -->\n"
 
-    # the other six, undrifted, still install normally
+    # the other four, undrifted, still install normally
     assert (launch_agents / "com.convivy.orient-dashboard.plist").is_file()
 
 

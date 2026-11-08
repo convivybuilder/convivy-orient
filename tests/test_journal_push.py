@@ -16,8 +16,9 @@ import urllib.request
 
 import pytest
 
-import blog_store
 import journal_push
+import library_client
+import library_fake
 
 JOURNAL_API = "https://api.github.com/repos/convivy/swabbys-journal/"
 SITE_DISPATCH = "https://api.github.com/repos/convivy/shipwright/actions/workflows/site.yml/dispatches"
@@ -38,14 +39,14 @@ def token(tmp_path, monkeypatch):
 
 @pytest.fixture
 def fixed_corpus(monkeypatch):
-    """`push_corpus` calls `blog_store.corpus()` — stubbed here so these tests
-    are about the GitHub mechanics, not the store. `test_blog_api.py` pins that
-    the route and this call produce the same dict."""
+    """`push_corpus` calls `_build_corpus()` — stubbed here so these tests are
+    about the GitHub mechanics, not the Archives read. The tests under
+    "the corpus itself" below cover `_build_corpus` directly."""
     data = {"posts": [{"slug": "a-post", "title": "A Post",
                        "date": "2026-07-07T22:43:48Z", "updated": "2026-07-07T22:43:48Z",
                        "author": "The operator", "authorship": "human", "body": "hello"}],
             "count": 1}
-    monkeypatch.setattr(blog_store, "corpus", lambda: data)
+    monkeypatch.setattr(journal_push, "_build_corpus", lambda: data)
     return data
 
 
@@ -416,3 +417,150 @@ def test_the_dispatch_token_can_come_from_the_environment(token, fixed_corpus, m
 
     assert out["site_build"] == {"dispatched": True, "reason": None}
     assert seen.auth[-1] == "Bearer env-dispatch-token"
+
+
+# --- the corpus itself: built from the Archives, published text only --------
+#
+# `_build_corpus` reads `kind=post` signals through `library_client` (CQ·170,
+# issue_01M5GBJ3H5BFX0CR83019T737D) — no local post table any more. These
+# tests write the same shapes `blog_api.py` and the retired
+# `bin/copy_posts_to_archives.py` wrote, through `library_fake`.
+
+
+@pytest.fixture
+def archives(monkeypatch):
+    library_fake.patch(monkeypatch)
+    yield
+
+
+def _entry(slug, *, title, body, revision, reason, author="writer@example.com",
+          authorship="human", produced_at, kind="post"):
+    library_client.create_signal(
+        source="writing_desk", kind=kind, actor=author, product="company",
+        stream=slug, body=body[:200], content=body,
+        meta={"title": title, "revision": revision, "authorship": authorship,
+              "reason": reason},
+        dedup_key=f"post:{slug}:{revision}", produced_at=produced_at,
+        human_reserved=(kind == "post_draft"))
+
+
+def test_a_save_with_no_publish_sends_nothing_new_to_the_journal(archives):
+    """The DoD's own property, asserted directly against `_build_corpus`
+    rather than only through the route that calls it: a `reason="save"` entry
+    on an already-published slug must not change what the corpus serves."""
+    _entry("a-post", title="A Post", body="original", revision=1,
+          reason="publish", produced_at="2026-07-01T00:00:00Z")
+    before = journal_push._build_corpus()
+
+    _entry("a-post", title="A Post", body="edited", revision=2,
+          reason="save", produced_at="2026-07-02T00:00:00Z")
+    after = journal_push._build_corpus()
+
+    assert after == before
+    assert after["posts"][0]["body"] == "original"
+
+
+def test_a_live_post_edited_and_republished_shows_the_new_text_at_the_old_date(archives):
+    """Editing a live post and re-publishing is the normal correction path.
+    The republish's own `reason="publish"` entry is what the corpus must
+    show — but the post keeps its ORIGINAL date, the way the retired
+    `blog_posts.published_at` column, set once, never moved."""
+    _entry("a-post", title="A Post", body="first", revision=1,
+          reason="publish", produced_at="2026-07-01T00:00:00Z")
+    _entry("a-post", title="A Post", body="second", revision=2,
+          reason="save", produced_at="2026-07-02T00:00:00Z")
+    _entry("a-post", title="A Post", body="second", revision=3,
+          reason="publish", produced_at="2026-07-03T00:00:00Z")
+
+    [post] = journal_push._build_corpus()["posts"]
+    assert post["body"] == "second"
+    assert post["date"] == "2026-07-01T00:00:00Z"
+    assert post["updated"] == "2026-07-03T00:00:00Z"
+
+
+def test_a_migrated_posts_current_entry_counts_as_published(archives):
+    """A slug the migration carried over with no post-deploy publish has only
+    a `reason="current"` entry, its mirror of Orient's old published-posts
+    row at copy time (`bin/copy_posts_to_archives.py`, now retired) — this
+    still counts as a publication, matching what that old store served for
+    such a post before this migration."""
+    _entry("old-post", title="Old Post", body="imported", revision="current",
+          reason="current", produced_at="2026-06-01T00:00:00Z")
+
+    [post] = journal_push._build_corpus()["posts"]
+    assert post["slug"] == "old-post"
+    assert post["body"] == "imported"
+    assert post["date"] == post["updated"] == "2026-06-01T00:00:00Z"
+
+
+def _marker(slug, *, produced_at, title="Old Post", author="writer@example.com",
+           authorship="human"):
+    """The one-time dating entry CQ·170 part A's one-time script wrote
+    (CQ·170 part A) — same shape that script writes, not `_entry`'s
+    `writing_desk`-sourced shape."""
+    library_client.create_signal(
+        source="blog_migration", kind="post", actor=author, product="company",
+        stream=slug, body="",
+        meta={"title": title, "revision": None, "authorship": authorship,
+              "reason": "first-published"},
+        dedup_key=f"post:{slug}:first-published", produced_at=produced_at)
+
+
+def test_a_first_published_marker_sets_the_date_not_the_migrated_current_entry(archives):
+    """**The defect this closes.** The Archives copy never carried
+    `blog_posts.published_at`, so a migrated post's `reason="current"` entry
+    is dated to the copy run rather than the original publication. The
+    marker's date must win for `date`; the `current` entry still supplies
+    everything else."""
+    _marker("old-post", produced_at="2026-07-07T22:43:48Z")
+    _entry("old-post", title="Old Post", body="imported", revision="current",
+          reason="current", produced_at="2026-08-24T16:33:52Z")
+
+    [post] = journal_push._build_corpus()["posts"]
+    assert post["date"] == "2026-07-07T22:43:48Z"
+    assert post["updated"] == "2026-08-24T16:33:52Z"
+    assert post["body"] == "imported"
+
+
+def test_a_post_with_no_marker_falls_back_to_its_first_publish_entry(archives):
+    """A post first published after CQ·170 part A's one-time
+    script ran has no marker at all — `date` must still come from the slug's own
+    first publication entry, exactly as before that script existed."""
+    _entry("a-post", title="A Post", body="first", revision=1,
+          reason="publish", produced_at="2026-07-01T00:00:00Z")
+    _entry("a-post", title="A Post", body="second", revision=2,
+          reason="publish", produced_at="2026-07-03T00:00:00Z")
+
+    [post] = journal_push._build_corpus()["posts"]
+    assert post["date"] == "2026-07-01T00:00:00Z"
+    assert post["updated"] == "2026-07-03T00:00:00Z"
+
+
+def test_the_marker_never_becomes_the_latest_entry(archives):
+    """The marker's `reason` is never in `_PUBLICATION_REASONS`, so it can
+    never win `latest` — asserted even when it is dated AFTER every real
+    publication entry, the shape most likely to tempt a `max()` over the
+    wrong set."""
+    _entry("old-post", title="Old Post", body="imported", revision="current",
+          reason="current", produced_at="2026-06-01T00:00:00Z")
+    _marker("old-post", produced_at="2026-12-01T00:00:00Z", title="Marker Title")
+
+    [post] = journal_push._build_corpus()["posts"]
+    assert post["body"] == "imported"
+    assert post["title"] == "Old Post"
+    assert post["updated"] == "2026-06-01T00:00:00Z"
+
+
+def test_a_draft_never_reaches_the_corpus(archives):
+    _entry("never-published", title="Never Published", body="x", revision=1,
+          reason="create", produced_at="2026-06-01T00:00:00Z", kind="post_draft")
+
+    assert journal_push._build_corpus()["posts"] == []
+
+
+def test_the_author_in_the_corpus_is_a_display_name_never_the_attested_email(archives):
+    _entry("a-post", title="A Post", body="x", revision=1, reason="publish",
+          produced_at="2026-07-01T00:00:00Z", author="writer@example.com")
+
+    [post] = journal_push._build_corpus()["posts"]
+    assert post["author"] == "Writer"

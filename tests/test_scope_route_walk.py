@@ -45,6 +45,7 @@ trusted again:
 """
 from __future__ import annotations
 
+import datetime as dt
 import inspect
 import json
 import re
@@ -59,7 +60,6 @@ import chart_house_build
 import control_db
 import dashboard_build
 import merge_queue_build
-import crew_registry
 import library_client
 import library_fake
 import project_build
@@ -82,6 +82,12 @@ BETA_LEAK_MARKERS = (BETA_SLUG, BETA_REPO, BETA_ITEM_ID)
 ALPHA_SLUG = "alpha"
 ALPHA_REPO = "alpha-repo"
 ALPHA_ITEM_ID = "issue_alpha_001"
+
+# Strips the per-request render-stamp footer (design_system.render_stamp) so
+# two renders taken moments apart can be compared for equality — used by the
+# ?product= out-of-scope-vs-nonexistent checks below (CQ·167,
+# issue_01M5C9ZDJ14Y55B54XGM5RW5J6).
+_STAMP_RE = re.compile(r'<footer class="render-stamp".*?</footer>', re.S)
 
 
 # --- route discovery (so a new route cannot dodge this walk) ----------------
@@ -141,6 +147,13 @@ SCOPED_AND_TESTED = frozenset({
     "/", "/cost-performance", "/activity",
     "/engineering/merge-queue", "/engineering/changelog", "/engineering/e2e",
     "/products/release-notes", "/reference/briefings",
+    # CQ·156, issue_01M57NH489EASKMATJ8QFED5EC:
+    "/model-comparison",
+    # CQ·160, issue_01M57NRMZSZW5B5VNWCM4HVZPV: project index
+    "/projects",
+    # CQ·164, issue_01M57NS4ZPTBGG1QCMXX5YCPXF: each project's open
+    # corrections, read live from the Library stub this walk seeds.
+    "/tech-debt",
 })
 
 # Routes this walk does not render, each with the reason — see the module
@@ -192,10 +205,11 @@ _EXCLUDED = {
     # underlying section function instead (E19·4,
     # issue_01M35K5JQ7Z7MHYZGWRSB5F85M — `_cost_performance_section`,
     # `_activity_section`, `_velocity_section`, `_code_health_section`,
-    # `_e2e_section` filter to scope; `_spending_section`, `_warrant_
-    # section`, `_security_section`, `_kb_section` are fleet-only and
-    # omitted from the grid for a scoped viewer), proven by overview_
-    # build's own section-level tests in tests/test_home_overview_build.py.
+    # `_e2e_section`, `_model_comparison_section` (CQ·156) filter to scope;
+    # `_spending_section`, `_warrant_section`, `_security_section`,
+    # `_kb_section` are fleet-only and omitted from the grid for a scoped
+    # viewer), proven by overview_build's own section-level tests in
+    # tests/test_home_overview_build.py.
     "/overview": "shows no project name at all (card labels + aggregate numbers only); "
                 "its sections are scoped individually, covered by "
                 "tests/test_home_overview_build.py's own section tests",
@@ -277,7 +291,7 @@ def client(tmp_path, monkeypatch):
         "alpha": {"crew": "alpha", "lifecycle": "active", "repos": [ALPHA_REPO]},
         "beta": {"crew": "beta", "lifecycle": "active", "repos": [BETA_REPO]},
     }))
-    monkeypatch.setattr(crew_registry, "REGISTRY", registry)
+    monkeypatch.setenv("PROJECTS_JSON", str(registry))
 
     # crews_build's own data sources, none of which library_fake.patch covers
     # (it is not Orient's own vault data — see crews_build's module
@@ -290,6 +304,36 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(library_client, "list_leases",
                         lambda **k: library_client.LeaseListResult(leases=[], policy=None))
     monkeypatch.setattr(library_client, "list_lease_refusals", lambda **k: [])
+    # /model-comparison (CQ·156, issue_01M57NH489EASKMATJ8QFED5EC) reads
+    # `library_client.list_finished_runs` directly, which `library_fake.patch`
+    # above does not cover (it stands in for `list_signals`, not the
+    # separate `/signals` read `list_finished_runs` makes). One alpha run and
+    # one beta run, produced "now" so both fall inside the page's own default
+    # trailing-window — a fixed past date would risk the beta marker check
+    # below passing vacuously once the default window rolls past it.
+    _now = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+
+    def _fake_finished_runs(since, until=None):
+        return [
+            library_client.FinishedRun(
+                signal_id="res_alpha", product=ALPHA_SLUG, run="run-alpha",
+                persona="coder", repo=ALPHA_REPO, work_item=ALPHA_ITEM_ID,
+                model="claude-sonnet-5",
+                cost=library_client.FinishedRunCost(usd=1.0, tokens=None, by_model=None),
+                outcome={"exit_status": "completed", "terminal_reason": None},
+                produced_at=_now, ingested_at=_now,
+                model_resolved="claude-sonnet-5", exit_status="completed"),
+            library_client.FinishedRun(
+                signal_id="res_beta", product=BETA_SLUG, run="run-beta",
+                persona="coder", repo=BETA_REPO, work_item=BETA_ITEM_ID,
+                model="claude-sonnet-5",
+                cost=library_client.FinishedRunCost(usd=1.0, tokens=None, by_model=None),
+                outcome={"exit_status": "completed", "terminal_reason": None},
+                produced_at=_now, ingested_at=_now,
+                model_resolved="claude-sonnet-5", exit_status="completed"),
+        ]
+
+    monkeypatch.setattr(library_client, "list_finished_runs", _fake_finished_runs)
     monkeypatch.setattr(library_client, "list_live_runs",
                         lambda: library_client.LiveRunsResult(
                             runs=[], available=True, reason=None, generated_at=None,
@@ -300,8 +344,16 @@ def client(tmp_path, monkeypatch):
     # tests/test_project_build.py's own `_stub_fetch` uses.
     monkeypatch.setattr(project_build, "_fetch", lambda name, force=False: {
         "repo_exists": True, "open_prs": [], "merged_prs": [], "commits": [],
-        "bead": None, "bead_error": None,
+        "bead": None, "bead_error": None, "kb_history": [], "kb_history_error": None,
     })
+    # /projects index (CQ·160) lists projects from known_projects() filtered by
+    # the viewer's scope — the fixture's alpha/beta repos are not in that set,
+    # so add them, the same way the per-project tests below do. Patches the
+    # function itself (not a cached attribute) so the override takes effect
+    # on every call, the same reason production reads it live (CQ-171).
+    _orig_known_projects = project_build.known_projects
+    monkeypatch.setattr(project_build, "known_projects",
+                        lambda: _orig_known_projects() | {ALPHA_REPO, BETA_REPO})
 
     # dashboard_build.normalize() (/cost-performance) reads these jsonl
     # ledgers from disk — one scratch scorecard row per project, each with
@@ -316,7 +368,6 @@ def client(tmp_path, monkeypatch):
          "pr_state": "MERGED", "merged": True, "pr_number": 2},
     ]) + "\n")
     monkeypatch.setattr(dashboard_build, "SCORECARD", scorecard)
-    monkeypatch.setattr(dashboard_build, "PA_LEDGER", tmp_path / "absent-pa.jsonl")
     monkeypatch.setattr(dashboard_build, "JUDGE", tmp_path / "absent-judge.jsonl")
 
     # activity_build (/activity) reads its own session snapshot from disk —
@@ -470,6 +521,46 @@ def test_scoped_route_assertion_set_is_not_vacuous(client):
             f"viewer — the scoped assertion above would pass vacuously")
 
 
+# --- ?product= on /engineering/changelog and /products/release-notes ------
+# (CQ·167, issue_01M5C9ZDJ14Y55B54XGM5RW5J6): the project page's link to each
+# fleet-wide page now actually filters, and an out-of-scope product must not
+# be confirmable by filtering on it.
+
+
+def test_changelog_product_query_filters_and_hides_out_of_scope(client):
+    _seed_two_projects()
+    filtered = client.get(f"/engineering/changelog?product={ALPHA_SLUG}",
+                          headers={srv.EMAIL_HEADER: EMAIL})
+    assert filtered.status_code == 200
+    assert "Alpha entry" in filtered.text
+    assert "Beta entry" not in filtered.text
+
+    out_of_scope = client.get(f"/engineering/changelog?product={BETA_SLUG}",
+                              headers={srv.EMAIL_HEADER: EMAIL})
+    nonexistent = client.get("/engineering/changelog?product=does-not-exist",
+                             headers={srv.EMAIL_HEADER: EMAIL})
+    assert out_of_scope.status_code == nonexistent.status_code == 200
+    assert _STAMP_RE.sub("", out_of_scope.text) == _STAMP_RE.sub("", nonexistent.text)
+    assert BETA_SLUG not in out_of_scope.text
+
+
+def test_release_notes_product_query_filters_and_hides_out_of_scope(client):
+    _seed_two_projects()
+    filtered = client.get(f"/products/release-notes?product={ALPHA_SLUG}",
+                          headers={srv.EMAIL_HEADER: EMAIL})
+    assert filtered.status_code == 200
+    assert "Alpha release note" in filtered.text
+    assert "Beta release note" not in filtered.text
+
+    out_of_scope = client.get(f"/products/release-notes?product={BETA_SLUG}",
+                              headers={srv.EMAIL_HEADER: EMAIL})
+    nonexistent = client.get("/products/release-notes?product=does-not-exist",
+                             headers={srv.EMAIL_HEADER: EMAIL})
+    assert out_of_scope.status_code == nonexistent.status_code == 200
+    assert _STAMP_RE.sub("", out_of_scope.text) == _STAMP_RE.sub("", nonexistent.text)
+    assert BETA_SLUG not in out_of_scope.text
+
+
 # --- the dynamic per-id pages: an out-of-scope id answers like an unknown one
 
 
@@ -525,8 +616,9 @@ def test_a_reference_doc_inside_scope_renders(client):
 
 
 def test_a_project_page_outside_scope_answers_like_an_unknown_name(client, monkeypatch):
-    monkeypatch.setattr(project_build, "KNOWN_PROJECTS",
-                        project_build.KNOWN_PROJECTS | {ALPHA_REPO, BETA_REPO})
+    orig = project_build.known_projects
+    monkeypatch.setattr(project_build, "known_projects",
+                        lambda: orig() | {ALPHA_REPO, BETA_REPO})
     unknown = client.get("/projects/not-a-real-project", headers={srv.EMAIL_HEADER: EMAIL})
     out_of_scope = client.get(f"/projects/{BETA_REPO}", headers={srv.EMAIL_HEADER: EMAIL})
     assert unknown.status_code == out_of_scope.status_code == 404
@@ -534,8 +626,9 @@ def test_a_project_page_outside_scope_answers_like_an_unknown_name(client, monke
 
 
 def test_a_project_page_inside_scope_renders(client, monkeypatch):
-    monkeypatch.setattr(project_build, "KNOWN_PROJECTS",
-                        project_build.KNOWN_PROJECTS | {ALPHA_REPO, BETA_REPO})
+    orig = project_build.known_projects
+    monkeypatch.setattr(project_build, "known_projects",
+                        lambda: orig() | {ALPHA_REPO, BETA_REPO})
     r = client.get(f"/projects/{ALPHA_REPO}", headers={srv.EMAIL_HEADER: EMAIL})
     assert r.status_code == 200
     assert BETA_REPO not in r.text

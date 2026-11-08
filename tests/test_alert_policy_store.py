@@ -18,7 +18,7 @@ import control_db
 @pytest.fixture
 def db(tmp_path, monkeypatch):
     """A fresh control.db on a temp path, schema at head — matching
-    test_blog_store.py's own fixture."""
+    test_control_db.py's own fixture."""
     monkeypatch.setattr(control_db, "CONTROL_DB", tmp_path / "control.db")
     monkeypatch.setattr(control_db, "_engine", None)
     monkeypatch.setattr(control_db, "_engine_url", None)

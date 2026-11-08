@@ -83,8 +83,15 @@ DEPLOY_DIR = Path.home() / ".local" / "deploy" / PRODUCT
 DEPLOYED_COMMIT_FILE = DEPLOY_DIR / "DEPLOYED_COMMIT"
 
 LAUNCHD_LABEL = "com.convivy.orient"
+LAUNCHD_PLIST = Path.home() / "Library" / "LaunchAgents" / f"{LAUNCHD_LABEL}.plist"
 SERVER_HOST = "127.0.0.1"
 SERVER_PORT = 8099
+
+# launchd's own wording when a bootout removed the job rather than leaving it
+# loaded (issue_01M58JG5N2EVZVWF6QJF3NAJTE) — matched verbatim so a kickstart
+# failure for any other reason (a hung process, a permissions error) is never
+# mistaken for this one and silently bootstrapped over.
+KICKSTART_SERVICE_MISSING_MARKER = "Could not find service"
 
 INSTALL_TIMEOUT_S = 600  # bin/install-orient builds a fresh venv from
 # requirements.txt every run (git archive, pip install, serve.sh --check) —
@@ -348,17 +355,41 @@ def run_install() -> subprocess.CompletedProcess:
     installer (and this script) are read from, same as every git call above.
     No `--force`: a live plist that has drifted from its template is refused,
     not clobbered, by design — see PLIST_REFUSED_MARKER and `run`'s use of
-    it — since auto-clobbering seven launchd definitions unattended on a
+    it — since auto-clobbering five launchd definitions unattended on a
     5-minute cron is worse than the plist silently not updating.
     """
     return _run([str(REPO_DIR / "bin" / "install-orient")], INSTALL_TIMEOUT_S)
 
 
-def kickstart() -> None:
-    cp = _run(["launchctl", "kickstart", "-k", f"gui/{_gui_uid()}/{LAUNCHD_LABEL}"],
+def kickstart() -> bool:
+    """Returns True iff the launchd job had been removed and this call had to
+    bootstrap it back before the restart could proceed; False on an ordinary
+    kickstart.
+
+    Handles `-k` finding no loaded service at all (issue_01M58JG5N2EVZVWF6QJF3NAJTE):
+    on 2026-10-16 another process booted the job out of launchd while its
+    server kept running; on 2026-10-18 this script's own `kickstart -k` call
+    finally ended that orphaned server, and because launchd had already
+    condemned the job from the earlier bootout, it removed the job instead
+    of respawning it — so every `-k` after failed with "Could not find
+    service" until a human noticed and ran `launchctl bootstrap` by hand,
+    13 minutes down. Bootstrapping the plist back in that one case, then
+    falling through to the normal restart wait, closes that gap without
+    changing how any other kickstart failure is handled."""
+    uid = _gui_uid()
+    cp = _run(["launchctl", "kickstart", "-k", f"gui/{uid}/{LAUNCHD_LABEL}"],
               LOCAL_TIMEOUT_S)
-    if cp.returncode != 0:
+    if cp.returncode == 0:
+        return False
+    if KICKSTART_SERVICE_MISSING_MARKER not in cp.stderr:
         raise DeployWatchError(f"launchctl kickstart failed: {cp.stderr.strip()}")
+    bootstrap_cp = _run(["launchctl", "bootstrap", f"gui/{uid}", str(LAUNCHD_PLIST)],
+                        LOCAL_TIMEOUT_S)
+    if bootstrap_cp.returncode != 0:
+        raise DeployWatchError(
+            f"launchctl kickstart failed: {cp.stderr.strip()}; "
+            f"bootstrap also failed: {bootstrap_cp.stderr.strip()}")
+    return True
 
 
 def _gui_uid() -> str:
@@ -635,12 +666,22 @@ def run() -> int:
         return 0
 
     try:
-        kickstart()
+        bootstrapped = kickstart()
     except DeployWatchError as ex:
         print(str(ex), file=sys.stderr)
         post_failure_signal("kickstart failed", f"deploy-watch:fail:kickstart:{local}",
                              {"target": local})
         return 1
+
+    if bootstrapped:
+        # The restart below still proceeds — bootstrapping put the job back,
+        # so there's a process to wait on now — but the bootout that made it
+        # necessary stays worth a human's attention, so this posts the same
+        # failure signal a kickstart that couldn't recover at all would.
+        print(f"launchd job {LAUNCHD_LABEL} was missing; bootstrapped from "
+              f"{LAUNCHD_PLIST}", file=sys.stderr)
+        post_failure_signal("kickstart failed", f"deploy-watch:fail:kickstart:{local}",
+                             {"target": local})
 
     result = wait_for_restart(local, served, initial_started_commit=started)
     waited_s = RESTART_TIMEOUT_S

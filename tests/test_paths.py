@@ -218,17 +218,19 @@ def test_resolve_tool_ignores_a_directory_of_that_name_in_the_deploy_area(tmp_pa
 # (account builder-rehearsal on macmini, 2026-10-02) died at import with
 # `PermissionError` from `resolve_tool`'s `is_file()`, because stat on another
 # person's unreadable home raises EACCES rather than returning False. The same
-# literal shape sat in `roster_build.PROJECTS` and `crew_registry.REGISTRY`.
+# literal shape sat in roster_build's old `PROJECTS` table and `crew_registry`'s
+# registry path.
 
 
 _FOREIGN_HOME_PROBE = """
 import json, paths, crew_registry, roster_build
+rows = roster_build.discover_projects()
 print(json.dumps({
     "deploy_bin": str(paths._DEPLOY_TOOL_BIN),
     "kb_eval": paths.resolve_tool("kb-eval"),
-    "registry": str(crew_registry.REGISTRY),
-    "repos": [repo for _, _, repo, _ in roster_build.PROJECTS],
-    "repo_agents": [roster_build.load_repo_agents(repo) for _, _, repo, _ in roster_build.PROJECTS],
+    "registry": str(crew_registry.resolve_registry_path()),
+    "repos": [repo for _, _, repo, _ in rows],
+    "repo_agents": [roster_build.load_repo_agents(repo) for _, _, repo, _ in rows],
 }))
 """
 
@@ -245,13 +247,32 @@ def test_a_second_account_resolves_every_path_under_its_own_home(tmp_path):
     own_bin.mkdir(parents=True)
     (own_bin / "kb-eval").write_text("#!/bin/sh\n")
     (own_bin / "kb-eval").chmod(0o755)
-    env = {k: v for k, v in os.environ.items() if k != "PROJECTS_JSON"}
+    # No machine keeps a registry file any more (platform decision 0098), so
+    # the probe names one under the account's own home through the override.
+    own_registry = home / "registry.json"
+    own_registry.write_text("{}")
+    # An empty registry (CQ-171 slice 6: roster_build no longer carries a
+    # hardcoded row list to fall back to) means discover_projects() finds a
+    # row only via its own filesystem scan of CONVIVY_ROOT — already
+    # home-relative by construction, but a project needs to actually be
+    # there for the "repos" assertion below to have anything to check.
+    probe_project = home / "Convivy" / "probe-project" / ".claude" / "agents"
+    probe_project.mkdir(parents=True)
+    (probe_project / "probe-coder.md").write_text(
+        "---\nname: probe-coder\ndescription: Probes a path.\n---\n\nBody.\n",
+        encoding="utf-8")
+    env = {k: v for k, v in os.environ.items() if k not in ("PROJECTS_JSON", "BUILDER_ROOT")}
     env["HOME"] = str(home)
+    env["PROJECTS_JSON"] = str(own_registry)
     out = subprocess.run([sys.executable, "-c", _FOREIGN_HOME_PROBE], cwd=REPO_ROOT,
                          env=env, capture_output=True, text=True, check=True).stdout
     got = json.loads(out)
     assert got["deploy_bin"] == str(own_bin)
     assert got["kb_eval"] == str(own_bin / "kb-eval")
-    assert got["registry"] == str(home / "Convivy" / "agent-platform" / "config" / "projects.json")
+    assert got["registry"] == str(own_registry)
     assert got["repos"] and all(r.startswith(str(home / "Convivy") + "/") for r in got["repos"])
-    assert got["repo_agents"] == [{} for _ in got["repos"]]
+    # load_repo_agents reads the probe project's own agent file from UNDER
+    # the foreign home, not some operator-literal path elsewhere.
+    assert got["repo_agents"] == [{"probe-coder": {
+        "slug": "probe-coder", "title": "Probe Coder", "model": "",
+        "desc": "Probes a path."}}]

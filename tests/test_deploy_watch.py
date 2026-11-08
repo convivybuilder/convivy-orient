@@ -4,7 +4,7 @@ decide_action is pure and carries the three-independently-stale-things logic
 from ADR-0059's deploy-area cutover (checkout vs deploy area vs running
 process), so it's tested directly across the four-hash state space. The rest
 is impure (git/launchctl/socket/HTTP/subprocess) and tested through
-monkeypatched seams, same as github_capture.py.
+monkeypatched seams.
 """
 from __future__ import annotations
 
@@ -577,6 +577,133 @@ def test_run_fails_loud_when_kickstart_itself_fails(monkeypatch):
                         or dw.RestartResult(dw.RESTART_REACHED, expected, True))
     assert dw.run() == 1
     assert restart_calls == []  # never waits for a restart that was never launched
+
+
+# --- kickstart(): bootstraps a launchd job removed by a bootout (issue_01M58JG5N2EVZVWF6QJF3NAJTE) ---
+#
+# These three exercise the real `kickstart()`, not the `_patch_common` stand-in
+# (`_patch_common` always installs a fake that never touches `_run` at all) —
+# each restores the real function after calling `_patch_common` and stubs
+# `_run` instead, so the bootstrap argv and the restart wait that follows are
+# both genuinely exercised, not asserted against a double.
+
+
+def test_run_bootstraps_a_missing_launchd_job_and_still_waits_for_restart(monkeypatch):
+    # 2026-10-18: a bootout by another process removed the job between
+    # cycles, so `-k` had nothing to kickstart. Recovering here, then
+    # proceeding to the same restart wait an ordinary kickstart gets, is the
+    # fix — a human no longer has to notice and bootstrap it by hand.
+    real_kickstart = dw.kickstart
+    _patch_common(monkeypatch, heads=("abc", "abc"), served="old")
+    monkeypatch.setattr(dw, "kickstart", real_kickstart)
+
+    run_argv = []
+
+    def fake_run(argv, timeout_s):
+        run_argv.append(argv)
+        if argv[:2] == ["id", "-u"]:
+            return _FakeRun(returncode=0, stdout="501\n")
+        if argv[:3] == ["launchctl", "kickstart", "-k"]:
+            return _FakeRun(returncode=1,
+                             stderr='Could not find service "com.convivy.orient" '
+                                    'in domain for user gui: 501')
+        if argv[:2] == ["launchctl", "bootstrap"]:
+            return _FakeRun(returncode=0)
+        raise AssertionError(f"unexpected argv: {argv}")
+
+    monkeypatch.setattr(dw, "_run", fake_run)
+
+    posted = []
+    monkeypatch.setattr(dw, "post_failure_signal",
+                        lambda body, key, refs: posted.append((body, key, refs)))
+
+    restart_calls = []
+
+    def fake_wait_for_restart(expected, initial, initial_started_commit=None,
+                              timeout_s=None, poll_s=None):
+        restart_calls.append((expected, initial))
+        return dw.RestartResult(dw.RESTART_REACHED, expected, True)
+
+    monkeypatch.setattr(dw, "wait_for_restart", fake_wait_for_restart)
+
+    assert dw.run() == 0
+    assert restart_calls == [("abc", "old")]  # the restart wait ran
+    bootstrap_argv = [a for a in run_argv if a[:2] == ["launchctl", "bootstrap"]]
+    assert bootstrap_argv == [["launchctl", "bootstrap", "gui/501", str(dw.LAUNCHD_PLIST)]]
+    # Recovering doesn't make the bootout silent — the bootout that made it
+    # necessary still reaches a human the same way an unrecovered kickstart
+    # failure would.
+    assert posted == [("kickstart failed", "deploy-watch:fail:kickstart:abc",
+                        {"target": "abc"})]
+
+
+def test_run_does_not_bootstrap_when_kickstart_fails_for_another_reason(monkeypatch):
+    # An ordinary kickstart failure (a hung process, a permissions error)
+    # must behave exactly as before: no bootstrap, no restart wait, loud exit 1.
+    real_kickstart = dw.kickstart
+    _patch_common(monkeypatch, heads=("abc", "abc"), served="old")
+    monkeypatch.setattr(dw, "kickstart", real_kickstart)
+
+    run_argv = []
+
+    def fake_run(argv, timeout_s):
+        run_argv.append(argv)
+        if argv[:2] == ["id", "-u"]:
+            return _FakeRun(returncode=0, stdout="501\n")
+        if argv[:3] == ["launchctl", "kickstart", "-k"]:
+            return _FakeRun(returncode=1, stderr="some other launchctl error")
+        raise AssertionError(f"unexpected argv: {argv}")
+
+    monkeypatch.setattr(dw, "_run", fake_run)
+
+    restart_calls = []
+    monkeypatch.setattr(dw, "wait_for_restart", lambda *a, **k: restart_calls.append(1))
+
+    assert dw.run() == 1
+    assert restart_calls == []
+    assert all(a[:2] != ["launchctl", "bootstrap"] for a in run_argv)
+
+
+def test_run_reports_failure_when_the_bootstrap_itself_fails(monkeypatch):
+    # The service is genuinely gone AND the recovery attempt fails too (e.g.
+    # the plist itself is broken) — this must still report, not loop forever
+    # trying to wait on a restart that was never launched.
+    real_kickstart = dw.kickstart
+    _patch_common(monkeypatch, heads=("abc", "abc"), served="old")
+    monkeypatch.setattr(dw, "kickstart", real_kickstart)
+
+    run_argv = []
+
+    def fake_run(argv, timeout_s):
+        run_argv.append(argv)
+        if argv[:2] == ["id", "-u"]:
+            return _FakeRun(returncode=0, stdout="501\n")
+        if argv[:3] == ["launchctl", "kickstart", "-k"]:
+            return _FakeRun(returncode=1,
+                             stderr='Could not find service "com.convivy.orient" '
+                                    'in domain for user gui: 501')
+        if argv[:2] == ["launchctl", "bootstrap"]:
+            return _FakeRun(returncode=1, stderr="bootstrap failed: already bootstrapped")
+        raise AssertionError(f"unexpected argv: {argv}")
+
+    monkeypatch.setattr(dw, "_run", fake_run)
+
+    restart_calls = []
+    monkeypatch.setattr(dw, "wait_for_restart", lambda *a, **k: restart_calls.append(1))
+    posted = []
+    monkeypatch.setattr(dw, "post_failure_signal",
+                        lambda body, key, refs: posted.append((body, key)))
+
+    assert dw.run() == 1
+    # The bootstrap was actually attempted, not skipped the way an ordinary
+    # kickstart failure skips it — distinguishes this from
+    # test_run_does_not_bootstrap_when_kickstart_fails_for_another_reason,
+    # which reaches the same exit code and signal by a different path.
+    bootstrap_argv = [a for a in run_argv if a[:2] == ["launchctl", "bootstrap"]]
+    assert bootstrap_argv == [["launchctl", "bootstrap", "gui/501", str(dw.LAUNCHD_PLIST)]]
+    assert restart_calls == []
+    assert len(posted) == 1
+    assert posted[0] == ("kickstart failed", "deploy-watch:fail:kickstart:abc")
 
 
 def test_run_fails_loud_when_restart_is_wedged(monkeypatch):

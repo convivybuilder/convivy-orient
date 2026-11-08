@@ -1,31 +1,39 @@
 """Blog Posts: every Writing Desk post, readable in full (the operator, 2026-09-24).
 
-Rendered against a real control.db, so the page reads the same store the Writing
-Desk writes and convivy.com's corpus serves, rather than a stub of it.
+Rendered against `library_fake`, seeded with the same Archives entries the
+Writing Desk writes (`blog_api`), so the page reads what the desk stores.
 """
 from __future__ import annotations
 
 import pytest
 
+import blog_api
 import blog_posts_build
-import blog_store
-import control_db
+import library_client
+import library_fake
 
 
 @pytest.fixture
-def db(tmp_path, monkeypatch):
-    monkeypatch.setattr(control_db, "CONTROL_DB", tmp_path / "control.db")
-    monkeypatch.setattr(control_db, "_engine", None)
-    monkeypatch.setattr(control_db, "_engine_url", None)
-    control_db.init_db()
+def db(monkeypatch):
+    library_fake.patch(monkeypatch)
     yield
 
 
+def _entry(slug, *, title, body, author="operator@example.com", authorship="human",
+           kind=blog_api.KIND_POST, revision=1):
+    library_client.create_signal(
+        source=blog_api.SOURCE, kind=kind, actor=author, product=blog_api.PRODUCT,
+        stream=slug, body=body[:200], content=body,
+        meta={"title": title, "revision": revision, "authorship": authorship,
+              "reason": "publish" if kind == blog_api.KIND_POST else "create"},
+        dedup_key=f"post:{slug}:{revision}",
+        human_reserved=(kind == blog_api.KIND_DRAFT))
+
+
 def _seed():
-    blog_store.publish(slug="live-one", title="A Live Post", body="PUBLISHEDBODY **bold**",
-                       author="operator@example.com", authorship="human", actor="operator@example.com")
-    blog_store.create(slug="draft-one", title="A Draft", body="DRAFTBODY",
-                      author="operator@example.com", authorship="llm")
+    _entry("live-one", title="A Live Post", body="PUBLISHEDBODY **bold**")
+    _entry("draft-one", title="A Draft", body="DRAFTBODY", authorship="llm",
+           kind=blog_api.KIND_DRAFT)
 
 
 def test_a_published_post_renders_in_full_with_its_byline(db):
@@ -62,9 +70,8 @@ def test_an_empty_store_says_so_rather_than_rendering_nothing(db):
 
 
 def test_a_title_and_body_written_as_markup_are_escaped(db):
-    blog_store.publish(slug="xss", title="<script>alert(1)</script>",
-                       body="<img src=x onerror=alert(2)>", author="The operator",
-                       authorship="human", actor="operator@example.com")
+    _entry("xss", title="<script>alert(1)</script>", body="<img src=x onerror=alert(2)>",
+           author="The operator")
     html = blog_posts_build.live_html("operator@example.com", can_see_drafts=False)
     assert "<script>alert(1)</script>" not in html
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
@@ -74,11 +81,30 @@ def test_a_title_and_body_written_as_markup_are_escaped(db):
 def test_a_byline_with_markup_characters_is_escaped_exactly_once(db):
     """A non-email author passes through `_display_author` unchanged, so an `&`
     or a quote reaches the byline. Escaping it twice would print `&amp;amp;`."""
-    blog_store.publish(slug="duo", title="T", body="b", author="The operator & O'Brien <x>",
-                       authorship="human", actor="operator@example.com")
+    _entry("duo", title="T", body="b", author="The operator & O'Brien <x>")
     html = blog_posts_build.live_html("operator@example.com", can_see_drafts=False)
     assert "The operator &amp; O&#x27;Brien &lt;x&gt;" in html
     assert "&amp;amp;" not in html and "<x>" not in html
+
+
+def test_the_latest_revision_is_shown_and_a_reader_causes_no_draft_read(db, monkeypatch):
+    """A post saved twice shows its latest text. A viewer without drafts makes
+    the page ask the Library for no `post_draft` row, on any credential."""
+    _entry("twice", title="Twice", body="FIRSTTEXT", revision=1)
+    _entry("twice", title="Twice", body="SECONDTEXT", revision=2)
+    _seed()
+    asked = []
+    real = library_client.list_signals
+
+    def spy(**kw):
+        asked.append(kw)
+        return real(**kw)
+
+    monkeypatch.setattr(library_client, "list_signals", spy)
+    html = blog_posts_build.live_html("operator@example.com", can_see_drafts=False)
+    assert "SECONDTEXT" in html and "FIRSTTEXT" not in html
+    assert asked and all(blog_api.KIND_DRAFT not in (kw.get("kind") or []) for kw in asked)
+    assert not any(kw.get("human_reserved") for kw in asked)
 
 
 def test_it_is_a_documents_subnav_entry():

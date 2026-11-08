@@ -3,7 +3,7 @@
 An issue's `type` says what kind of work it is and `severity` says how much it
 matters. Neither says WHO CAN DO IT, and until now nothing did.
 
-The gap had a concrete cost on 2026-07-26. A vivy decision stated in plain words
+The gap had a concrete cost on 2026-07-26. A product decision stated in plain words
 that setting TOKEN_ENCRYPTION_KEY "needs an operator action in the Render
 dashboard, so no dispatched coder can close it and the overnight queue cannot
 drain it" — and when that decision was swept into the issue queue, there was no

@@ -21,7 +21,7 @@ import push_api
 import server as srv
 from models import PushSubscription
 
-AGENT_TOKEN = "tok-agent-vivy"
+AGENT_TOKEN = "tok-agent-alpha"
 
 _GOOD_ENDPOINT = "https://fcm.googleapis.com/fcm/send/abc123"
 _KEYS = {"p256dh": "BM" + "A" * 84, "auth": "c2VjcmV0MTIzNDU2Nzg"}
@@ -37,7 +37,7 @@ def client(tmp_path, monkeypatch):
     # rather than control_db directly.
     library_fake.patch(monkeypatch)
     library_fake.seed_person_scope("operator@example.com", {"*"})
-    library_fake.seed_person_scope("mem@example.com", {"vivy"})
+    library_fake.seed_person_scope("mem@example.com", {"alpha"})
     roles = tmp_path / "roles.json"
     roles.write_text(json.dumps({
         "operator@example.com": {"role": "admin"},
@@ -45,7 +45,7 @@ def client(tmp_path, monkeypatch):
     }))
     monkeypatch.setattr(authz, "ROLES", roles)
     toks = tmp_path / "api-tokens.json"
-    toks.write_text(json.dumps({AGENT_TOKEN: {"name": "agent", "products": ["vivy"]}}))
+    toks.write_text(json.dumps({AGENT_TOKEN: {"name": "agent", "products": ["alpha"]}}))
     monkeypatch.setattr(api_common, "API_TOKENS", toks)
     jwtc = tmp_path / "jwt.json"
     jwtc.write_text(json.dumps({"enforce": False}))
@@ -396,15 +396,15 @@ def test_notify_never_raises_into_its_caller(client, monkeypatch):
 def test_notify_alert_never_raises_and_respects_authz(client, monkeypatch):
     import push_send
 
-    Sig = {"id": "sig_X", "body": "disk full", "product": "vivy", "kind": "alert",
+    Sig = {"id": "sig_X", "body": "disk full", "product": "alpha", "kind": "alert",
            "privacy_class": "internal"}
     monkeypatch.setattr(push_send, "send_one", lambda s, p: (True, 201))
     client.post("/api/push/subscribe", headers=_human("mem@example.com"),
                 json={"endpoint": _GOOD_ENDPOINT, "keys": _KEYS})
-    # mem@ is scoped to vivy, so a vivy alert reaches them...
+    # mem@ is scoped to alpha, so a alpha alert reaches them...
     assert push_send.notify_alert(Sig) == 1
-    # ...and a constance alert does not.
-    assert push_send.notify_alert({**Sig, "product": "constance"}) == 0
+    # ...and a beta alert does not.
+    assert push_send.notify_alert({**Sig, "product": "beta"}) == 0
 
 
 def test_a_customer_class_alert_needs_the_customer_capability_to_push(client,
@@ -420,7 +420,7 @@ def test_a_customer_class_alert_needs_the_customer_capability_to_push(client,
 
     import push_send
 
-    Sig = {"id": "sig_C", "body": "customer said something", "product": "vivy",
+    Sig = {"id": "sig_C", "body": "customer said something", "product": "alpha",
            "kind": "alert", "privacy_class": "customer"}
 
     monkeypatch.setattr(push_send, "send_one", lambda s, p: (True, 201))

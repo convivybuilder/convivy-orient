@@ -2,5 +2,5 @@
   "_comment": "email -> {role, queues}. role: admin|member|contractor. queues: scope list, ['*'] = all. Which projects a person covers is not set here: Orient asks the Library on every request (library_client.person_scope). No entry -> a bare contractor (read-tier bundle only, no write-plane access). Template for roles.json, which is gitignored: copy it into ORIENT_CONFIG_ROOT as roles.json. Access-control data — never paste its contents into logs or PR bodies.",
   "owner@example.com": {"role": "admin", "queues": ["*"]},
   "teammate@example.com": {"role": "member", "queues": ["*"]},
-  "contractor@example.com": {"role": "contractor", "queues": ["vivy-bugs"]}
+  "contractor@example.com": {"role": "contractor", "queues": ["alpha-bugs"]}
 }

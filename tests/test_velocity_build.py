@@ -51,13 +51,13 @@ def _entry(issue_id, state, title=None, resolved_at=None):
 def _sample():
     return {
         "generated_at": "2026-06-15T20:00:00",
-        "bucket_order": ["Vivy", "Engineering-internal"],
+        "bucket_order": ["Alpha", "Engineering-internal"],
         "notes": ["LOC is a weak signal.", "young-repo caveat here"],
         "alltime": {
             "total": {"loc_now": 5000, "commits_total": 100, "prs_total": 40},
             "buckets": {
-                "Vivy": {"loc_now": 3000, "commits_total": 60, "prs_total": 25,
-                         "repos": [{"repo": "vivy", "loc_now": 3000, "commits_total": 60,
+                "Alpha": {"loc_now": 3000, "commits_total": 60, "prs_total": 25,
+                         "repos": [{"repo": "alpha", "loc_now": 3000, "commits_total": 60,
                                     "prs_total": 25, "no_local": False, "no_gh": False}]},
                 "Engineering-internal": {"loc_now": 2000, "commits_total": 40, "prs_total": 15, "repos": []}},
         },
@@ -65,7 +65,7 @@ def _sample():
             "7": {"total": {"commits": 5, "prs_merged": 3, "features": 1, "loc_net": 100,
                             "reverts": 0, "adrs": 0, "arch": 0,
                             "change_failure_rate": 0.0, "ci_first_pass_pct": 100.0, "survival_pct": None},
-                  "buckets": {"Vivy": {"commits": 5, "prs_merged": 3, "features": 1, "loc_net": 100,
+                  "buckets": {"Alpha": {"commits": 5, "prs_merged": 3, "features": 1, "loc_net": 100,
                                        "reverts": 0, "adrs": 0, "arch": 0,
                                        "change_failure_rate": 0.0, "ci_first_pass_pct": 100.0, "survival_pct": None},
                               "Engineering-internal": {"commits": 0, "prs_merged": 0, "features": 0,
@@ -74,7 +74,7 @@ def _sample():
             "30": {"total": {"commits": 9, "prs_merged": 9, "features": 2, "loc_net": 999,
                              "reverts": 1, "adrs": 4, "arch": 7,
                              "change_failure_rate": 0.111, "ci_first_pass_pct": 80.0, "survival_pct": 90.0},
-                   "buckets": {"Vivy": {}, "Engineering-internal": {}}},
+                   "buckets": {"Alpha": {}, "Engineering-internal": {}}},
             "90": {"total": {}, "buckets": {}},
         },
     }
@@ -89,7 +89,7 @@ def test_render_embeds_data_nav_asof_and_notes(tmp_path, monkeypatch):
     assert "MST" in html and 'data-w="7"' in html and 'data-w="90"' in html
     assert ">Velocity<" in html  # its own nav link, highlighted
     # embedded data + both buckets reachable client-side
-    assert "Engineering-internal" in html and "Vivy" in html
+    assert "Engineering-internal" in html and "Alpha" in html
     # notes rendered as list items
     assert "weak signal" in html and "young-repo caveat" in html
     # all-time tab + its data embedded for the client-side view
@@ -385,7 +385,7 @@ def test_main_writes_an_empty_static_fallback_naming_no_project(tmp_path, monkey
     vb.main()
 
     fallback = (tmp_path / "velocity.html").read_text()
-    assert "Vivy" not in fallback and "Engineering-internal" not in fallback
+    assert "Alpha" not in fallback and "Engineering-internal" not in fallback
     assert "Live view unavailable" in fallback
 
 
@@ -439,7 +439,7 @@ def test_waypoints_section_degrades_on_library_outage(monkeypatch):
 
 
 def test_render_puts_waypoints_headline_ahead_of_delivery_activity(monkeypatch):
-    course = _course("course_1", "vivy", "Ship it", entries=[_entry("i1", "fixed")])
+    course = _course("course_1", "alpha", "Ship it", entries=[_entry("i1", "fixed")])
     monkeypatch.setattr(library_client, "list_courses", lambda **k: [course])
     monkeypatch.setattr(library_client, "get_course", lambda cid: course)
 
@@ -473,7 +473,7 @@ def test_weekly_pace_chart_renders_from_live_courses_mixing_terminal_and_open(mo
     """Definition of done: the weekly chart renders from live Library reads
     over Courses mixing terminal and open epics with resolved times spread
     across several weeks."""
-    course = _course("course_1", "vivy", "Ship it", entries=[
+    course = _course("course_1", "alpha", "Ship it", entries=[
         _entry("i1", "fixed", resolved_at=_NOW - dt.timedelta(days=21)),
         _entry("i2", "fixed", resolved_at=_NOW - dt.timedelta(days=7)),
         _entry("i3", "open"),
@@ -488,7 +488,7 @@ def test_weekly_pace_chart_renders_from_live_courses_mixing_terminal_and_open(mo
 
 
 def test_weekly_pace_chart_shows_a_quiet_week_as_zero_not_a_gap(monkeypatch):
-    course = _course("course_1", "vivy", "Ship it", entries=[
+    course = _course("course_1", "alpha", "Ship it", entries=[
         _entry("i1", "fixed", resolved_at=_NOW - dt.timedelta(days=21)),
         _entry("i2", "fixed", resolved_at=_NOW - dt.timedelta(days=7)),
     ])
@@ -505,7 +505,7 @@ def test_weekly_pace_chart_shows_a_quiet_week_as_zero_not_a_gap(monkeypatch):
 
 
 def test_weekly_pace_chart_marks_the_current_week_partial(monkeypatch):
-    course = _course("course_1", "vivy", "Ship it", entries=[
+    course = _course("course_1", "alpha", "Ship it", entries=[
         _entry("i1", "fixed", resolved_at=_NOW - dt.timedelta(days=7)),
         _entry("i2", "fixed", resolved_at=_NOW),
     ])
@@ -533,7 +533,7 @@ def test_weekly_pace_breakdown_splits_builder_from_products_and_sums(monkeypatch
         _entry("i1", "fixed", resolved_at=_NOW - dt.timedelta(days=7)),
         _entry("i2", "fixed", resolved_at=_NOW - dt.timedelta(days=7)),
     ])
-    product = _course("course_2", "vivy", "Ship it", entries=[
+    product = _course("course_2", "alpha", "Ship it", entries=[
         _entry("i3", "fixed", resolved_at=_NOW - dt.timedelta(days=7)),
     ])
     monkeypatch.setattr(library_client, "list_courses", lambda **k: [builder, product])
@@ -543,17 +543,17 @@ def test_weekly_pace_breakdown_splits_builder_from_products_and_sums(monkeypatch
 
     html = vb._waypoints_section(_ALL)
     assert ">Builder<" in html
-    assert ">vivy<" in html
+    assert ">alpha<" in html
     week = waypoints._iso_week(_NOW - dt.timedelta(days=7))
     row = html.split(f">{week}<")[1].split("</tr>")[0]
     cells = [c.split("<")[0] for c in row.split("<td>")[1:]]
-    assert cells == ["2", "1", "3"]  # Builder, vivy, Total — adds up
+    assert cells == ["2", "1", "3"]  # Builder, alpha, Total — adds up
 
 
 def test_weekly_pace_unresolved_passed_entries_counted_and_disclosed(monkeypatch):
     """Definition of done: passed entries with no resolved time count in the
     total, in no week, and their count is shown on the page."""
-    course = _course("course_1", "vivy", "Ship it", entries=[
+    course = _course("course_1", "alpha", "Ship it", entries=[
         _entry("i1", "fixed"),  # passed, no resolved_at
         _entry("i2", "fixed", resolved_at=_NOW - dt.timedelta(days=7)),
     ])

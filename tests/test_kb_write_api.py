@@ -86,9 +86,9 @@ def client(tmp_path, monkeypatch):
     roles = tmp_path / "roles.json"
     roles.write_text(json.dumps({
         "operator@example.com": {"role": "admin", "products": ["*"]},
-        "mem@example.com": {"role": "member", "products": ["vivy"]},
+        "mem@example.com": {"role": "member", "products": ["alpha"]},
         "obs@example.com": {"role": "observer", "products": ["*"]},
-        "con-full@example.com": {"role": "contractor", "products": ["vivy"]},
+        "con-full@example.com": {"role": "contractor", "products": ["alpha"]},
     }))
     monkeypatch.setattr(authz, "ROLES", roles)
     # The project scope now comes from the Library (E19·1,
@@ -117,7 +117,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(kb_write_api, "_access_enforced", lambda: True)
 
     toks = tmp_path / "api-tokens.json"
-    toks.write_text(json.dumps({"agent-secret": {"name": "an-agent", "products": ["vivy"]}}))
+    toks.write_text(json.dumps({"agent-secret": {"name": "an-agent", "products": ["alpha"]}}))
     monkeypatch.setattr(api_common, "API_TOKENS", toks)
 
     with TestClient(srv.app, follow_redirects=False) as c:

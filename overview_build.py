@@ -18,6 +18,7 @@ is caught.
 """
 from __future__ import annotations
 
+import datetime as dt
 import json
 import pathlib
 from html import escape
@@ -31,8 +32,10 @@ import engineering_e2e_build
 import home_build
 import kb_build
 import library_client
+import model_comparison_build
 import orient_time
 import security_build
+import tech_debt_build
 import warrant_build
 from models import utcnow
 from paths import STATE_ROOT
@@ -158,6 +161,26 @@ def _velocity_section(scope=frozenset(), whole_fleet=True) -> str:
     return _stat_block(velocity["value"], velocity["delta"], "computed live from the Library")
 
 
+def _model_comparison_section(scope=frozenset(), whole_fleet=True) -> str:
+    """Restricted to `scope` the same way `/model-comparison` itself is
+    (`model_comparison_build.live_html`'s own scoping, CQ·156): the
+    trailing-window run count and completed share, over every finished run
+    this viewer can see, before any `?by=`/`?project=` filter is applied —
+    the same default the page itself opens on. Computed live from the
+    Library on every render, like `_velocity_section`, so there is no
+    freshness cadence to judge it against."""
+    since, until, _ = model_comparison_build.resolve_window(None)
+    since_dt = dt.datetime.combine(since, dt.time.min)
+    until_dt = dt.datetime.combine(until, dt.time.max)
+    runs = [r for r in library_client.list_finished_runs(since_dt, until_dt) if r.product in scope]
+    if not runs:
+        return ds.empty_state("No finished runs yet.")
+    completed = sum(1 for r in runs if r.exit_status == "completed")
+    value = f"{len(runs)} runs"
+    delta = f"{completed / len(runs):.0%} completed"
+    return _stat_block(value, delta, "computed live from the Library")
+
+
 def _warrant_section(_scope=frozenset(), _whole_fleet=True) -> str:
     """FLEET-ONLY (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M): the overall
     unwarranted-rate headline aggregates across every repo with no way to
@@ -201,6 +224,27 @@ def _security_section(_scope=frozenset(), _whole_fleet=True) -> str:
     delta = f'{o.get("prs_reviewed")} PRs reviewed'
     fresh = security_build.freshness(data)
     return _section(fresh, "Security scorecard", value, delta)
+
+
+def _tech_debt_section(scope=frozenset(), whole_fleet=True) -> str:
+    """Open corrections-queue items across the projects in `scope`, the same
+    count `/tech-debt` itself leads with (CQ·164,
+    issue_01M57NS4ZPTBGG1QCMXX5YCPXF). `tech_debt_build.summarise` filters to
+    `scope` itself, so `whole_fleet` needs no separate handling here — the
+    viewer's scope already names every project for an administrator.
+
+    Computed live from the Library on every render, like `_velocity_section`
+    and `_model_comparison_section`, so there is no freshness cadence to judge
+    it against and `_stat_block` says where the number came from."""
+    rows = tech_debt_build.scoped_rows(scope)
+    total = sum(r.total for r in rows)
+    if not total:
+        return ds.empty_state("No open corrections.")
+    high = sum(r.by_severity["high"] for r in rows)
+    oldest = max((r.oldest_age_days for r in rows if r.oldest_age_days is not None),
+                 default=None)
+    delta = f"{high} high" + (f" · oldest {oldest}d" if oldest is not None else "")
+    return _stat_block(f"{total} open", delta, "computed live from the Library")
 
 
 def _e2e_section(scope=frozenset(), whole_fleet=True) -> str:
@@ -325,12 +369,15 @@ _GROUPS = [
         ("/activity", "Activity", "Sessions Logged", _activity_section, False),
         ("/velocity", "Velocity", "Waypoints Passed (7d)", _velocity_section, False),
         ("/warrant", "Warrant", "Unwarranted Rate", _warrant_section, True),
+        ("/model-comparison", "Model Comparison", f"Finished Runs ({model_comparison_build.DEFAULT_WINDOW_DAYS}d)",
+         _model_comparison_section, False),
     ]),
     ("Health", [
         ("/health", "Code Health", "Avg CI Pass Rate", _code_health_section, False),
         ("/security", "Security", "Blocking / KLOC", _security_section, True),
         ("/engineering/e2e", "E2E", "Suites Passing", _e2e_section, False),
         ("/kb", "KB Retrieval", "Golden-Set Recall", _kb_section, True),
+        ("/tech-debt", "Tech Debt", "Open Corrections", _tech_debt_section, False),
     ]),
 ]
 

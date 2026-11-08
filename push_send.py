@@ -14,8 +14,7 @@ POST, taking the dependency addition from 5 packages to 14 on a security-surface
 app whose pinning policy exists to keep that surface small. We take only the
 crypto that genuinely cannot be hand-rolled — `py_vapid` signs the VAPID JWT,
 `http_ece` does RFC-8188 payload encryption — and send the POST with stdlib
-urllib. Same instinct as `github_capture.py`, which is stdlib-only rather than
-pulling in a client SDK.
+urllib, rather than pulling in a client SDK.
 
 KEY POSTURE
 ===========

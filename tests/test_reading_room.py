@@ -33,15 +33,15 @@ from models import ReadingRoom, RoomEntry
 AGENT_TOKEN = "agent-secret-xyz"
 
 # Distinct body markers so a leak is unambiguous in the rendered HTML.
-BODY_A = "AAA_vivy_contractor_visible_AAA"
-BODY_B = "BBB_vivy_team_only_BBB"
-BODY_C = "CCC_constance_contractor_CCC"
+BODY_A = "AAA_alpha_contractor_visible_AAA"
+BODY_B = "BBB_alpha_team_only_BBB"
+BODY_C = "CCC_beta_contractor_CCC"
 BODY_BRIEF_OLD = "brief-body-july-fourth"
 BODY_BRIEF_NEW = "brief-body-july-eleventh"
 BODY_BRIEF_HIDDEN = "brief-body-operator-audience-only"
 BODY_BRIEF_ANCIENT = "brief-body-ancient-outage-postmortem"
 BODY_BRIEF_UNDATED = "brief-body-welcome-aboard-no-date"
-BODY_BRIEF_CONTRACTOR = "brief-body-vivy-contractor-outage-briefing"
+BODY_BRIEF_CONTRACTOR = "brief-body-alpha-contractor-outage-briefing"
 
 # The room_build window test fixture freezes "now" here (client fixture below):
 # 8 days after the OLD brief and 1 day after the NEW one, so both stay inside
@@ -56,22 +56,22 @@ def _seed_docs():
     seeded through `library_fake` (issue_01M1MFM06D7EK15RV5QB57PCVK) in the
     shape `library_client.list_reference_documents`/`get_reference_document`
     serve — three team-audience docs:
-      A — vivy, team+contractor  → a vivy contractor may see it
-      B — vivy, team only        → NOT contractor-visible
-      C — constance, team+contractor → out of a vivy contractor's product scope
+      A — alpha, team+contractor  → a alpha contractor may see it
+      B — alpha, team only        → NOT contractor-visible
+      C — beta, team+contractor → out of a alpha contractor's product scope
     plus the Briefs fixtures (ARCH-372): two dates so newest-first is
     assertable, one audience: [operator] brief to pin the historical failure, and
     one aged well outside the 14-day window to prove it actually drops
     something.
     """
     library_fake.seed_reference_doc(
-        id="vivy/a", project="vivy", kind="runbook", title="Doc A",
+        id="alpha/a", project="alpha", kind="runbook", title="Doc A",
         status="current", body=BODY_A, audience=["team", "contractor"])
     library_fake.seed_reference_doc(
-        id="vivy/b", project="vivy", kind="runbook", title="Doc B",
+        id="alpha/b", project="alpha", kind="runbook", title="Doc B",
         status="current", body=BODY_B, audience=["team"])
     library_fake.seed_reference_doc(
-        id="constance/c", project="constance", kind="runbook", title="Doc C",
+        id="beta/c", project="beta", kind="runbook", title="Doc C",
         status="current", body=BODY_C, audience=["team", "contractor"])
     library_fake.seed_reference_doc(
         id="platform/briefs/ai-engineering-briefing-2026-07-04", project="platform",
@@ -108,15 +108,15 @@ def client(tmp_path, monkeypatch):
     roles = tmp_path / "roles.json"
     roles.write_text(json.dumps({
         "operator@example.com": {"role": "admin", "products": ["*"]},
-        "mem@example.com": {"role": "member", "products": ["vivy"]},
-        "con@example.com": {"role": "contractor", "products": ["vivy"]},
+        "mem@example.com": {"role": "member", "products": ["alpha"]},
+        "con@example.com": {"role": "contractor", "products": ["alpha"]},
     }))
     monkeypatch.setattr(authz, "ROLES", roles)
 
     # tiers: only operator is full; mem + con are contractor tier (tier is distinct
     # from role — mem is a "member" by role but not full-tier here).
     tiers = tmp_path / "tiers.json"
-    tiers.write_text(json.dumps({"full": ["operator@example.com", "full-vivy@example.com"]}))
+    tiers.write_text(json.dumps({"full": ["operator@example.com", "full-alpha@example.com"]}))
     monkeypatch.setattr(access_identity, "TIERS", tiers)
 
     toks = tmp_path / "api-tokens.json"
@@ -133,12 +133,12 @@ def client(tmp_path, monkeypatch):
     # seeded here to match, for every email this file acts as or provisions
     # a room for.
     library_fake.seed_person_scope("operator@example.com", {"*"})
-    library_fake.seed_person_scope("mem@example.com", {"vivy"})
-    library_fake.seed_person_scope("con@example.com", {"vivy"})
+    library_fake.seed_person_scope("mem@example.com", {"alpha"})
+    library_fake.seed_person_scope("con@example.com", {"alpha"})
     # A full-tier member scoped to one project (unlike operator, scoped to
     # "*") — needed to distinguish "out of this member's project scope" from
     # "this member is contractor-tier", which operator's "*" scope can't.
-    library_fake.seed_person_scope("full-vivy@example.com", {"vivy"})
+    library_fake.seed_person_scope("full-alpha@example.com", {"alpha"})
     _seed_docs()
 
     # Freeze the Briefs window's notion of "now" so the whole suite is
@@ -165,7 +165,7 @@ def test_full_tier_sees_every_team_doc(client):
     # one is NOT — which is the whole reason briefs were invisible before
     # ARCH-372. The window that keeps only recent ones out of the standing
     # Briefs section is a room_build render-time rule, not a grant narrowing.
-    assert grant == {"vivy/a", "vivy/b", "constance/c",
+    assert grant == {"alpha/a", "alpha/b", "beta/c",
                      "platform/briefs/ai-engineering-briefing-2026-07-04",
                      "company/briefs/ai-transformation-briefing-2026-07-11",
                      "platform/briefs/ancient-outage-postmortem-2026-05-01",
@@ -173,9 +173,9 @@ def test_full_tier_sees_every_team_doc(client):
 
 
 def test_contractor_scoped_to_contractor_audience_and_product(client):
-    # A vivy contractor: A only. B is team-only; C is out of the vivy scope.
-    grant = kb_index.room_entitlement("con@example.com", frozenset({"vivy"}))
-    assert grant == {"vivy/a"}
+    # A alpha contractor: A only. B is team-only; C is out of the alpha scope.
+    grant = kb_index.room_entitlement("con@example.com", frozenset({"alpha"}))
+    assert grant == {"alpha/a"}
 
 
 def test_room_entitlement_never_fetches_a_body(client, monkeypatch):
@@ -193,7 +193,7 @@ def test_room_entitlement_never_fetches_a_body(client, monkeypatch):
 
     monkeypatch.setattr(library_client, "get_reference_document", must_not_be_called)
     grant = kb_index.room_entitlement("operator@example.com", frozenset({"*"}))
-    assert grant == {"vivy/a", "vivy/b", "constance/c",
+    assert grant == {"alpha/a", "alpha/b", "beta/c",
                      "platform/briefs/ai-engineering-briefing-2026-07-04",
                      "company/briefs/ai-transformation-briefing-2026-07-11",
                      "platform/briefs/ancient-outage-postmortem-2026-05-01",
@@ -212,8 +212,8 @@ def test_team_docs_filters_status_itself_not_just_via_the_fake(client, monkeypat
     import library_client
 
     retired = library_client.ReferenceDocument(
-        id="vivy/retired", source_ref="projects/vivy/runbook/retired.md",
-        kind="runbook", project="vivy", title="Retired runbook", status="archived",
+        id="alpha/retired", source_ref="projects/alpha/runbook/retired.md",
+        kind="runbook", project="alpha", title="Retired runbook", status="archived",
         topics=[], audience=["team"], last_reviewed=None, updated_at=None,
         body="retired body")
     monkeypatch.setattr(library_client, "list_reference_documents",
@@ -224,7 +224,7 @@ def test_team_docs_filters_status_itself_not_just_via_the_fake(client, monkeypat
     # reason, the same false-positive shape `project_build`'s equivalent test
     # warns against.
     monkeypatch.setattr(library_client, "get_reference_document",
-                        lambda doc_id, **kw: retired if doc_id == "vivy/retired" else None)
+                        lambda doc_id, **kw: retired if doc_id == "alpha/retired" else None)
     assert kb_index.team_docs() == []
 
 
@@ -241,18 +241,18 @@ def test_team_docs_validates_status_on_the_fetched_copy_not_the_listing(client, 
     import library_client
 
     meta = library_client.ReferenceDocument(
-        id="vivy/moved", source_ref="projects/vivy/runbook/moved.md",
-        kind="runbook", project="vivy", title="Moved runbook", status="current",
+        id="alpha/moved", source_ref="projects/alpha/runbook/moved.md",
+        kind="runbook", project="alpha", title="Moved runbook", status="current",
         topics=[], audience=["team"], last_reviewed=None, updated_at=None)
     full = library_client.ReferenceDocument(
-        id="vivy/moved", source_ref="projects/vivy/runbook/moved.md",
-        kind="runbook", project="vivy", title="Moved runbook", status="archived",
+        id="alpha/moved", source_ref="projects/alpha/runbook/moved.md",
+        kind="runbook", project="alpha", title="Moved runbook", status="archived",
         topics=[], audience=["team"], last_reviewed=None, updated_at=None,
         body="moved body")
     monkeypatch.setattr(library_client, "list_reference_documents",
                         lambda **kw: [meta])
     monkeypatch.setattr(library_client, "get_reference_document",
-                        lambda doc_id, **kw: full if doc_id == "vivy/moved" else None)
+                        lambda doc_id, **kw: full if doc_id == "alpha/moved" else None)
     assert kb_index.team_docs() == []
 
 
@@ -269,12 +269,12 @@ def test_team_docs_drops_a_doc_that_vanishes_between_the_list_and_the_fetch(clie
     listed = library_client.get_reference_document
 
     def _gone_for_one(doc_id, **kw):
-        return None if doc_id == "vivy/b" else listed(doc_id, **kw)
+        return None if doc_id == "alpha/b" else listed(doc_id, **kw)
 
     monkeypatch.setattr(library_client, "get_reference_document", _gone_for_one)
     ids = {d["id"] for d in kb_index.team_docs()}
-    assert "vivy/b" not in ids
-    assert "vivy/a" in ids and "constance/c" in ids
+    assert "alpha/b" not in ids
+    assert "alpha/a" in ids and "beta/c" in ids
 
 
 def test_team_docs_raises_on_a_library_failure(client, monkeypatch):
@@ -303,7 +303,7 @@ def test_room_render_500s_on_a_library_failure_not_an_empty_room(client, monkeyp
     member as "you have nothing" rather than "we couldn't check"."""
     import library_client
 
-    _make_room("operator@example.com", ["vivy/a"])
+    _make_room("operator@example.com", ["alpha/a"])
 
     def boom(**kw):
         raise RuntimeError("Library unreachable")
@@ -351,7 +351,7 @@ def _make_room(email, doc_ids):
 def test_render_drops_out_of_grant_entries(client):
     # Seed a contractor's room with entries for A, B AND C directly (as if the
     # grant was wider at seed time, then narrowed). Only A is currently entitled.
-    _make_room("con@example.com", ["vivy/a", "vivy/b", "constance/c"])
+    _make_room("con@example.com", ["alpha/a", "alpha/b", "beta/c"])
     r = client.get("/room", headers=_human("con@example.com"))
     assert r.status_code == 200
     html = r.text
@@ -368,9 +368,9 @@ def test_sections_render_in_curation_order_not_alphabetical(client):
     with session() as s:
         room = ReadingRoom(id=new_room_id(), email="operator@example.com", title="R",
                            landing_note="", created_by="operator@example.com")
-        room.entries.append(RoomEntry(doc_id="vivy/a", section="Zeta", position=0,
+        room.entries.append(RoomEntry(doc_id="alpha/a", section="Zeta", position=0,
                                       source="provision", added_by="operator@example.com"))
-        room.entries.append(RoomEntry(doc_id="vivy/b", section="Alpha", position=0,
+        room.entries.append(RoomEntry(doc_id="alpha/b", section="Alpha", position=0,
                                       source="provision", added_by="operator@example.com"))
         s.add(room)
     r = client.get("/room", headers=_human("operator@example.com"))
@@ -383,7 +383,7 @@ def test_sections_render_in_curation_order_not_alphabetical(client):
 
 
 def test_full_member_room_renders_entitled_body(client):
-    _make_room("operator@example.com", ["vivy/b"])
+    _make_room("operator@example.com", ["alpha/b"])
     r = client.get("/room", headers=_human("operator@example.com"))
     assert r.status_code == 200
     assert BODY_B in r.text               # full tier is entitled to a team-only doc
@@ -396,7 +396,7 @@ def test_room_offers_no_edit_affordance(client):
     one silently. Covers reference_doc_build._editor_section's own markers
     (kb-editor / __CAN_KB_WRITE__ / the kb_write_api endpoints) and the
     retired Typora bridge alike."""
-    _make_room("operator@example.com", ["vivy/b"])
+    _make_room("operator@example.com", ["alpha/b"])
     r = client.get("/room", headers=_human("operator@example.com"))
     assert r.status_code == 200
     html = r.text
@@ -463,7 +463,7 @@ function newPage() {{
 
 
 def test_room_ask_reply_survives_reload(client):
-    _make_room("operator@example.com", ["vivy/a"])
+    _make_room("operator@example.com", ["alpha/a"])
     r = client.get("/room", headers=_human("operator@example.com"))
     js_src = _extract_ask_form_js(r.text)
     result = _run_ask_form_js(js_src, r"""
@@ -496,7 +496,7 @@ def test_room_ask_reply_survives_reload_even_if_sessionstorage_throws(client):
     """A private window can throw on sessionStorage access — the stash must
     not crash the handler, and the reload (the correct, load-bearing part of
     this path) must still happen even though the reply itself is lost."""
-    _make_room("operator@example.com", ["vivy/a"])
+    _make_room("operator@example.com", ["alpha/a"])
     r = client.get("/room", headers=_human("operator@example.com"))
     js_src = _extract_ask_form_js(r.text)
     result = _run_ask_form_js(js_src, r"""
@@ -523,7 +523,7 @@ def test_room_ask_reply_restore_survives_sessionstorage_throw_on_read(client):
     the reply on the way BACK from the reload — the mirror of the stash-side
     throw covered above. Plants the throw on getItem instead of setItem, so
     the stash succeeds but reading it back on the reloaded page fails."""
-    _make_room("operator@example.com", ["vivy/a"])
+    _make_room("operator@example.com", ["alpha/a"])
     r = client.get("/room", headers=_human("operator@example.com"))
     js_src = _extract_ask_form_js(r.text)
     result = _run_ask_form_js(js_src, r"""
@@ -555,7 +555,7 @@ def test_room_ask_reply_not_stashed_when_the_request_was_not_applied(client):
     persists (no reload happens on that path), so the stash exists only to
     close the gap on the applied path. Confirms it isn't written otherwise,
     and that the reply is still shown directly (no reload, no stash needed)."""
-    _make_room("operator@example.com", ["vivy/a"])
+    _make_room("operator@example.com", ["alpha/a"])
     r = client.get("/room", headers=_human("operator@example.com"))
     js_src = _extract_ask_form_js(r.text)
     result = _run_ask_form_js(js_src, r"""
@@ -608,7 +608,7 @@ def test_room_no_longer_renders_the_blog_panel(client):
 
 def _create_room(client, headers, email="con@example.com", entries=None):
     body = {"email": email, "title": "Con's Room",
-            "entries": entries if entries is not None else [{"doc_id": "vivy/a"}]}
+            "entries": entries if entries is not None else [{"doc_id": "alpha/a"}]}
     return client.post("/api/rooms", json=body, headers=headers)
 
 
@@ -616,12 +616,12 @@ def test_admin_creates_room(client):
     r = _create_room(client, _human("operator@example.com"))
     assert r.status_code == 201
     assert r.json()["email"] == "con@example.com"
-    assert [e["doc_id"] for e in r.json()["entries"]] == ["vivy/a"]
+    assert [e["doc_id"] for e in r.json()["entries"]] == ["alpha/a"]
 
 
 def test_create_rejects_doc_outside_target_entitlement(client):
     # Seeding con with a team-only doc (B) they cannot see → 400, not a silent add.
-    r = _create_room(client, _human("operator@example.com"), entries=[{"doc_id": "vivy/b"}])
+    r = _create_room(client, _human("operator@example.com"), entries=[{"doc_id": "alpha/b"}])
     assert r.status_code == 400
     assert "entitlement" in r.json()["error"]
 
@@ -629,7 +629,7 @@ def test_create_rejects_doc_outside_target_entitlement(client):
 def test_create_rejects_boolean_position(client):
     # bool is an int subclass; a JSON `true` position must not slip through as 1.
     r = _create_room(client, _human("operator@example.com"),
-                     entries=[{"doc_id": "vivy/a", "position": True}])
+                     entries=[{"doc_id": "alpha/a", "position": True}])
     assert r.status_code == 400
 
 
@@ -655,9 +655,9 @@ def test_duplicate_room_conflicts(client):
 
 def test_add_entries_and_archive(client):
     room_id = _create_room(client, _human("operator@example.com")).json()["id"]
-    # add is idempotent-ish: re-adding vivy/a updates it; a doc out of grant is 400.
+    # add is idempotent-ish: re-adding alpha/a updates it; a doc out of grant is 400.
     bad = client.post(f"/api/rooms/{room_id}/entries",
-                      json={"entries": [{"doc_id": "constance/c"}]},
+                      json={"entries": [{"doc_id": "beta/c"}]},
                       headers=_human("operator@example.com"))
     assert bad.status_code == 400
     arch = client.post(f"/api/rooms/{room_id}/archive", headers=_human("operator@example.com"))
@@ -674,47 +674,47 @@ def test_add_entries_and_archive(client):
 
 
 def _seed_item_and_signal():
-    library_fake.seed_issue(id="issue_vivyone", product="vivy", title="Vivy work item")
-    library_fake.seed_issue(id="issue_constanceone", product="constance",
-                            title="Constance work item")
-    library_fake.seed_signal(id="sig_vivyone", source="room", kind="note", actor="x",
-                             ingested_by="x", product="vivy", body="a vivy signal")
-    library_fake.seed_signal(id="sig_constanceone", source="room", kind="note", actor="x",
-                             ingested_by="x", product="constance", body="a constance signal")
+    library_fake.seed_issue(id="issue_alphaone", product="alpha", title="Alpha work item")
+    library_fake.seed_issue(id="issue_betaone", product="beta",
+                            title="Beta work item")
+    library_fake.seed_signal(id="sig_alphaone", source="room", kind="note", actor="x",
+                             ingested_by="x", product="alpha", body="a alpha signal")
+    library_fake.seed_signal(id="sig_betaone", source="room", kind="note", actor="x",
+                             ingested_by="x", product="beta", body="a beta signal")
 
 
 def test_create_accepts_an_item_entry_in_scope(client):
     _seed_item_and_signal()
-    r = _create_room(client, _human("operator@example.com"), email="full-vivy@example.com",
-                     entries=[{"doc_id": "issue_vivyone", "kind": "item"}])
+    r = _create_room(client, _human("operator@example.com"), email="full-alpha@example.com",
+                     entries=[{"doc_id": "issue_alphaone", "kind": "item"}])
     assert r.status_code == 201
     assert r.json()["entries"] == [{
-        "doc_id": "issue_vivyone", "kind": "item", "section": "", "position": 0,
+        "doc_id": "issue_alphaone", "kind": "item", "section": "", "position": 0,
         "note": None, "pinned": False, "source": "provision",
     }]
 
 
 def test_create_accepts_a_signal_entry_in_scope(client):
     _seed_item_and_signal()
-    r = _create_room(client, _human("operator@example.com"), email="full-vivy@example.com",
-                     entries=[{"doc_id": "sig_vivyone", "kind": "signal"}])
+    r = _create_room(client, _human("operator@example.com"), email="full-alpha@example.com",
+                     entries=[{"doc_id": "sig_alphaone", "kind": "signal"}])
     assert r.status_code == 201
     assert r.json()["entries"][0]["kind"] == "signal"
-    assert r.json()["entries"][0]["doc_id"] == "sig_vivyone"
+    assert r.json()["entries"][0]["doc_id"] == "sig_alphaone"
 
 
 def test_doc_entry_with_no_kind_still_defaults_to_doc(client):
     """Every existing doc-only caller sends no `kind` at all — this is the
     regression the omission must not break."""
-    r = _create_room(client, _human("operator@example.com"), email="full-vivy@example.com",
-                     entries=[{"doc_id": "vivy/a"}])
+    r = _create_room(client, _human("operator@example.com"), email="full-alpha@example.com",
+                     entries=[{"doc_id": "alpha/a"}])
     assert r.status_code == 201
     assert r.json()["entries"][0]["kind"] == "doc"
 
 
 def test_unknown_kind_is_refused(client):
-    r = _create_room(client, _human("operator@example.com"), email="full-vivy@example.com",
-                     entries=[{"doc_id": "vivy/a", "kind": "bogus"}])
+    r = _create_room(client, _human("operator@example.com"), email="full-alpha@example.com",
+                     entries=[{"doc_id": "alpha/a", "kind": "bogus"}])
     assert r.status_code == 400
     assert "kind" in r.json()["error"]
 
@@ -725,70 +725,70 @@ def test_item_entry_missing_and_out_of_scope_get_the_identical_refusal(client):
     status and the same body — the API must never confirm, by a different
     answer, that an out-of-scope id is real."""
     _seed_item_and_signal()
-    missing = _create_room(client, _human("operator@example.com"), email="full-vivy@example.com",
+    missing = _create_room(client, _human("operator@example.com"), email="full-alpha@example.com",
                            entries=[{"doc_id": "issue_does_not_exist", "kind": "item"}])
     out_of_scope = _create_room(client, _human("operator@example.com"),
-                                email="full-vivy@example.com",
-                                entries=[{"doc_id": "issue_constanceone", "kind": "item"}])
+                                email="full-alpha@example.com",
+                                entries=[{"doc_id": "issue_betaone", "kind": "item"}])
     assert missing.status_code == 400
     assert missing.status_code == out_of_scope.status_code
     # Same body, modulo the id itself — the one thing the caller already knew.
     assert missing.json()["error"].replace("issue_does_not_exist", "X") == \
-        out_of_scope.json()["error"].replace("issue_constanceone", "X")
+        out_of_scope.json()["error"].replace("issue_betaone", "X")
     assert "entitlement" in missing.json()["error"]
 
 
 def test_signal_entry_missing_and_out_of_scope_get_the_identical_refusal(client):
     """Likewise for Archives entries."""
     _seed_item_and_signal()
-    missing = _create_room(client, _human("operator@example.com"), email="full-vivy@example.com",
+    missing = _create_room(client, _human("operator@example.com"), email="full-alpha@example.com",
                            entries=[{"doc_id": "sig_does_not_exist", "kind": "signal"}])
     out_of_scope = _create_room(client, _human("operator@example.com"),
-                                email="full-vivy@example.com",
-                                entries=[{"doc_id": "sig_constanceone", "kind": "signal"}])
+                                email="full-alpha@example.com",
+                                entries=[{"doc_id": "sig_betaone", "kind": "signal"}])
     assert missing.status_code == 400
     assert missing.status_code == out_of_scope.status_code
     assert missing.json()["error"].replace("sig_does_not_exist", "X") == \
-        out_of_scope.json()["error"].replace("sig_constanceone", "X")
+        out_of_scope.json()["error"].replace("sig_betaone", "X")
     assert "entitlement" in missing.json()["error"]
 
 
 def test_contractor_target_may_add_neither_item_nor_signal(client):
-    """con@example.com is contractor-tier and scoped to vivy — the item and
+    """con@example.com is contractor-tier and scoped to alpha — the item and
     signal below are both genuinely in scope by project, and both are still
     refused, because a contractor's grant has no item/signal half at all."""
     _seed_item_and_signal()
     item = _create_room(client, _human("operator@example.com"), email="con@example.com",
-                        entries=[{"doc_id": "issue_vivyone", "kind": "item"}])
+                        entries=[{"doc_id": "issue_alphaone", "kind": "item"}])
     assert item.status_code == 400
     assert "entitlement" in item.json()["error"]
     sig = _create_room(client, _human("operator@example.com"), email="con@example.com",
-                       entries=[{"doc_id": "sig_vivyone", "kind": "signal"}])
+                       entries=[{"doc_id": "sig_alphaone", "kind": "signal"}])
     assert sig.status_code == 400
     assert "entitlement" in sig.json()["error"]
 
 
 def test_add_entries_accepts_item_and_signal_too(client):
     _seed_item_and_signal()
-    room_id = _create_room(client, _human("operator@example.com"), email="full-vivy@example.com",
-                           entries=[{"doc_id": "vivy/a"}]).json()["id"]
+    room_id = _create_room(client, _human("operator@example.com"), email="full-alpha@example.com",
+                           entries=[{"doc_id": "alpha/a"}]).json()["id"]
     r = client.post(f"/api/rooms/{room_id}/entries",
-                    json={"entries": [{"doc_id": "issue_vivyone", "kind": "item"},
-                                      {"doc_id": "sig_vivyone", "kind": "signal"}]},
+                    json={"entries": [{"doc_id": "issue_alphaone", "kind": "item"},
+                                      {"doc_id": "sig_alphaone", "kind": "signal"}]},
                     headers=_human("operator@example.com"))
     assert r.status_code == 200
     kinds = {(e["kind"], e["doc_id"]) for e in r.json()["entries"]}
-    assert kinds == {("doc", "vivy/a"), ("item", "issue_vivyone"), ("signal", "sig_vivyone")}
+    assert kinds == {("doc", "alpha/a"), ("item", "issue_alphaone"), ("signal", "sig_alphaone")}
 
 
 def test_an_item_and_a_doc_may_share_the_same_id_text_in_one_room(client):
     """Uniqueness is (room, kind, doc_id), not (room, doc_id) — the whole
     point of widening it. Seeds a work item whose id happens to equal an
     entitled doc's id, and both land as distinct entries."""
-    library_fake.seed_issue(id="vivy/a", product="vivy", title="Same text as the doc id")
-    room_id = _create_room(client, _human("operator@example.com"), email="full-vivy@example.com",
-                           entries=[{"doc_id": "vivy/a", "kind": "doc"},
-                                    {"doc_id": "vivy/a", "kind": "item"}]).json()
+    library_fake.seed_issue(id="alpha/a", product="alpha", title="Same text as the doc id")
+    room_id = _create_room(client, _human("operator@example.com"), email="full-alpha@example.com",
+                           entries=[{"doc_id": "alpha/a", "kind": "doc"},
+                                    {"doc_id": "alpha/a", "kind": "item"}]).json()
     assert len(room_id["entries"]) == 2
     kinds = {e["kind"] for e in room_id["entries"]}
     assert kinds == {"doc", "item"}
@@ -818,11 +818,11 @@ def _make_mixed_room(email, entries):
 
 def test_render_combines_doc_item_and_signal_in_one_section(client):
     """DoD: one section, all three kinds, each in its own form."""
-    library_fake.seed_issue(id="issue_vivyone", product="vivy", title="Vivy work item")
-    library_fake.seed_signal(id="sig_vivyone", source="room", kind="note", actor="x",
-                             ingested_by="x", product="vivy", body="a vivy signal")
+    library_fake.seed_issue(id="issue_alphaone", product="alpha", title="Alpha work item")
+    library_fake.seed_signal(id="sig_alphaone", source="room", kind="note", actor="x",
+                             ingested_by="x", product="alpha", body="a alpha signal")
     _make_mixed_room("operator@example.com",
-                     [("doc", "vivy/a"), ("item", "issue_vivyone"), ("signal", "sig_vivyone")])
+                     [("doc", "alpha/a"), ("item", "issue_alphaone"), ("signal", "sig_alphaone")])
     r = client.get("/room", headers=_human("operator@example.com"))
     assert r.status_code == 200
     payload = _payload(r.text)
@@ -830,43 +830,43 @@ def test_render_combines_doc_item_and_signal_in_one_section(client):
     assert {e["entryKind"] for e in docs_sec["entries"]} == {"doc", "item", "signal"}
     assert len(docs_sec["entries"]) == 3
     # Each kind carries its own shape (DoD: "each in its own form").
-    assert set(payload["docs"]["vivy/a"]) == {"title", "body"}
-    assert set(payload["items"]["issue_vivyone"]) == \
+    assert set(payload["docs"]["alpha/a"]) == {"title", "body"}
+    assert set(payload["items"]["issue_alphaone"]) == \
         {"title", "state", "specification", "latestActivity"}
-    assert set(payload["signals"]["sig_vivyone"]) == {"body", "source", "date"}
-    assert payload["items"]["issue_vivyone"]["title"] == "Vivy work item"
-    assert payload["signals"]["sig_vivyone"]["body"] == "a vivy signal"
+    assert set(payload["signals"]["sig_alphaone"]) == {"body", "source", "date"}
+    assert payload["items"]["issue_alphaone"]["title"] == "Alpha work item"
+    assert payload["signals"]["sig_alphaone"]["body"] == "a alpha signal"
 
 
 def test_item_entry_shows_the_state_the_library_reports_at_render_time(client):
     """DoD: changing the stub's state between two renders, no room edit."""
-    library_fake.seed_issue(id="issue_vivyone", product="vivy", title="Vivy work item",
+    library_fake.seed_issue(id="issue_alphaone", product="alpha", title="Alpha work item",
                             state="open")
-    _make_mixed_room("full-vivy@example.com", [("item", "issue_vivyone")])
-    r1 = client.get("/room", headers=_human("full-vivy@example.com"))
-    assert _payload(r1.text)["items"]["issue_vivyone"]["state"] == "open"
+    _make_mixed_room("full-alpha@example.com", [("item", "issue_alphaone")])
+    r1 = client.get("/room", headers=_human("full-alpha@example.com"))
+    assert _payload(r1.text)["items"]["issue_alphaone"]["state"] == "open"
 
-    library_fake.seed_issue(id="issue_vivyone", product="vivy", title="Vivy work item",
+    library_fake.seed_issue(id="issue_alphaone", product="alpha", title="Alpha work item",
                             state="fixed")
-    r2 = client.get("/room", headers=_human("full-vivy@example.com"))
-    assert _payload(r2.text)["items"]["issue_vivyone"]["state"] == "fixed"
+    r2 = client.get("/room", headers=_human("full-alpha@example.com"))
+    assert _payload(r2.text)["items"]["issue_alphaone"]["state"] == "fixed"
 
 
 def test_out_of_scope_item_and_signal_contribute_nothing(client):
     """DoD: for a viewer scoped to one project, a work item and an Archives
     entry curated from a second project render neither, and neither one's
     title, id nor body appears anywhere in the response."""
-    library_fake.seed_issue(id="issue_constanceone", product="constance",
-                            title="Constance work item")
-    library_fake.seed_signal(id="sig_constanceone", source="room", kind="note", actor="x",
-                             ingested_by="x", product="constance", body="a constance signal")
-    _make_mixed_room("full-vivy@example.com",
-                     [("item", "issue_constanceone"), ("signal", "sig_constanceone")])
-    r = client.get("/room", headers=_human("full-vivy@example.com"))
+    library_fake.seed_issue(id="issue_betaone", product="beta",
+                            title="Beta work item")
+    library_fake.seed_signal(id="sig_betaone", source="room", kind="note", actor="x",
+                             ingested_by="x", product="beta", body="a beta signal")
+    _make_mixed_room("full-alpha@example.com",
+                     [("item", "issue_betaone"), ("signal", "sig_betaone")])
+    r = client.get("/room", headers=_human("full-alpha@example.com"))
     assert r.status_code == 200
     html = r.text
-    for marker in ("issue_constanceone", "sig_constanceone",
-                   "Constance work item", "a constance signal"):
+    for marker in ("issue_betaone", "sig_betaone",
+                   "Beta work item", "a beta signal"):
         assert marker not in html
     payload = _payload(r.text)
     assert payload["items"] == {}
@@ -878,24 +878,24 @@ def test_narrowing_scope_drops_item_and_signal_on_the_next_render(client):
     """DoD: narrowing a viewer's Library-resolved scope removes that project's
     work items and Archives entries from their room on the next render, with
     no room edit."""
-    library_fake.seed_issue(id="issue_constanceone", product="constance",
-                            title="Constance work item")
-    library_fake.seed_signal(id="sig_constanceone", source="room", kind="note", actor="x",
-                             ingested_by="x", product="constance", body="a constance signal")
-    library_fake.seed_person_scope("full-vivy@example.com", {"vivy", "constance"})
-    _make_mixed_room("full-vivy@example.com",
-                     [("item", "issue_constanceone"), ("signal", "sig_constanceone")])
+    library_fake.seed_issue(id="issue_betaone", product="beta",
+                            title="Beta work item")
+    library_fake.seed_signal(id="sig_betaone", source="room", kind="note", actor="x",
+                             ingested_by="x", product="beta", body="a beta signal")
+    library_fake.seed_person_scope("full-alpha@example.com", {"alpha", "beta"})
+    _make_mixed_room("full-alpha@example.com",
+                     [("item", "issue_betaone"), ("signal", "sig_betaone")])
 
-    r1 = client.get("/room", headers=_human("full-vivy@example.com"))
+    r1 = client.get("/room", headers=_human("full-alpha@example.com"))
     payload1 = _payload(r1.text)
     assert payload1["items"] and payload1["signals"]
 
     # The scope narrows — no room edit — and the next render drops both.
-    library_fake.seed_person_scope("full-vivy@example.com", {"vivy"})
-    r2 = client.get("/room", headers=_human("full-vivy@example.com"))
+    library_fake.seed_person_scope("full-alpha@example.com", {"alpha"})
+    r2 = client.get("/room", headers=_human("full-alpha@example.com"))
     html2 = r2.text
-    for marker in ("issue_constanceone", "sig_constanceone",
-                   "Constance work item", "a constance signal"):
+    for marker in ("issue_betaone", "sig_betaone",
+                   "Beta work item", "a beta signal"):
         assert marker not in html2
     payload2 = _payload(r2.text)
     assert payload2["items"] == {}
@@ -908,16 +908,16 @@ def test_contractor_room_renders_no_item_or_signal_even_when_curated(client):
     side; CQ·147 is the write side that keeps this from being seeded at
     all — this proves the render wall holds even for a row written another
     way, e.g. directly as this test does)."""
-    library_fake.seed_issue(id="issue_vivyone", product="vivy", title="Vivy work item")
-    library_fake.seed_signal(id="sig_vivyone", source="room", kind="note", actor="x",
-                             ingested_by="x", product="vivy", body="a vivy signal")
+    library_fake.seed_issue(id="issue_alphaone", product="alpha", title="Alpha work item")
+    library_fake.seed_signal(id="sig_alphaone", source="room", kind="note", actor="x",
+                             ingested_by="x", product="alpha", body="a alpha signal")
     _make_mixed_room("con@example.com",
-                     [("doc", "vivy/a"), ("item", "issue_vivyone"), ("signal", "sig_vivyone")])
+                     [("doc", "alpha/a"), ("item", "issue_alphaone"), ("signal", "sig_alphaone")])
     r = client.get("/room", headers=_human("con@example.com"))
     assert r.status_code == 200
     html = r.text
     assert BODY_A in html  # the contractor-audience doc still renders
-    for marker in ("issue_vivyone", "sig_vivyone", "Vivy work item", "a vivy signal"):
+    for marker in ("issue_alphaone", "sig_alphaone", "Alpha work item", "a alpha signal"):
         assert marker not in html
     payload = _payload(r.text)
     assert payload["items"] == {}
@@ -928,7 +928,7 @@ def test_room_render_500s_when_the_work_item_read_raises(client, monkeypatch):
     """DoD: a render failure answers 500 with no other member's content,
     asserted by forcing the work-item read to raise."""
     import library_client
-    _make_mixed_room("operator@example.com", [("doc", "vivy/a"), ("item", "issue_vivyone")])
+    _make_mixed_room("operator@example.com", [("doc", "alpha/a"), ("item", "issue_alphaone")])
 
     def boom(item_id):
         raise RuntimeError("Library unreachable")
@@ -1004,7 +1004,7 @@ def _payload(text: str) -> dict:
 def test_briefs_render_without_any_curation_entry(client):
     """The whole point: a brief appears because it is entitled, not because
     someone remembered to curate this week's."""
-    _make_room("operator@example.com", ["vivy/a"])          # curation mentions no brief
+    _make_room("operator@example.com", ["alpha/a"])          # curation mentions no brief
     r = client.get("/room", headers=_human("operator@example.com"))
     assert r.status_code == 200
     assert BODY_BRIEF_NEW in r.text and BODY_BRIEF_OLD in r.text
@@ -1013,7 +1013,7 @@ def test_briefs_render_without_any_curation_entry(client):
 
 
 def test_briefs_section_is_newest_first(client):
-    _make_room("operator@example.com", ["vivy/a"])
+    _make_room("operator@example.com", ["alpha/a"])
     r = client.get("/room", headers=_human("operator@example.com"))
     briefs = next(s for s in _payload(r.text)["sections"] if s["name"] == "Briefs")
     ids = [e["docId"] for e in briefs["entries"]]
@@ -1028,7 +1028,7 @@ def test_briefs_section_spans_kb_projects(client):
     """A brief's KB project tracks its SUBJECT (engineering practice vs the
     business); the Room is where both are read. The section must not be
     project-scoped or the transformation brief goes missing again."""
-    _make_room("operator@example.com", ["vivy/a"])
+    _make_room("operator@example.com", ["alpha/a"])
     r = client.get("/room", headers=_human("operator@example.com"))
     briefs = next(s for s in _payload(r.text)["sections"] if s["name"] == "Briefs")
     projects = {e["docId"].split("/")[0] for e in briefs["entries"]}
@@ -1039,7 +1039,7 @@ def test_an_operator_audience_brief_stays_invisible(client):
     """The historical failure, pinned. audience: [operator] is skipped by team_docs(),
     so such a brief is outside the grant and the Briefs rule must not smuggle it
     in — the rule widens CURATION, never the grant."""
-    _make_room("operator@example.com", ["vivy/a"])
+    _make_room("operator@example.com", ["alpha/a"])
     r = client.get("/room", headers=_human("operator@example.com"))
     assert BODY_BRIEF_HIDDEN not in r.text
 
@@ -1049,7 +1049,7 @@ def test_briefs_rule_respects_the_grant_for_a_contractor(client):
     The rule draws from entitled_docs(email), so it cannot become a way in.
     With no entitled brief at all, there's nothing to point at either — no
     section and no Archives note."""
-    _make_room("con@example.com", ["vivy/a"])
+    _make_room("con@example.com", ["alpha/a"])
     r = client.get("/room", headers=_human("con@example.com"))
     assert r.status_code == 200
     assert BODY_BRIEF_NEW not in r.text and BODY_BRIEF_OLD not in r.text
@@ -1084,7 +1084,7 @@ def test_a_curated_brief_is_not_shown_twice(client):
 def test_brief_inside_the_window_renders(client):
     """Sanity: the NEW brief (1 day before the frozen 'now') is well inside
     the 14-day window and still renders — the window doesn't touch it."""
-    _make_room("operator@example.com", ["vivy/a"])
+    _make_room("operator@example.com", ["alpha/a"])
     r = client.get("/room", headers=_human("operator@example.com"))
     assert r.status_code == 200
     assert BODY_BRIEF_NEW in r.text
@@ -1095,7 +1095,7 @@ def test_brief_outside_the_window_does_not_render(client):
     entitled — it's in the grant (test_full_tier_sees_every_team_doc) — but
     aged out of the standing Briefs section, so its body never reaches the
     page and it's absent from the payload."""
-    _make_room("operator@example.com", ["vivy/a"])
+    _make_room("operator@example.com", ["alpha/a"])
     r = client.get("/room", headers=_human("operator@example.com"))
     assert r.status_code == 200
     assert BODY_BRIEF_ANCIENT not in r.text
@@ -1127,7 +1127,7 @@ def test_undated_brief_id_does_not_raise_and_stays_visible(client):
     """A brief id with no trailing -YYYY-MM-DD can't be shown to be old, and
     this render has no fallback (a 500 shows the member nothing), so it stays
     in the section rather than raising or being silently dropped."""
-    _make_room("operator@example.com", ["vivy/a"])
+    _make_room("operator@example.com", ["alpha/a"])
     r = client.get("/room", headers=_human("operator@example.com"))
     assert r.status_code == 200
     assert BODY_BRIEF_UNDATED in r.text
@@ -1140,7 +1140,7 @@ def test_archives_line_present_when_briefs_section_renders(client):
     for a full-tier member, a line points a reader at the full archive,
     whether or not anything was actually hidden this time. operator is full tier,
     so this also covers "a full-tier member still gets the link"."""
-    _make_room("operator@example.com", ["vivy/a"])
+    _make_room("operator@example.com", ["alpha/a"])
     r = client.get("/room", headers=_human("operator@example.com"))
     assert r.status_code == 200
     assert "/reference/briefings" in r.text
@@ -1152,7 +1152,7 @@ def test_archives_line_present_when_briefs_section_renders(client):
 
 def test_contractor_with_a_contractor_brief_gets_the_section_not_the_archives_link(
         client, monkeypatch):
-    """A vivy contractor entitled to a contractor-audience brief gets the
+    """A alpha contractor entitled to a contractor-audience brief gets the
     standing Briefs section — the rule draws from entitled_docs(email), which
     includes it — but must not get the Archives note, since /reference/briefings
     is full-tier-only and the link would 404 for them. This is the case the
@@ -1163,14 +1163,14 @@ def test_contractor_with_a_contractor_brief_gets_the_section_not_the_archives_li
     def patched():
         docs = real_team_docs()
         docs.append({
-            "id": "vivy/briefs/vivy-outage-briefing-2026-07-10", "project": "vivy",
-            "kind": "reference", "title": "Vivy outage briefing", "status": "current",
+            "id": "alpha/briefs/alpha-outage-briefing-2026-07-10", "project": "alpha",
+            "kind": "reference", "title": "Alpha outage briefing", "status": "current",
             "body": BODY_BRIEF_CONTRACTOR, "contractor": True,
         })
         return docs
 
     monkeypatch.setattr(kb_index, "team_docs", patched)
-    _make_room("con@example.com", ["vivy/a"])
+    _make_room("con@example.com", ["alpha/a"])
     r = client.get("/room", headers=_human("con@example.com"))
     assert r.status_code == 200
     assert BODY_BRIEF_CONTRACTOR in r.text
@@ -1192,14 +1192,14 @@ def test_contractor_whose_only_brief_is_aged_out_gets_no_section(client, monkeyp
     def patched():
         docs = real_team_docs()
         docs.append({
-            "id": "vivy/briefs/vivy-outage-briefing-2026-05-01", "project": "vivy",
-            "kind": "reference", "title": "Vivy outage briefing", "status": "current",
+            "id": "alpha/briefs/alpha-outage-briefing-2026-05-01", "project": "alpha",
+            "kind": "reference", "title": "Alpha outage briefing", "status": "current",
             "body": BODY_BRIEF_CONTRACTOR, "contractor": True,
         })
         return docs
 
     monkeypatch.setattr(kb_index, "team_docs", patched)
-    _make_room("con@example.com", ["vivy/a"])
+    _make_room("con@example.com", ["alpha/a"])
     r = client.get("/room", headers=_human("con@example.com"))
     assert r.status_code == 200
     assert BODY_BRIEF_CONTRACTOR not in r.text
@@ -1216,7 +1216,7 @@ def test_full_tier_gets_the_note_even_when_every_brief_aged_out(client):
     ancient one, which the window excludes — leaving zero entries but a
     candidate still exists, so the section (and its note) still renders."""
     _make_room("operator@example.com", [
-        "vivy/a",
+        "alpha/a",
         "platform/briefs/ai-engineering-briefing-2026-07-04",
         "company/briefs/ai-transformation-briefing-2026-07-11",
         "platform/briefs/welcome-aboard",
@@ -1237,7 +1237,7 @@ def test_curated_section_named_briefs_does_not_pick_up_the_note(client):
     with session() as s:
         room = ReadingRoom(id=new_room_id(), email="operator@example.com", title="R",
                            landing_note="", created_by="operator@example.com")
-        room.entries.append(RoomEntry(doc_id="vivy/a", section="Briefs", position=0,
+        room.entries.append(RoomEntry(doc_id="alpha/a", section="Briefs", position=0,
                                       source="provision", added_by="operator@example.com"))
         s.add(room)
     r = client.get("/room", headers=_human("operator@example.com"))

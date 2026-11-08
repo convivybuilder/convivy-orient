@@ -26,6 +26,7 @@ loading_state(label) -> HTML string
 error_state(message) -> HTML string
 awaiting_state(shows, needs, owner, verified, probe, probe_fn, contradicted_by) -> HTML string
 stalled_state(feed, newest, expected_cadence, why) -> HTML string
+saved_copy_banner(rendered_at) -> HTML string (the banner on a page served from a saved copy)
 Freshness(text, stalled, cadence, reason) -> dataclass, one dashboard's freshness verdict
 stalled_banner_html(feed, freshness) -> HTML string ("" unless freshness.stalled)
 render_stamp(rendered_at) -> HTML string ("rendered <when>" footer, stamped by page_shell)
@@ -1122,8 +1123,13 @@ COMPONENTS_CSS: str = r"""
 
 /* ---- Stalled state (the capability is live and its feed died) ---------- */
 /* A banner ABOVE the real data, never instead of it — the tiles keep
-   rendering underneath. */
-.stalled-banner {
+   rendering underneath.
+   `.saved-copy-banner` (a page served from a saved copy, `stalled_state`'s
+   sibling at the top of the whole page) shares the shape: both say the thing
+   below is real but not current, so they must not look like different kinds
+   of warning. */
+.stalled-banner,
+.saved-copy-banner {
   display:flex;
   align-items:flex-start;
   gap:10px;
@@ -1981,6 +1987,11 @@ _CHART_HOUSE_SUBNAV = [
     ("/engineering/merge-queue", "Merge queue"),
     ("/engineering/changelog", "Changelog"),
     ("/products/release-notes", "Release Notes"),
+    # Projects (CQ·160, issue_01M57NRMZSZW5B5VNWCM4HVZPV): the project index
+    # listing the viewer's in-scope projects, each linking to its own
+    # /projects/<name> page. Under Chart House alongside the per-project work
+    # views, the same area a /projects/<name> page belongs to.
+    ("/projects", "Projects"),
     # Blockers sits immediately after the lifecycle four rather than inside it.
     # ARCH-373 fixed the first three as the order work MOVES; this is the work
     # that is NOT moving — blocked on the operator — which is why it was invisible while
@@ -2001,6 +2012,10 @@ _CHART_HOUSE_SUBNAV = [
 # to them for a given agent/crew/model triple.
 _CREWS_SUBNAV = [
     ("/crews", "Overview"),
+    # Past runs (CQ·160, issue_01M57NRMZSZW5B5VNWCM4HVZPV): the click-through
+    # from /crews to a crew's finished runs over a caller-chosen window. Was
+    # reachable only through a "view all" link on /crews; now in the subnav.
+    ("/crews/runs", "Past runs"),
     ("/engineering/roster", "Roster"),
     ("/engineering/policy", "Policy"),
 ]
@@ -2101,7 +2116,7 @@ _DASHBOARD_SUBNAV = [
 # catch.
 _DASHBOARD_ONLY_PATHS: set[str] = {
     "/cost-performance", "/activity", "/health", "/warrant",
-    "/engineering/e2e", "/kb",
+    "/engineering/e2e", "/kb", "/model-comparison", "/tech-debt",
 }
 
 # Each area's path set, DERIVED from its sub-strip rather than hand-listed.
@@ -2156,6 +2171,11 @@ def _active_area(current: str) -> str:
     if current in _CREWS_PATHS:
         return "/crews"
     if current in _CHART_HOUSE_PATHS or current.startswith("/engineering"):
+        return "/chart-house"
+    # /projects/<name> (CQ·160): the per-project detail page lives under the
+    # same area as the /projects index in the Chart House subnav, so its nav
+    # highlights Chart House. A prefix match, since the name is dynamic.
+    if current.startswith("/projects"):
         return "/chart-house"
     return "/"
 
@@ -2786,6 +2806,39 @@ def stalled_state(*, feed: str, newest: str, expected_cadence: str, why: str) ->
     )
 
 
+def saved_copy_banner(rendered_at: str | None = None) -> str:
+    """The banner on a page served from a saved copy: the live render threw, so
+    what follows is the page the last build wrote (CQ·163,
+    issue_01M57NS03XATJRWY5Q7H8W90DS).
+
+    `rendered_at` is that saved page's own `render_stamp` value, which
+    `server._saved_render_time` reads out of it, so the banner dates the copy
+    rather than the moment it was served. A saved page carrying no stamp (a
+    hand-written fallback) still gets the banner and says only that the copy is
+    the last build's.
+
+    Answers the question `render_stamp` cannot answer on a saved copy: its
+    footer's "rendered <when>" carries the build's time, which reads as a
+    current page to anyone not comparing that date against today's. The
+    response header `server.STALE_FALLBACK_HEADER` carries the same fact for a
+    machine.
+    """
+    message = ("Serving the saved copy. The live render failed, so this is the "
+               "page the last build wrote")
+    if rendered_at:
+        message = f"{message}, rendered {rendered_at}."
+        stamp = f' data-saved-copy="{escape(rendered_at, quote=True)}"'
+    else:
+        message = f"{message}."
+        stamp = ""
+    return (
+        f'<div class="saved-copy-banner" role="status"{stamp}>'
+        f'<span class="stalled-glyph" aria-hidden="true">&#9888;</span>'
+        f'<p>{escape(message)}</p>'
+        f'</div>'
+    )
+
+
 def render_stamp(rendered_at: str | None = None) -> str:
     """The "rendered <when>" footer line, stamped on every page by `page_shell`.
 
@@ -2858,6 +2911,13 @@ SPEND_REFRESH_SECONDS = 15 * 60
 TAB_TITLE_SUFFIX = "Orient · Convivy Builder"
 
 
+# The content column every `page_shell` document opens. `server.py` inserts the
+# saved-copy banner just inside it, so the banner sits below the nav and inside
+# the page's own max-width and padding rather than against the viewport edge
+# (`saved_copy_banner`). Defined here because this module writes the markup.
+PAGE_WRAP_MARKER = '<div class="page-wrap">'
+
+
 def tab_title(page: str) -> str:
     """The browser-tab title for a page: "{page} · Orient · Convivy Builder".
 
@@ -2924,7 +2984,7 @@ def page_shell(*, title: str, nav_html: str, body: str,
 </head>
 <body>
 {whoami_nav}
-<div class="page-wrap">
+{PAGE_WRAP_MARKER}
 {body}
 {stamp}
 </div>

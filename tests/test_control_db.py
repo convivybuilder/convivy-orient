@@ -32,17 +32,20 @@ def test_schema_created_at_head(db):
     # Orient's own concerns only (ADR-0022) — everything else was a second
     # copy of what the Library owns alone, dropped with
     # issue_01M08YKNV185DFJ6832GV8ZY22.
-    # Field Notes joined that list on 2026-08-22: Orient is the store of truth
-    # for the blog and every public surface is a renderer
-    # (issue_01M0N650ZJHPQYPF54HD22RJEH), so the corpus is Orient's own concern
-    # in the same sense the Reading Room is.
     assert {"reading_rooms", "room_entries", "room_requests",
-            "push_subscriptions", "blog_posts", "blog_post_revisions"} <= tables
+            "push_subscriptions"} <= tables
     vault_tables = {"issue_items", "issue_comments", "issue_events",
                     "issue_leases", "lease_refusals", "signals", "signal_acks",
                     "courses", "course_events", "decision_items",
                     "decision_comments", "decision_events"}
     assert not (vault_tables & tables)
+    # The Field Notes post store joined this list on 2026-08-22 and left it
+    # on CQ·170 (issue_01M5GBJ3H5BFX0CR83019T737D): a post's home is the
+    # Library's Archives now, through `blog_api.py`'s own
+    # `library_client.create_signal` calls, never a row here. Matched by
+    # substring rather than the dropped tables' own names, so this assertion
+    # does not itself keep those names alive in the tree.
+    assert not any("blog" in t for t in tables)
 
 
 def test_no_vec0_index_survives_a_fresh_init(db):

@@ -16,6 +16,30 @@ makes one fast-forward commit on the current head (`force: false`). The tree
 holds only `corpus.json`, so the first publish replaces whatever the
 repository's initial commit held. An unchanged corpus makes no commit.
 
+**THE CORPUS IS BUILT FROM THE ARCHIVES, AND HOLDS PUBLISHED TEXT ONLY**
+(CQ·170, issue_01M5GBJ3H5BFX0CR83019T737D). `_build_corpus` reads every
+`kind=post` signal through `library_client` — there is no local post table
+any more — and, per slug, selects the LATEST entry whose `meta["reason"]` is
+`"publish"` or `"current"` (a migrated post's one-time mirror of its state
+at the Archives copy, `bin/copy_posts_to_archives.py`'s own shape, now
+retired but still present in the data it wrote). A `reason="save"` entry —
+`blog_api.save_draft`'s write to an already-published slug — is deliberately
+excluded from that selection: if it were included, saving a live post would
+change what this function returns on the very next push, with no publish in
+between, which is exactly the leak the DoD forbids. `updated`, `author`,
+`authorship` and `body` come from the LATEST such entry.
+
+**`date` IS THE EARLIEST OF A SLUG'S `first-published` MARKER AND ITS
+PUBLICATION ENTRIES** — frozen the way the old `blog_posts.published_at`
+column was, so re-publishing an edited post must not lift it to the top of
+the site. The marker exists because the Archives copy never recorded
+`blog_posts.published_at` itself, so a migrated post's `reason="current"`
+entry is dated to the COPY, not the original publication
+(written once on 2026-10-24 by CQ·170 part A's script, since removed). A post with no marker —
+any post first published after that script's one run — falls back to its
+first publication entry, which is this same computation with an empty
+marker set.
+
 **BEST EFFORT, AND THAT IS A DESIGN DECISION RATHER THAN LAZINESS.** A publish
 that succeeded must not be reported as failed because the push did not land.
 `push_corpus` never raises. Every failure is swallowed and REPORTED to the
@@ -25,8 +49,8 @@ without anyone reading a log.
 **The credential is a fine-grained token scoped to one repository**, not the
 machine's `gh` login, with Contents read/write on `convivy/swabbys-journal` and
 nothing else. It lives in `~/.orient-control/journal-push-token` or the
-`ORIENT_JOURNAL_PUSH_TOKEN` environment variable. `github_capture` and
-`merge_queue_build` shell to `gh`, which carries the operator's own credentials and could
+`ORIENT_JOURNAL_PUSH_TOKEN` environment variable. `merge_queue_build`
+shells to `gh`, which carries the operator's own credentials and could
 write anything they can. Reusing it would hand the publish path the whole
 account. Without a token the push is skipped and the skip is reported, because
 a missing credential is a configuration state rather than an error.
@@ -44,13 +68,15 @@ and the post goes live at the site's next scheduled run.
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import os
 import urllib.error
 import urllib.request
 from pathlib import Path
 
-import blog_store
+import blog_common
+import library_client
 
 TOKEN_FILE = Path.home() / ".orient-control" / "journal-push-token"
 DISPATCH_TOKEN_FILE = Path.home() / ".orient-control" / "journal-dispatch-token"
@@ -68,6 +94,78 @@ CORPUS_PATH = "corpus.json"
 # ref would be refused its build job.
 SITE_DISPATCH_PATH = "/repos/convivy/shipwright/actions/workflows/site.yml/dispatches"
 SITE_REF = "main"
+
+# The Library product posts are filed under (platform decomposition on E26,
+# issue_01M584RKNA5KKFXE00GSHKEEYD's thread) — matches `blog_api.PRODUCT`.
+PRODUCT = "company"
+KIND_POST = "post"
+
+# The reasons an Archives entry for a slug counts as a PUBLICATION rather than
+# a plain edit: `blog_api.publish_draft`'s own write (`"publish"`), and a
+# migrated post's one-time mirror of its state at the Archives copy
+# (`"current"`, `bin/copy_posts_to_archives.py`'s shape — the script itself is
+# retired, but the data it wrote is still what this corpus reads for a post
+# never re-published since). `"save"` is deliberately absent: see the module
+# docstring.
+_PUBLICATION_REASONS = ("publish", "current")
+
+
+def _at(sig: library_client.SignalRecord) -> dt.datetime:
+    return sig.produced_at or sig.ingested_at
+
+
+def _build_corpus() -> dict:
+    """The published corpus, in the exact shape a rendering surface consumes:
+    `{"posts": [...], "count": N}` — `push_corpus`'s own input.
+
+    Reads every `kind=post` Archives signal (never `kind=post_draft`, which a
+    draft's own write never promotes to), groups them by slug, and per slug
+    keeps only the entries in `_PUBLICATION_REASONS`. A slug with none —
+    unreachable today, since the first `kind=post` entry a slug ever gets is
+    always a `"publish"` or a migrated `"current"` write — is skipped rather
+    than guessed at.
+
+    **`date` ALSO CONSULTS THE SLUG'S `first-published` MARKER, IF ANY** — see
+    the module docstring. The marker is never a candidate for `latest`,
+    `author`, `authorship` or `body`: its `reason` is not in
+    `_PUBLICATION_REASONS`, so it never enters `candidates` at all.
+
+    **`author` here is a display name, never the stored identity.** The
+    Archives' `actor` is a verified email for a human post, and this is what
+    both a public HTML page and a public git history serve it to — an email
+    address must not ride along to either (`security-reviewer`, PR #289, on
+    the store this replaced).
+    """
+    sigs = library_client.list_signals(product=PRODUCT, kind=[KIND_POST])
+    by_slug: dict[str, list[library_client.SignalRecord]] = {}
+    for sig in sigs:
+        by_slug.setdefault(sig.stream or "", []).append(sig)
+
+    posts = []
+    for slug, slug_sigs in by_slug.items():
+        candidates = [s for s in slug_sigs if (s.meta.get("reason") or "") in _PUBLICATION_REASONS]
+        if not candidates:
+            continue
+        markers = [s for s in slug_sigs
+                  if (s.meta.get("reason") or "") == blog_common.FIRST_PUBLISHED_REASON]
+        first = min(candidates + markers, key=_at)
+        latest = max(candidates, key=_at)
+        body = library_client.get_signal_blob(latest.id) or ""
+        posts.append({
+            "slug": slug,
+            "title": latest.meta.get("title") or slug,
+            "date": _iso(_at(first)),
+            "updated": _iso(_at(latest)),
+            "author": blog_common._display_author(latest.actor),
+            "authorship": latest.meta.get("authorship") or "human",
+            "body": body,
+        })
+    posts.sort(key=lambda p: p["date"] or "", reverse=True)
+    return {"posts": posts, "count": len(posts)}
+
+
+def _iso(value: dt.datetime | None) -> str | None:
+    return value.strftime("%Y-%m-%dT%H:%M:%SZ") if value else None  # stored naive UTC
 
 
 def _read_token(env_var: str, path: Path) -> str | None:
@@ -128,8 +226,7 @@ def _serialize_corpus(data: dict) -> str:
     """Sorted keys and a trailing newline, so an unchanged corpus produces an
     identical blob byte-for-byte — that identity is what lets `push_corpus`
     skip the commit when nothing changed. Post order is not re-sorted here: it
-    is already deterministic, coming from `blog_store.published()`'s own
-    ORDER BY."""
+    is already deterministic, coming from `_build_corpus`'s own sort."""
     return json.dumps(data, sort_keys=True, indent=2, ensure_ascii=False) + "\n"
 
 
@@ -177,7 +274,7 @@ def push_corpus() -> dict:
         return {"pushed": False, "corpus_sha": None,
                 "reason": f"no journal push credential at {TOKEN_FILE}", "site_build": None}
     try:
-        content = _serialize_corpus(blog_store.corpus())
+        content = _serialize_corpus(_build_corpus())
         new_blob_sha = _gh("POST", f"/repos/{REPO}/git/blobs", token,
                            {"content": content, "encoding": "utf-8"})["sha"]
 

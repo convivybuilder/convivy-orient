@@ -25,7 +25,7 @@ import library_client
 import library_fake
 import server as srv
 
-AGENT_TOKEN = "tok-agent-vivy"
+AGENT_TOKEN = "tok-agent-alpha"
 
 
 @pytest.fixture
@@ -39,12 +39,12 @@ def client(tmp_path, monkeypatch):
     # issue_01M35K54QHJYYPXWS28YWEHJP3), NOT `authz.ROLES`'s products list
     # below — browse/search now restrict to it (E19·4,
     # issue_01M35K5JQ7Z7MHYZGWRSB5F85M), so it must be seeded here or every
-    # fixture signal (product="vivy") reads as out-of-scope.
-    library_fake.seed_person_scope("mem@example.com", {"vivy"})
+    # fixture signal (product="alpha") reads as out-of-scope.
+    library_fake.seed_person_scope("mem@example.com", {"alpha"})
 
     roles = tmp_path / "roles.json"
     roles.write_text(json.dumps({
-        "mem@example.com": {"role": "member", "products": ["vivy"]},
+        "mem@example.com": {"role": "member", "products": ["alpha"]},
     }))
     monkeypatch.setattr(authz, "ROLES", roles)
 
@@ -57,7 +57,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(access_identity, "JWT_CONFIG", jwtc)
 
     toks = tmp_path / "api-tokens.json"
-    toks.write_text(json.dumps({AGENT_TOKEN: {"name": "an-agent", "products": ["vivy"]}}))
+    toks.write_text(json.dumps({AGENT_TOKEN: {"name": "an-agent", "products": ["alpha"]}}))
     monkeypatch.setattr(api_common, "API_TOKENS", toks)
 
     with TestClient(srv.app, follow_redirects=False) as c:
@@ -71,7 +71,7 @@ def _human(email="mem@example.com"):
 def _mk(**kw):
     base = dict(id=control_db.new_signal_id(), source="github_review",
                 kind="pr_comment", actor="reviewer", ingested_by="github-capture",
-                product="vivy", body="a finding")
+                product="alpha", body="a finding")
     base.update(kw)
     return base
 
@@ -154,7 +154,7 @@ def test_browse_total_comes_from_facets_not_from_the_capped_list_length(client, 
     takes no multi-project filter to recompute a true scoped total from
     (`browse`'s own docstring) — forced here via `crew_registry.
     covers_every_project` rather than relying on this machine's real
-    registry file to agree that "vivy" is every project."""
+    registry file to agree that "alpha" is every project."""
     import crew_registry
     import signal_search_api
     monkeypatch.setattr(crew_registry, "covers_every_project", lambda scope: True)
@@ -174,7 +174,7 @@ _REVIEW_STAMP = (
     "<!-- agentctl-review\n"
     "v: 1\n"
     "pr: 42\n"
-    "repo: vivy\n"
+    "repo: alpha\n"
     "reviewed-commit: 7842af3bf82cb74fa1522af\n"
     "verdict: APPROVE\n"
     "agent: reviewer\n"
@@ -278,29 +278,29 @@ def test_search_503s_on_a_library_outage_rather_than_a_silent_empty_result(clien
 
 
 def test_browse_excludes_a_project_outside_the_viewers_scope(client):
-    """The viewer holds `vivy` only (the fixture's person_scope). A `constance`
+    """The viewer holds `alpha` only (the fixture's person_scope). A `beta`
     row of the same kind must not appear, and must not count toward `total`."""
-    library_fake.seed_signal(**_mk(kind="alert", body="vivy disk full"))
-    library_fake.seed_signal(**_mk(kind="alert", product="constance", body="constance disk full"))
+    library_fake.seed_signal(**_mk(kind="alert", body="alpha disk full"))
+    library_fake.seed_signal(**_mk(kind="alert", product="beta", body="beta disk full"))
 
     r = client.get("/api/signals/browse", params={"kind": "alert"}, headers=_human())
     assert r.status_code == 200
     body = r.json()
-    assert [s["product"] for s in body["signals"]] == ["vivy"]
+    assert [s["product"] for s in body["signals"]] == ["alpha"]
     assert body["total"] == 1
-    assert "constance" not in r.text
+    assert "beta" not in r.text
 
 
 def test_search_excludes_a_project_outside_the_viewers_scope_from_rows_and_count(client):
     """`count` must agree with the filtered list: a Library count over the
     unfiltered window would read 2 here, and the gap between it and the one
     row shown would tell the viewer that another project matched `deploy`."""
-    library_fake.seed_signal(**_mk(body="vivy deploy failed"))
-    library_fake.seed_signal(**_mk(product="constance", body="constance deploy failed"))
+    library_fake.seed_signal(**_mk(body="alpha deploy failed"))
+    library_fake.seed_signal(**_mk(product="beta", body="beta deploy failed"))
 
     r = client.get("/api/signals/search", params={"q": "deploy"}, headers=_human())
     assert r.status_code == 200
     body = r.json()
-    assert [s["product"] for s in body["signals"]] == ["vivy"]
+    assert [s["product"] for s in body["signals"]] == ["alpha"]
     assert body["count"] == 1
-    assert "constance" not in r.text
+    assert "beta" not in r.text

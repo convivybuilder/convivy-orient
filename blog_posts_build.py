@@ -7,9 +7,9 @@ posts from the Writing Desk, and has a note saying these can be published
 elsewhere."
 
 The Writing Desk is where a post is written; this is where it is read. It is
-not another store: every post comes from `blog_store`, the one store of truth
-(`issue_01M0N650ZJHPQYPF54HD22RJEH`), and every other surface, convivy.com's
-Field Notes included, renders the same rows.
+not another store: every post is read back from the Library's Archives through
+`blog_api.published_views` and `blog_api.draft_views`, the same entries the
+Writing Desk writes and reads (E26, issue_01M584RKNA5KKFXE00GSHKEEYD).
 
 **Full tier only, like the rest of Documents**, and gated per viewer inside
 it the same way the Writing Desk's own routes are. Published posts are shown
@@ -26,7 +26,8 @@ from __future__ import annotations
 
 from html import escape
 
-import blog_store
+import blog_api
+import blog_common
 import design_system as ds
 from access_identity import tier_for
 from markdown_render import md_to_html
@@ -55,8 +56,9 @@ _PAGE_CSS = """
 """
 
 
-# `blog_store.AUTHORSHIP` is `human | collab | llm`. A human post needs no note;
-# the other two say a model had a hand in it, as the byline mark does elsewhere.
+# `blog_common.AUTHORSHIP` is `human | collab | llm`. A human post needs no
+# note; the other two say a model had a hand in it, as the byline mark does
+# elsewhere.
 _AUTHORSHIP_LABEL = {"collab": "written with a model", "llm": "written by a model"}
 
 
@@ -74,7 +76,7 @@ def _post_html(post, *, draft: bool) -> str:
     status = ('<span class="bp-status draft">draft</span>' if draft
               else '<span class="bp-status">published</span>')
     # Unescaped here: `meta` is escaped once, as a whole, below.
-    byline = blog_store._display_author(post.author or "")
+    byline = blog_common._display_author(post.author or "")
     meta = " · ".join(bit for bit in (
         byline,
         f"{label} {when}" if when else "",
@@ -109,11 +111,11 @@ def live_html(email: str, *, can_see_drafts: bool) -> str:
         '<p class="bp-note">These posts are yours to publish elsewhere, on your own '
         'site or blog, whenever you have one. Until then they live here. Write and '
         'edit them on the <a href="/writing-desk">Writing Desk</a>.</p>',
-        _group("Published", blog_store.published(), draft=False,
+        _group("Published", blog_api.published_views(), draft=False,
                empty="No published posts yet."),
     ]
     if can_see_drafts:
-        parts.append(_group("Drafts", blog_store.drafts(), draft=True,
+        parts.append(_group("Drafts", blog_api.draft_views(), draft=True,
                             empty="No drafts."))
     parts.append('</section>')
     return ds.page_shell(

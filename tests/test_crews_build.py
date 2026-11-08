@@ -104,24 +104,24 @@ def _refusal(id_, product, *, requester="session-B", holder="session-A",
 
 
 def test_work_by_crew_counts_only_open_and_claimed():
-    items = [_item("i1", "vivy", "open"), _item("i2", "vivy", "claimed"),
-             _item("i3", "vivy", "fixed"), _item("i4", "vivy", "wontfix")]
+    items = [_item("i1", "alpha", "open"), _item("i2", "alpha", "claimed"),
+             _item("i3", "alpha", "fixed"), _item("i4", "alpha", "wontfix")]
     work = cr._work_by_crew(items)
-    assert work["vivy"]["active"] == 2
+    assert work["alpha"]["active"] == 2
 
 
 def test_work_by_crew_counts_in_review_as_active_with_a_linked_pr():
-    items = [_item("i1", "vivy", "open", pr_url="https://github.com/convivy/vivy/pull/1"),
-             _item("i2", "vivy", "open")]
+    items = [_item("i1", "alpha", "open", pr_url="https://github.com/convivy/alpha/pull/1"),
+             _item("i2", "alpha", "open")]
     work = cr._work_by_crew(items)
-    assert work["vivy"] == {"active": 2, "in_review": 1}
+    assert work["alpha"] == {"active": 2, "in_review": 1}
 
 
 def test_work_by_crew_groups_by_product():
-    items = [_item("i1", "vivy", "open"), _item("i2", "constance", "claimed")]
+    items = [_item("i1", "alpha", "open"), _item("i2", "beta", "claimed")]
     work = cr._work_by_crew(items)
-    assert work["vivy"]["active"] == 1
-    assert work["constance"]["active"] == 1
+    assert work["alpha"]["active"] == 1
+    assert work["beta"]["active"] == 1
 
 
 # --- _leases_by_crew (joined via root_id, since a lease carries no product) --
@@ -130,16 +130,16 @@ def test_work_by_crew_groups_by_product():
 def test_leases_by_crew_joins_through_the_root_item():
     # No expires_at on this fixture lease -> the None guard in _lease_state,
     # which reads as ordinary "alive" rather than crashing or reading urgent.
-    items = [_item("i1", "vivy", "claimed")]
+    items = [_item("i1", "alpha", "claimed")]
     leases = [_lease("l1", "i1")]
     out = cr._leases_by_crew(leases, items)
-    assert out["vivy"] == {"alive": 1, "near_expiry": [], "dead": 0}
+    assert out["alpha"] == {"alive": 1, "near_expiry": [], "dead": 0}
 
 
 def test_leases_by_crew_splits_alive_near_expiry_and_dead():
     now = dt.datetime(2026, 9, 1, 12, 0, 0)
-    items = [_item("i1", "vivy", "claimed"), _item("i2", "vivy", "claimed"),
-             _item("i3", "vivy", "claimed")]
+    items = [_item("i1", "alpha", "claimed"), _item("i2", "alpha", "claimed"),
+             _item("i3", "alpha", "claimed")]
     leases = [
         _lease("l1", "i1", dead=False, expires_at=now + dt.timedelta(hours=4),
               heartbeat_at=now),
@@ -148,9 +148,9 @@ def test_leases_by_crew_splits_alive_near_expiry_and_dead():
         _lease("l3", "i3", dead=True),
     ]
     out = cr._leases_by_crew(leases, items, now=now)
-    assert out["vivy"]["alive"] == 1
-    assert out["vivy"]["dead"] == 1
-    assert out["vivy"]["near_expiry"] == [pytest.approx(240.0)]
+    assert out["alpha"]["alive"] == 1
+    assert out["alpha"]["dead"] == 1
+    assert out["alpha"]["near_expiry"] == [pytest.approx(240.0)]
 
 
 def test_leases_by_crew_drops_a_lease_whose_root_item_is_unknown():
@@ -171,8 +171,8 @@ def test_leases_by_crew_warns_once_per_render_when_policy_is_missing(monkeypatch
     warnings = []
     monkeypatch.setattr(cr._logger, "warning", lambda *a, **k: warnings.append(a))
     now = dt.datetime(2026, 9, 1, 12, 0, 0)
-    items = [_item("i1", "vivy", "claimed"), _item("i2", "vivy", "claimed"),
-             _item("i3", "vivy", "claimed")]
+    items = [_item("i1", "alpha", "claimed"), _item("i2", "alpha", "claimed"),
+             _item("i3", "alpha", "claimed")]
     leases = [_lease("l1", "i1", expires_at=now + dt.timedelta(hours=4)),
               _lease("l2", "i2", expires_at=now + dt.timedelta(hours=4)),
               _lease("l3", "i3", expires_at=now + dt.timedelta(hours=4))]
@@ -184,7 +184,7 @@ def test_leases_by_crew_does_not_warn_when_policy_is_served(monkeypatch):
     warnings = []
     monkeypatch.setattr(cr._logger, "warning", lambda *a, **k: warnings.append(a))
     now = dt.datetime(2026, 9, 1, 12, 0, 0)
-    items = [_item("i1", "vivy", "claimed")]
+    items = [_item("i1", "alpha", "claimed")]
     leases = [_lease("l1", "i1", expires_at=now + dt.timedelta(hours=4))]
     policy = lc.LeasePolicy(grace_seconds=14400, max_lease_seconds=86400)
     cr._leases_by_crew(leases, items, policy=policy, now=now)
@@ -288,16 +288,51 @@ def test_lease_state_guards_a_live_lease_with_no_expires_at():
 
 def test_roster_counts_sums_agents_across_lanes(monkeypatch):
     fake_roster = {"projects": [
-        {"slug": "vivy", "label": "Vivy", "repo": "/x",
+        {"slug": "alpha", "label": "Alpha", "repo": "/x",
          "lanes": [{"name": "daytime", "label": "Daytime", "agents": [{}, {}]},
                    {"name": "overnight", "label": "Overnight", "agents": [{}]}]},
     ], "autonomous": []}
     monkeypatch.setattr(cr.roster_build, "load_roster", lambda: fake_roster)
     counts = cr._roster_counts(frozenset(), True)
-    assert counts == {"vivy": {"label": "Vivy", "agents": 3}}
+    assert counts == {"alpha": {"label": "Alpha", "agents": 3}}
 
 
 # --- crew-name override (ADR-0042): this page is about crews, not repos ----
+#
+# Captured on main against the live registry (2026-10-22), before the
+# function read the registry at all:
+#   _CREW_NAME_OVERRIDES = {"agent-platform": "Bosun", "library": "Library",
+#                            "convivy-orient": "Orient", "substrate": "Steward"}
+# The first test below pins the registry-derived function to those exact
+# values, so a behaviour change here is a regression, not a readjustment.
+
+
+def test_crew_name_overrides_matches_the_values_captured_on_main():
+    assert cr._crew_name_overrides() == {
+        "agent-platform": "Bosun",
+        "library": "Library",
+        "convivy-orient": "Orient",
+        "substrate": "Steward",
+    }
+
+
+def test_crew_name_overrides_comes_from_a_made_up_registry(tmp_path, monkeypatch):
+    """No Convivy name: a made-up crew ('alpha') whose repo name diverges
+    from its own project key, read entirely from the fixture registry."""
+    path = tmp_path / "projects.json"
+    path.write_text(json.dumps({
+        "alpha": {"display": "Alpha", "repos": ["alpha-infra"]},
+    }))
+    monkeypatch.setenv("PROJECTS_JSON", str(path))
+    monkeypatch.setattr(cr, "_CREW_NAME_OVERRIDE_KEYS", ("alpha-infra",))
+    assert cr._crew_name_overrides() == {"alpha-infra": "Alpha"}
+
+
+def test_crew_name_overrides_is_empty_on_an_unreadable_registry(tmp_path, monkeypatch):
+    """Never falls back to a literal list — an unreadable registry answers
+    the empty dict, so the caller falls back to the roster's own label."""
+    monkeypatch.setenv("PROJECTS_JSON", str(tmp_path / "absent.json"))
+    assert cr._crew_name_overrides() == {}
 
 
 def test_roster_counts_renders_agent_platform_as_bosun(monkeypatch):
@@ -313,11 +348,11 @@ def test_roster_counts_renders_agent_platform_as_bosun(monkeypatch):
 
 def test_roster_counts_leaves_an_unmapped_crews_label_alone(monkeypatch):
     fake_roster = {"projects": [
-        {"slug": "selector-backend", "label": "Selector Backend", "repo": "/x", "lanes": []},
+        {"slug": "delta-backend", "label": "Delta Backend", "repo": "/x", "lanes": []},
     ], "autonomous": []}
     monkeypatch.setattr(cr.roster_build, "load_roster", lambda: fake_roster)
     counts = cr._roster_counts(frozenset(), True)
-    assert counts["selector-backend"]["label"] == "Selector Backend"
+    assert counts["delta-backend"]["label"] == "Delta Backend"
 
 
 # --- scope (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M): a crew whose repo is --
@@ -326,13 +361,13 @@ def test_roster_counts_leaves_an_unmapped_crews_label_alone(monkeypatch):
 
 
 def _registry(tmp_path, monkeypatch, units):
-    """Point `crew_registry.REGISTRY` at a scratch file, as
+    """Point the registry at a scratch file via `$PROJECTS_JSON`, as
     tests/test_crew_registry.py does — never the real
     ~/Convivy/agent-platform/config/projects.json, which CI has no checkout
     of."""
     path = tmp_path / "projects.json"
     path.write_text(json.dumps(units))
-    monkeypatch.setattr(cr.crew_registry, "REGISTRY", path)
+    monkeypatch.setenv("PROJECTS_JSON", str(path))
 
 
 def test_roster_counts_drops_a_crew_whose_repo_is_out_of_scope(tmp_path, monkeypatch):
@@ -342,11 +377,11 @@ def test_roster_counts_drops_a_crew_whose_repo_is_out_of_scope(tmp_path, monkeyp
     keyed "bosun" (the project)."""
     _registry(tmp_path, monkeypatch, {
         "bosun": {"crew": "bosun", "lifecycle": "active", "repos": ["agent-platform"]},
-        "vivy": {"crew": "vivy", "lifecycle": "active", "repos": ["vivy"]},
+        "alpha": {"crew": "alpha", "lifecycle": "active", "repos": ["alpha"]},
     })
     fake_roster = {"projects": [
         {"slug": "agent-platform", "label": "Agent Platform", "repo": "/x", "lanes": []},
-        {"slug": "vivy", "label": "Vivy", "repo": "/y", "lanes": []},
+        {"slug": "alpha", "label": "Alpha", "repo": "/y", "lanes": []},
     ], "autonomous": []}
     monkeypatch.setattr(cr.roster_build, "load_roster", lambda: fake_roster)
     counts = cr._roster_counts(frozenset({"bosun"}), False)
@@ -355,17 +390,17 @@ def test_roster_counts_drops_a_crew_whose_repo_is_out_of_scope(tmp_path, monkeyp
 
 def test_live_html_hides_a_crews_row_entirely_when_out_of_scope(tmp_path, monkeypatch):
     _registry(tmp_path, monkeypatch, {
-        "vivy": {"crew": "vivy", "lifecycle": "active", "repos": ["vivy"]},
-        "selector": {"crew": "selector", "lifecycle": "active", "repos": ["selector"]},
+        "alpha": {"crew": "alpha", "lifecycle": "active", "repos": ["alpha"]},
+        "delta": {"crew": "delta", "lifecycle": "active", "repos": ["delta"]},
     })
     roster = {"projects": [
-        {"slug": "vivy", "label": "Vivy", "repo": "/x", "lanes": []},
-        {"slug": "selector", "label": "Selector", "repo": "/y", "lanes": []},
+        {"slug": "alpha", "label": "Alpha", "repo": "/x", "lanes": []},
+        {"slug": "delta", "label": "Delta", "repo": "/y", "lanes": []},
     ], "autonomous": []}
     _patch_sources(monkeypatch, roster=roster)
-    html = cr.live_html(frozenset({"vivy"}), False)
-    assert ">Vivy<" in html
-    assert ">Selector<" not in html
+    html = cr.live_html(frozenset({"alpha"}), False)
+    assert ">Alpha<" in html
+    assert ">Delta<" not in html
 
 
 def test_live_html_hides_an_out_of_scope_collision(tmp_path, monkeypatch):
@@ -373,12 +408,12 @@ def test_live_html_hides_an_out_of_scope_collision(tmp_path, monkeypatch):
     roster alone would not reach it — `_visible_refusals` filters it against
     the same visible-repo set."""
     _registry(tmp_path, monkeypatch, {
-        "vivy": {"crew": "vivy", "lifecycle": "active", "repos": ["vivy"]},
+        "alpha": {"crew": "alpha", "lifecycle": "active", "repos": ["alpha"]},
     })
     _patch_sources(monkeypatch, refusals=[
-        _refusal("ref1", "vivy", requester="in-scope-session", root="issue_in_scope"),
+        _refusal("ref1", "alpha", requester="in-scope-session", root="issue_in_scope"),
         _refusal("ref2", "keel", requester="out-of-scope-session", root="issue_out_of_scope")])
-    html = cr.live_html(frozenset({"vivy"}), False)
+    html = cr.live_html(frozenset({"alpha"}), False)
     assert "in-scope-session" in html
     assert "out-of-scope-session" not in html
     assert "issue_out_of_scope" not in html
@@ -388,12 +423,12 @@ def test_live_html_shows_every_collision_to_a_whole_fleet_viewer(tmp_path, monke
     """`product=None` (unattributed) collisions show only to a whole-fleet
     viewer (default-deny), same rule as `whole_fleet`'s other gated figures."""
     _registry(tmp_path, monkeypatch, {
-        "vivy": {"crew": "vivy", "lifecycle": "active", "repos": ["vivy"]},
+        "alpha": {"crew": "alpha", "lifecycle": "active", "repos": ["alpha"]},
     })
     _patch_sources(monkeypatch, refusals=[_refusal("ref1", None, requester="orphan")])
-    narrow = cr.live_html(frozenset({"vivy"}), False)
+    narrow = cr.live_html(frozenset({"alpha"}), False)
     assert "orphan" not in narrow
-    whole = cr.live_html(frozenset({"vivy"}), True)
+    whole = cr.live_html(frozenset({"alpha"}), True)
     assert "orphan" in whole
 
 
@@ -401,18 +436,18 @@ def test_live_html_hides_an_out_of_scope_live_run(tmp_path, monkeypatch):
     """The raw "Live Bosun state" list is not keyed by roster slug either —
     `_visible_live_runs` filters it against the same visible-repo set."""
     _registry(tmp_path, monkeypatch, {
-        "vivy": {"crew": "vivy", "lifecycle": "active", "repos": ["vivy"]},
-        "selector": {"crew": "selector", "lifecycle": "active", "repos": ["selector"]},
+        "alpha": {"crew": "alpha", "lifecycle": "active", "repos": ["alpha"]},
+        "delta": {"crew": "delta", "lifecycle": "active", "repos": ["delta"]},
     })
     in_scope_run = lc.LiveRunRecord(run_id="r1", agent="a", task="in-scope task",
-                                    started_at=dt.datetime(2026, 9, 2, 20, 0), repo="vivy",
+                                    started_at=dt.datetime(2026, 9, 2, 20, 0), repo="alpha",
                                     worktree="/x", pid=1, parent_run=None, holds=[])
     out_of_scope_run = lc.LiveRunRecord(run_id="r2", agent="a", task="out-of-scope task",
                                         started_at=dt.datetime(2026, 9, 2, 20, 0),
-                                        repo="selector", worktree="/x", pid=2,
+                                        repo="delta", worktree="/x", pid=2,
                                         parent_run=None, holds=[])
     _patch_sources(monkeypatch, live_runs=_live_runs_result([in_scope_run, out_of_scope_run]))
-    html = cr.live_html(frozenset({"vivy"}), False)
+    html = cr.live_html(frozenset({"alpha"}), False)
     assert "in-scope task" in html
     assert "out-of-scope task" not in html
 
@@ -422,12 +457,12 @@ def test_runs_html_cannot_reach_an_out_of_scope_crews_runs(tmp_path, monkeypatch
     roster` (already filtered), so it falls to the same "pick a crew" empty
     state an unknown product name gets — no separate scope check needed."""
     _registry(tmp_path, monkeypatch, {
-        "selector": {"crew": "selector", "lifecycle": "active", "repos": ["selector"]},
+        "delta": {"crew": "delta", "lifecycle": "active", "repos": ["delta"]},
     })
-    roster = {"projects": [{"slug": "selector", "label": "Selector", "repo": "/x", "lanes": []}],
+    roster = {"projects": [{"slug": "delta", "label": "Delta", "repo": "/x", "lanes": []}],
              "autonomous": []}
     _patch_sources(monkeypatch, roster=roster)
-    html = cr.runs_html({"product": "selector"}, frozenset({"vivy"}), False)
+    html = cr.runs_html({"product": "delta"}, frozenset({"alpha"}), False)
     assert "Pick a crew" in html
 
 
@@ -445,9 +480,9 @@ def test_live_html_renders_bosun_rather_than_agent_platform(monkeypatch):
 
 
 def test_refusals_by_crew_groups_by_the_rows_own_product():
-    out = cr._refusals_by_crew([_refusal("r1", "vivy"), _refusal("r2", "vivy"),
+    out = cr._refusals_by_crew([_refusal("r1", "alpha"), _refusal("r2", "alpha"),
                                 _refusal("r3", "keel")])
-    assert out == {"vivy": 2, "keel": 1}
+    assert out == {"alpha": 2, "keel": 1}
 
 
 def test_refusals_by_crew_is_empty_rather_than_zeroed_when_there_are_none():
@@ -479,32 +514,32 @@ def _patch_sources(monkeypatch, *, roster=None, items=None, leases=None, policy=
 
 def test_live_html_renders_a_row_per_roster_crew(monkeypatch):
     roster = {"projects": [
-        {"slug": "vivy", "label": "Vivy", "repo": "/x", "lanes": []},
-        {"slug": "constance", "label": "Constance", "repo": "/y", "lanes": []},
+        {"slug": "alpha", "label": "Alpha", "repo": "/x", "lanes": []},
+        {"slug": "beta", "label": "Beta", "repo": "/y", "lanes": []},
     ], "autonomous": []}
     _patch_sources(monkeypatch, roster=roster)
     html = cr.live_html(frozenset(), True)
-    assert "Vivy" in html
-    assert "Constance" in html
+    assert "Alpha" in html
+    assert "Beta" in html
 
 
 def test_live_html_links_a_crew_that_is_also_a_known_project(monkeypatch):
-    roster = {"projects": [{"slug": "vivy", "label": "Vivy", "repo": "/x", "lanes": []}],
+    roster = {"projects": [{"slug": "alpha", "label": "Alpha", "repo": "/x", "lanes": []}],
              "autonomous": []}
     _patch_sources(monkeypatch, roster=roster)
     html = cr.live_html(frozenset(), True)
-    assert 'href="/projects/vivy"' in html
+    assert 'href="/projects/alpha"' in html
 
 
 def test_live_html_does_not_link_a_crew_with_no_project_page(monkeypatch):
-    # e.g. "selector-backend" — a real dispatchable crew per roster discovery,
-    # but not one of project_build.KNOWN_PROJECTS' names.
-    roster = {"projects": [{"slug": "selector-backend", "label": "Selector Backend",
+    # e.g. "delta-backend" — a real dispatchable crew per roster discovery,
+    # but not one of project_build.known_projects()'s names.
+    roster = {"projects": [{"slug": "delta-backend", "label": "Delta Backend",
                            "repo": "/x", "lanes": []}], "autonomous": []}
     _patch_sources(monkeypatch, roster=roster)
     html = cr.live_html(frozenset(), True)
-    assert 'href="/projects/selector-backend"' not in html
-    assert "Selector Backend" in html
+    assert 'href="/projects/delta-backend"' not in html
+    assert "Delta Backend" in html
 
 
 def test_live_html_defers_nothing_and_names_no_missing_library_route(monkeypatch):
@@ -553,7 +588,7 @@ def test_live_html_does_not_claim_orient_lacks_a_courses_client(monkeypatch):
     (the operator, 2026-09-03): `/chart-house` already renders every live Course, and a
     Course's `product` key is not this page's crew slug — `bosun` versus
     `agent-platform` — so joining Courses here would silently drop the Bosun
-    until someone copied `_BEAD_PROJECT_ALIASES`."""
+    until someone copied `_BEAD_PROJECT_ALIAS_KEYS`."""
     monkeypatch.setattr(cr.library_client, "probe_route", lambda path, **k: None)
     _patch_sources(monkeypatch)
     html = cr.live_html(frozenset(), True)
@@ -599,9 +634,9 @@ def test_live_html_says_so_when_no_runs_are_on_foot(monkeypatch):
 
 
 def test_live_html_in_flight_column_counts_a_crews_live_runs(monkeypatch):
-    roster = _roster_one_crew(slug="vivy", label="Vivy")
+    roster = _roster_one_crew(slug="alpha", label="Alpha")
     run = lc.LiveRunRecord(run_id="run-live-1", agent="a", task="t",
-                           started_at=dt.datetime(2026, 9, 2, 20, 0), repo="vivy",
+                           started_at=dt.datetime(2026, 9, 2, 20, 0), repo="alpha",
                            worktree="/x", pid=1, parent_run=None, holds=[])
     _patch_sources(monkeypatch, roster=roster, live_runs=_live_runs_result([run]))
     html = cr.live_html(frozenset(), True)
@@ -609,7 +644,7 @@ def test_live_html_in_flight_column_counts_a_crews_live_runs(monkeypatch):
 
 
 def test_live_html_in_flight_column_is_em_dash_with_no_live_runs(monkeypatch):
-    roster = _roster_one_crew(slug="vivy", label="Vivy")
+    roster = _roster_one_crew(slug="alpha", label="Alpha")
     _patch_sources(monkeypatch, roster=roster)
     html = cr.live_html(frozenset(), True)
     assert "running</span>" not in html
@@ -747,9 +782,9 @@ def test_live_html_never_throws_on_every_source_empty(monkeypatch):
 
 
 def test_live_html_shows_leases_as_alive_and_dead_not_just_a_total(monkeypatch):
-    roster = {"projects": [{"slug": "vivy", "label": "Vivy", "repo": "/x", "lanes": []}],
+    roster = {"projects": [{"slug": "alpha", "label": "Alpha", "repo": "/x", "lanes": []}],
              "autonomous": []}
-    items = [_item("i1", "vivy", "claimed"), _item("i2", "vivy", "claimed")]
+    items = [_item("i1", "alpha", "claimed"), _item("i2", "alpha", "claimed")]
     leases = [_lease("l1", "i1", dead=False), _lease("l2", "i2", dead=True)]
     _patch_sources(monkeypatch, roster=roster, items=items, leases=leases)
     html = cr.live_html(frozenset(), True)
@@ -764,8 +799,8 @@ def test_live_html_marks_a_lease_near_expiry_before_it_expires_with_time_remaini
     way to see the marking exist at all: construct one and render it through
     the real path, `live_html()`, rather than asserting on `_lease_state`
     alone."""
-    roster = _roster_one_crew(slug="vivy", label="Vivy")
-    items = [_item("i1", "vivy", "claimed")]
+    roster = _roster_one_crew(slug="alpha", label="Alpha")
+    items = [_item("i1", "alpha", "claimed")]
     now = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
     leases = [_lease("l1", "i1", dead=False, expires_at=now + dt.timedelta(minutes=4),
                      heartbeat_at=now - dt.timedelta(minutes=30))]
@@ -785,8 +820,8 @@ def test_live_html_marks_a_lease_near_expiry_on_the_max_lease_arm_end_to_end(
     pinned against MAX_LEASE with a fresh heartbeat, and the served policy
     that lets `_lease_state` tell that arm apart from grace. Without the
     served `policy` threaded through, this renders "alive" — wrong."""
-    roster = _roster_one_crew(slug="vivy", label="Vivy")
-    items = [_item("i1", "vivy", "claimed")]
+    roster = _roster_one_crew(slug="alpha", label="Alpha")
+    items = [_item("i1", "alpha", "claimed")]
     now = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
     policy = lc.LeasePolicy(grace_seconds=4 * 3600, max_lease_seconds=24 * 3600)
     taken_at = now - dt.timedelta(hours=24) + dt.timedelta(minutes=4)
@@ -801,9 +836,9 @@ def test_live_html_marks_a_lease_near_expiry_on_the_max_lease_arm_end_to_end(
 
 def test_live_html_renders_near_expiry_alive_and_dead_as_three_distinct_states(
         monkeypatch):
-    roster = _roster_one_crew(slug="vivy", label="Vivy")
-    items = [_item("i1", "vivy", "claimed"), _item("i2", "vivy", "claimed"),
-             _item("i3", "vivy", "claimed")]
+    roster = _roster_one_crew(slug="alpha", label="Alpha")
+    items = [_item("i1", "alpha", "claimed"), _item("i2", "alpha", "claimed"),
+             _item("i3", "alpha", "claimed")]
     now = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
     leases = [
         _lease("l1", "i1", dead=False, expires_at=now + dt.timedelta(minutes=4),
@@ -864,7 +899,7 @@ def test_a_hostile_requester_name_cannot_break_out_of_the_collision_line(
     (security-reviewer, PR #200)."""
     nasty = '<script>alert(1)</script>'
     _patch_sources(monkeypatch, refusals=[
-        _refusal("r1", "vivy", requester=nasty, holder=nasty, root=nasty)])
+        _refusal("r1", "alpha", requester=nasty, holder=nasty, root=nasty)])
     html = cr.live_html(frozenset(), True)
     assert "<script>alert(1)</script>" not in html
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
@@ -1053,8 +1088,8 @@ def test_session_crew_and_role_dispatched_agent_worktree():
 
 
 def test_session_crew_and_role_human_primary_checkout():
-    cwd = str(cr.CONVIVY_ROOT / "vivy")
-    assert cr._session_crew_and_role(cwd) == ("vivy", "human")
+    cwd = str(cr.CONVIVY_ROOT / "alpha")
+    assert cr._session_crew_and_role(cwd) == ("alpha", "human")
 
 
 def test_session_crew_and_role_neither_shape():
@@ -1112,14 +1147,14 @@ def test_outcome_summary_falls_back_to_the_raw_name_for_an_unknown_status():
 
 def test_run_view_of_a_finished_run(tmp_path):
     root = tmp_path / "agent-runs"
-    d = _write_run(root, "2026-08-29", "run-x1", agent="sel-coder", label="ship-it",
+    d = _write_run(root, "2026-08-29", "run-x1", agent="del-coder", label="ship-it",
                    started_at="2026-08-29T12:00:00Z", ended_at="2026-08-29T12:30:00Z",
                    cost_usd=4.5)
     run = {"meta": json.loads((d / "meta.json").read_text()),
           "cost": json.loads((d / "cost.json").read_text()),
           "outcome": json.loads((d / "outcome.json").read_text())}
     rv = cr._run_view(run, {})
-    assert rv["agent"] == "sel-coder"
+    assert rv["agent"] == "del-coder"
     assert rv["label"] == "ship-it"
     assert rv["in_flight"] is False
     assert rv["duration_s"] == 1800.0
@@ -1145,7 +1180,7 @@ def test_run_view_carries_task_and_label_raw_and_unclipped():
     `_dispatched_for_html`'s job now, not `_run_view`'s — see the tests
     below for that behavior end to end."""
     run = {"meta": {"run_id": "r1", "agent": "coder", "task": "x" * 200, "label": None,
-                    "started_at": None, "ended_at": None, "repo": "vivy",
+                    "started_at": None, "ended_at": None, "repo": "alpha",
                     "model_resolved": "m", "co_session": None},
           "cost": None, "outcome": None}
     rv = cr._run_view(run, {})
@@ -1177,9 +1212,9 @@ def test_dispatched_for_is_an_em_dash_when_neither_exists():
 
 
 def test_run_view_joins_to_its_session_when_the_session_resolves():
-    session = {"cwd": str(cr.CONVIVY_ROOT / "vivy"), "started_at": "x", "model": "m"}
+    session = {"cwd": str(cr.CONVIVY_ROOT / "alpha"), "started_at": "x", "model": "m"}
     run = {"meta": {"run_id": "r1", "agent": "a", "task": "t", "label": None,
-                    "started_at": None, "ended_at": None, "repo": "vivy",
+                    "started_at": None, "ended_at": None, "repo": "alpha",
                     "model_resolved": "m", "co_session": "sess-9"},
           "cost": None, "outcome": None}
     rv = cr._run_view(run, {"sess-9": session})
@@ -1189,7 +1224,7 @@ def test_run_view_joins_to_its_session_when_the_session_resolves():
 
 def test_run_view_session_is_none_when_the_join_does_not_resolve():
     run = {"meta": {"run_id": "r1", "agent": "a", "task": "t", "label": None,
-                    "started_at": None, "ended_at": None, "repo": "vivy",
+                    "started_at": None, "ended_at": None, "repo": "alpha",
                     "model_resolved": "m", "co_session": "sess-missing"},
           "cost": None, "outcome": None}
     rv = cr._run_view(run, {})
@@ -1202,27 +1237,27 @@ def test_run_view_session_is_none_when_the_join_does_not_resolve():
 
 def test_group_runs_by_crew_uses_the_runs_own_repo_field(tmp_path):
     root = tmp_path / "agent-runs"
-    _write_run(root, "2026-08-29", "run-a", repo="vivy",
+    _write_run(root, "2026-08-29", "run-a", repo="alpha",
               started_at="2026-08-29T10:00:00Z", ended_at="2026-08-29T10:10:00Z")
-    _write_run(root, "2026-08-29", "run-b", repo="selector",
+    _write_run(root, "2026-08-29", "run-b", repo="delta",
               started_at="2026-08-29T11:00:00Z", ended_at="2026-08-29T11:10:00Z")
     date_dirs = cr._date_dirs(dt.date(2026, 8, 29), dt.date(2026, 8, 29))
     runs = cr._load_run_records(date_dirs)
     grouped = cr._group_runs_by_crew(runs, {})
-    assert set(grouped) == {"vivy", "selector"}
-    assert len(grouped["vivy"]) == 1
+    assert set(grouped) == {"alpha", "delta"}
+    assert len(grouped["alpha"]) == 1
 
 
 def test_group_runs_by_crew_sorts_newest_first(tmp_path):
     root = tmp_path / "agent-runs"
-    _write_run(root, "2026-08-29", "run-early", repo="vivy",
+    _write_run(root, "2026-08-29", "run-early", repo="alpha",
               started_at="2026-08-29T09:00:00Z", ended_at="2026-08-29T09:10:00Z")
-    _write_run(root, "2026-08-29", "run-late", repo="vivy",
+    _write_run(root, "2026-08-29", "run-late", repo="alpha",
               started_at="2026-08-29T15:00:00Z", ended_at="2026-08-29T15:10:00Z")
     date_dirs = cr._date_dirs(dt.date(2026, 8, 29), dt.date(2026, 8, 29))
     runs = cr._load_run_records(date_dirs)
     grouped = cr._group_runs_by_crew(runs, {})
-    assert [rv["run_id"] for rv in grouped["vivy"]] == ["run-late", "run-early"]
+    assert [rv["run_id"] for rv in grouped["alpha"]] == ["run-late", "run-early"]
 
 
 def test_group_runs_by_crew_drops_a_run_with_no_repo(tmp_path):
@@ -1248,36 +1283,36 @@ def test_group_runs_by_crew_drops_a_run_with_no_repo(tmp_path):
 def test_last_activity_by_crew_a_live_run_counts_as_activity_now():
     now = cr.orient_time.to_mst("2026-09-02T20:00:00Z")
     out = cr._last_activity_by_crew(
-        ["vivy"], live_runs_by_crew={"vivy": [object()]}, runs_by_crew={},
+        ["alpha"], live_runs_by_crew={"alpha": [object()]}, runs_by_crew={},
         sessions_by_crew={}, now=now)
-    assert out["vivy"] == now
+    assert out["alpha"] == now
 
 
 def test_last_activity_by_crew_uses_the_newest_local_run_record():
     now = cr.orient_time.to_mst("2026-09-02T20:00:00Z")
-    runs_by_crew = {"vivy": [
+    runs_by_crew = {"alpha": [
         {"started_at": "2026-09-02T10:00:00Z", "ended_at": "2026-09-02T10:30:00Z"},
         {"started_at": "2026-09-02T09:00:00Z", "ended_at": "2026-09-02T09:10:00Z"},
     ]}
-    out = cr._last_activity_by_crew(["vivy"], live_runs_by_crew={}, runs_by_crew=runs_by_crew,
+    out = cr._last_activity_by_crew(["alpha"], live_runs_by_crew={}, runs_by_crew=runs_by_crew,
                                     sessions_by_crew={}, now=now)
-    assert out["vivy"] == cr.orient_time.to_mst("2026-09-02T10:30:00Z")
+    assert out["alpha"] == cr.orient_time.to_mst("2026-09-02T10:30:00Z")
 
 
 def test_last_activity_by_crew_uses_the_newest_session_heartbeat():
     now = cr.orient_time.to_mst("2026-09-02T20:00:00Z")
-    sessions_by_crew = {"vivy": [{"heartbeat_at": "2026-09-02T11:00:00Z"},
+    sessions_by_crew = {"alpha": [{"heartbeat_at": "2026-09-02T11:00:00Z"},
                                  {"heartbeat_at": "2026-09-02T08:00:00Z"}]}
-    out = cr._last_activity_by_crew(["vivy"], live_runs_by_crew={}, runs_by_crew={},
+    out = cr._last_activity_by_crew(["alpha"], live_runs_by_crew={}, runs_by_crew={},
                                     sessions_by_crew=sessions_by_crew, now=now)
-    assert out["vivy"] == cr.orient_time.to_mst("2026-09-02T11:00:00Z")
+    assert out["alpha"] == cr.orient_time.to_mst("2026-09-02T11:00:00Z")
 
 
 def test_last_activity_by_crew_is_none_for_a_crew_with_no_signal_at_all():
     now = cr.orient_time.to_mst("2026-09-02T20:00:00Z")
-    out = cr._last_activity_by_crew(["vivy"], live_runs_by_crew={}, runs_by_crew={},
+    out = cr._last_activity_by_crew(["alpha"], live_runs_by_crew={}, runs_by_crew={},
                                     sessions_by_crew={}, now=now)
-    assert out["vivy"] is None
+    assert out["alpha"] is None
 
 
 # --- live_html: default order is most-recent-activity-first, not -----------
@@ -1287,15 +1322,15 @@ def test_last_activity_by_crew_is_none_for_a_crew_with_no_signal_at_all():
 def test_live_html_sorts_most_recent_activity_first_by_default(tmp_path, monkeypatch):
     root = tmp_path / "agent-runs"
     today = _today()
-    _write_run(root, today, "run-1", repo="vivy", started_at=f"{today}T10:00:00Z",
+    _write_run(root, today, "run-1", repo="alpha", started_at=f"{today}T10:00:00Z",
               ended_at=f"{today}T10:10:00Z")
     roster = {"projects": [
-        {"slug": "vivy", "label": "Vivy", "repo": "/x", "lanes": []},
+        {"slug": "alpha", "label": "Alpha", "repo": "/x", "lanes": []},
         {"slug": "quiet", "label": "Quiet", "repo": "/y", "lanes": []},
     ], "autonomous": []}
     _patch_sources(monkeypatch, roster=roster)
     html = cr.live_html(frozenset(), True)
-    assert html.index(">Vivy<") < html.index(">Quiet<")
+    assert html.index(">Alpha<") < html.index(">Quiet<")
 
 
 def test_live_html_a_crew_with_no_activity_signal_sorts_last(tmp_path, monkeypatch):
@@ -1510,14 +1545,14 @@ def test_a_run_with_a_list_shaped_meta_is_skipped_and_other_crews_still_render(
     root = tmp_path / "agent-runs"
     today = _today()
     _write_run(root, today, "run-good", agent="orient-coder", label="good-task",
-              repo="selector", started_at=f"{today}T10:00:00Z",
+              repo="delta", started_at=f"{today}T10:00:00Z",
               ended_at=f"{today}T10:10:00Z")
     bad_dir = root / today / "run-bad"
     bad_dir.mkdir(parents=True)
     (bad_dir / "meta.json").write_text("[1, 2, 3]")
     roster = {"projects": [
-        {"slug": "vivy", "label": "Vivy", "repo": "/x", "lanes": []},
-        {"slug": "selector", "label": "Selector", "repo": "/y", "lanes": []},
+        {"slug": "alpha", "label": "Alpha", "repo": "/x", "lanes": []},
+        {"slug": "delta", "label": "Delta", "repo": "/y", "lanes": []},
     ], "autonomous": []}
     _patch_sources(monkeypatch, roster=roster)
     html = cr.live_html(frozenset(), True)
@@ -1535,15 +1570,15 @@ def test_a_run_with_list_shaped_exit_status_does_not_crash_other_crews(tmp_path,
     root = tmp_path / "agent-runs"
     today = _today()
     _write_run(root, today, "run-good", agent="orient-coder", label="good-task",
-              repo="selector", started_at=f"{today}T10:00:00Z",
+              repo="delta", started_at=f"{today}T10:00:00Z",
               ended_at=f"{today}T10:10:00Z")
     _write_run(root, today, "run-bad-status", agent="orient-coder", label="bad-status-task",
-              repo="vivy", started_at=f"{today}T09:00:00Z",
+              repo="alpha", started_at=f"{today}T09:00:00Z",
               ended_at=f"{today}T09:10:00Z",
               outcome={"exit_status": ["x"], "files_modified": [], "prs_opened": []})
     roster = {"projects": [
-        {"slug": "vivy", "label": "Vivy", "repo": "/x", "lanes": []},
-        {"slug": "selector", "label": "Selector", "repo": "/y", "lanes": []},
+        {"slug": "alpha", "label": "Alpha", "repo": "/x", "lanes": []},
+        {"slug": "delta", "label": "Delta", "repo": "/y", "lanes": []},
     ], "autonomous": []}
     _patch_sources(monkeypatch, roster=roster)
     html = cr.live_html(frozenset(), True)
@@ -1557,15 +1592,15 @@ def test_a_run_with_int_shaped_prs_opened_does_not_crash_other_crews(tmp_path, m
     root = tmp_path / "agent-runs"
     today = _today()
     _write_run(root, today, "run-good", agent="orient-coder", label="good-task",
-              repo="selector", started_at=f"{today}T10:00:00Z",
+              repo="delta", started_at=f"{today}T10:00:00Z",
               ended_at=f"{today}T10:10:00Z")
     _write_run(root, today, "run-bad-prs", agent="orient-coder", label="bad-prs-task",
-              repo="vivy", started_at=f"{today}T09:00:00Z",
+              repo="alpha", started_at=f"{today}T09:00:00Z",
               ended_at=f"{today}T09:10:00Z",
               outcome={"exit_status": "completed", "files_modified": [], "prs_opened": 3})
     roster = {"projects": [
-        {"slug": "vivy", "label": "Vivy", "repo": "/x", "lanes": []},
-        {"slug": "selector", "label": "Selector", "repo": "/y", "lanes": []},
+        {"slug": "alpha", "label": "Alpha", "repo": "/x", "lanes": []},
+        {"slug": "delta", "label": "Delta", "repo": "/y", "lanes": []},
     ], "autonomous": []}
     _patch_sources(monkeypatch, roster=roster)
     html = cr.live_html(frozenset(), True)
@@ -1579,18 +1614,18 @@ def test_a_run_with_int_shaped_agent_does_not_crash_other_crews(tmp_path, monkey
     root = tmp_path / "agent-runs"
     today = _today()
     _write_run(root, today, "run-good", agent="orient-coder", label="good-task",
-              repo="selector", started_at=f"{today}T10:00:00Z",
+              repo="delta", started_at=f"{today}T10:00:00Z",
               ended_at=f"{today}T10:10:00Z")
     bad_dir = root / today / "run-bad-agent"
     bad_dir.mkdir(parents=True)
     (bad_dir / "meta.json").write_text(json.dumps({
         "run_id": "run-bad-agent", "agent": 7, "task": "t", "label": None,
         "started_at": f"{today}T09:00:00Z", "ended_at": f"{today}T09:10:00Z",
-        "repo": "vivy", "model_resolved": "m", "co_session": None,
+        "repo": "alpha", "model_resolved": "m", "co_session": None,
     }))
     roster = {"projects": [
-        {"slug": "vivy", "label": "Vivy", "repo": "/x", "lanes": []},
-        {"slug": "selector", "label": "Selector", "repo": "/y", "lanes": []},
+        {"slug": "alpha", "label": "Alpha", "repo": "/x", "lanes": []},
+        {"slug": "delta", "label": "Delta", "repo": "/y", "lanes": []},
     ], "autonomous": []}
     _patch_sources(monkeypatch, roster=roster)
     html = cr.live_html(frozenset(), True)
@@ -1644,11 +1679,11 @@ def test_build_static_seeds_an_empty_fallback_not_real_data(tmp_path, monkeypatc
     (issue_01M2KVHTVFF4MAQF94M2SP6TZ0's own crews.html-shaped leak, closed
     further at E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M): a snapshot naming a
     real crew would leak to a scoped viewer."""
-    roster = {"projects": [{"slug": "vivy", "label": "Vivy", "repo": "/x", "lanes": []}],
+    roster = {"projects": [{"slug": "alpha", "label": "Alpha", "repo": "/x", "lanes": []}],
              "autonomous": []}
     _patch_sources(monkeypatch, roster=roster)
     monkeypatch.setattr(cr, "OUT", tmp_path)
     cr.build_static()
     html = (tmp_path / "crews.html").read_text(encoding="utf-8")
-    assert "Vivy" not in html
+    assert "Alpha" not in html
     assert "Live view unavailable" in html

@@ -1,5 +1,5 @@
 """Cross-surface cost agreement for CQ·154 (issue_01M4ZBBQK0KFH9YQ16MNK75HJT):
-the crew view, Home and Chart House all read
+the crew view and Chart House both read
 `library_client.cost_rollup_by_project` over `library_client.list_finished_runs`,
 so a fixture with differing per-project costs must show the identical figure
 on each — the Definition of Done's own language. Every surface here is
@@ -15,9 +15,7 @@ import json
 import pytest
 
 import chart_house_build as ch
-import crew_registry
 import crews_build as cr
-import home_build
 import library_client as lc
 
 
@@ -34,8 +32,8 @@ def _fixed_runs(monkeypatch):
     """Two projects with DIFFERENT costs, present for every test in this
     file regardless of which surface or scope it renders — the point of the
     scoped test below is that SCOPE hides a project, never absent data."""
-    runs = [_finished_run("vivy", 10.0), _finished_run("vivy", 5.0),
-           _finished_run("constance", 25.0)]
+    runs = [_finished_run("alpha", 10.0), _finished_run("alpha", 5.0),
+           _finished_run("beta", 25.0)]
     monkeypatch.setattr(lc, "list_finished_runs", lambda since, until=None: runs)
 
 
@@ -43,10 +41,10 @@ def _fixed_runs(monkeypatch):
 def _registry(tmp_path, monkeypatch):
     path = tmp_path / "projects.json"
     path.write_text(json.dumps({
-        "vivy": {"crew": "vivy", "lifecycle": "active", "repos": ["vivy"]},
-        "constance": {"crew": "constance", "lifecycle": "active", "repos": ["constance"]},
+        "alpha": {"crew": "alpha", "lifecycle": "active", "repos": ["alpha"]},
+        "beta": {"crew": "beta", "lifecycle": "active", "repos": ["beta"]},
     }))
-    monkeypatch.setattr(crew_registry, "REGISTRY", path)
+    monkeypatch.setenv("PROJECTS_JSON", str(path))
 
 
 @pytest.fixture(autouse=True)
@@ -89,37 +87,31 @@ def _mock_roster(monkeypatch, slugs):
     monkeypatch.setattr(cr.roster_build, "load_roster", lambda: roster)
 
 
-def test_crew_view_chart_house_and_home_agree_on_differing_project_costs(monkeypatch):
-    _mock_courses(monkeypatch, ["vivy", "constance"])
-    _mock_roster(monkeypatch, ["vivy", "constance"])
-    scope = frozenset({"vivy", "constance"})
+def test_crew_view_and_chart_house_agree_on_differing_project_costs(monkeypatch):
+    _mock_courses(monkeypatch, ["alpha", "beta"])
+    _mock_roster(monkeypatch, ["alpha", "beta"])
+    scope = frozenset({"alpha", "beta"})
 
     crew_html = cr.live_html(scope, True)
     chart_html = ch.live_html(scope)
-    home_spend = home_build._today_spend(whole_fleet=True)
 
-    # vivy: 10.0 + 5.0 = 15.00; constance: 25.00 — the crew view's per-project
+    # alpha: 10.0 + 5.0 = 15.00; beta: 25.00 — the crew view's per-project
     # cost equals the sum of that project's finished-run records.
     assert "$15.00" in crew_html
     assert "$25.00" in crew_html
     assert "$15.00" in chart_html
     assert "$25.00" in chart_html
-    # Home and the dashboards show the same figure: the fleet total is the
-    # sum of the SAME per-project rollup both pages just rendered.
-    assert home_spend["value"] == "$40.00"
 
 
-def test_a_viewer_scoped_to_one_project_sees_only_that_cost_and_no_fleet_total(monkeypatch):
-    _mock_courses(monkeypatch, ["vivy", "constance"])
-    _mock_roster(monkeypatch, ["vivy", "constance"])
-    scope = frozenset({"vivy"})
+def test_a_viewer_scoped_to_one_project_sees_only_that_cost(monkeypatch):
+    _mock_courses(monkeypatch, ["alpha", "beta"])
+    _mock_roster(monkeypatch, ["alpha", "beta"])
+    scope = frozenset({"alpha"})
 
     crew_html = cr.live_html(scope, False)
     chart_html = ch.live_html(scope)
-    home_spend = home_build._today_spend(whole_fleet=False)
 
     assert "$15.00" in crew_html
-    assert "Constance" not in crew_html
+    assert "Beta" not in crew_html
     assert "$25.00" not in chart_html
-    assert "Constance" not in chart_html
-    assert home_spend is None
+    assert "Beta" not in chart_html

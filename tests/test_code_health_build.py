@@ -8,7 +8,6 @@ import json
 from datetime import datetime, timezone
 
 import code_health_build as ch
-import crew_registry
 
 
 # --- ci_health ---------------------------------------------------------------
@@ -69,7 +68,7 @@ def test_harvest_emits_main_only_ci_alongside_all_branch(monkeypatch):
     monkeypatch.setattr(ch, "reverts_recent", lambda p: 0)
     monkeypatch.setattr(ch, "count_tests", lambda p: 0)
     monkeypatch.setattr(ch, "coverage_pct", lambda full: None)
-    monkeypatch.setattr(ch, "REPOS", [("sous-chef", "product")])
+    monkeypatch.setattr(ch, "_registry_repos", lambda: [("epsilon", "product")])
 
     row = ch.harvest(now)[0]
     assert row["ci_pass_rate"] == 0.5            # all-branch — dashboard, unchanged
@@ -97,6 +96,93 @@ def test_count_reverts_matches_revert_subjects_only():
 
 def test_count_reverts_empty():
     assert ch.count_reverts([]) == 0
+
+
+# --- REPOS comes from the registry's own `code_health` arrays (CQ-171
+# slice 5, the steward's registry-fields ruling) -----------------------------
+#
+# Live-registry-shaped fixture (own `repos`/`products` per unit, a
+# `code_health` array naming which of a unit's own repos get a health row),
+# since the live file doesn't carry `code_health` yet.
+_CODE_HEALTH_REGISTRY = {
+    "alpha": {"products": ["alpha"], "repos": ["alpha"], "code_health": ["alpha"]},
+    "beta": {"products": ["beta"], "repos": ["beta"], "code_health": ["beta"]},
+    "epsilon": {"products": ["epsilon"], "repos": ["epsilon"], "code_health": ["epsilon"]},
+    "delta": {"products": ["delta"], "repos": ["delta", "delta-backend"],
+                 "code_health": ["delta"]},
+    "gamma": {"products": ["gamma"], "repos": ["gamma"], "code_health": ["gamma"]},
+    "bosun": {"products": [], "repos": ["agent-platform"], "code_health": ["agent-platform"]},
+    "library": {"products": [], "repos": ["library", "knowledge"], "code_health": ["knowledge"]},
+    "convivy-orient": {"products": [], "repos": ["convivy-orient", "www"],
+                       "code_health": ["convivy-orient"]},
+    "lambda-kit": {"products": [], "repos": ["convivy-app-kit", "convivy-services"],
+            "code_health": ["convivy-app-kit"]},
+    "_products": {
+        "alpha": {"display": "Alpha", "owner": "convivy"},
+        "beta": {"display": "Beta", "owner": "convivy"},
+        "epsilon": {"display": "Epsilon", "owner": "convivy"},
+        "delta": {"display": "Delta", "owner": "convivy"},
+        "gamma": {"display": "Gamma", "owner": "convivy"},
+    },
+}
+
+
+def _set_code_health_registry(tmp_path, monkeypatch, registry):
+    path = tmp_path / "projects.json"
+    path.write_text(json.dumps(registry))
+    monkeypatch.setenv("PROJECTS_JSON", str(path))
+
+
+def test_registry_repos_is_exactly_todays_nine(tmp_path, monkeypatch):
+    """The set of harvested repos is each unit's own `code_health` array —
+    today's nine repos exactly, no more and no fewer."""
+    _set_code_health_registry(tmp_path, monkeypatch, _CODE_HEALTH_REGISTRY)
+    repos = {repo for repo, _ in ch._registry_repos()}
+    assert repos == {"alpha", "beta", "epsilon", "delta", "agent-platform",
+                     "knowledge", "convivy-orient", "gamma", "convivy-app-kit"}
+
+
+def test_registry_repos_tags_gamma_as_product_not_internal(tmp_path, monkeypatch):
+    """gamma links a product in `_products` (same as alpha/beta/
+    epsilon/delta), so it is tagged "product" — the flip from the old
+    literal's "internal" tag, since the registry draws no such distinction."""
+    _set_code_health_registry(tmp_path, monkeypatch, _CODE_HEALTH_REGISTRY)
+    kinds = dict(ch._registry_repos())
+    assert kinds["gamma"] == "product"
+    assert kinds["alpha"] == "product" and kinds["epsilon"] == "product"
+    assert kinds["agent-platform"] == "internal"
+    assert kinds["knowledge"] == "internal"
+    assert kinds["convivy-orient"] == "internal"
+    assert kinds["convivy-app-kit"] == "internal"
+
+
+def test_registry_repos_comes_from_a_made_up_registry(tmp_path, monkeypatch):
+    """No Convivy name: a made-up unit's own `code_health` array and
+    `_products` map drive REPOS entirely from the fixture registry."""
+    _set_code_health_registry(tmp_path, monkeypatch, {
+        "beta-studio": {"products": ["beta-studio"], "repos": ["beta-app"],
+                        "code_health": ["beta-app"]},
+        "gamma-tools": {"products": [], "repos": ["gamma-cli"], "code_health": ["gamma-cli"]},
+        "_products": {"beta-studio": {"display": "Beta Studio", "owner": "acme"}},
+    })
+    assert dict(ch._registry_repos()) == {"beta-app": "product", "gamma-cli": "internal"}
+
+
+def test_registry_repos_is_empty_on_an_unreadable_registry(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROJECTS_JSON", str(tmp_path / "absent.json"))
+    assert ch._registry_repos() == []
+
+
+def test_registry_repos_drops_a_code_health_entry_outside_the_units_repos(tmp_path, monkeypatch):
+    """A `code_health` entry naming a repo its own unit doesn't list under
+    `repos` never reaches the harvest — only `crew_registry.code_health_repos`
+    enforces this, but `_registry_repos` is the function `harvest` actually
+    calls, so the gap has to be checked all the way through."""
+    _set_code_health_registry(tmp_path, monkeypatch, {
+        "beta-studio": {"products": [], "repos": ["beta-app"],
+                        "code_health": ["beta-app", "not-betas-repo"]},
+    })
+    assert dict(ch._registry_repos()) == {"beta-app": "internal"}
 
 
 # --- pr_metrics --------------------------------------------------------------
@@ -206,34 +292,34 @@ def _row(repo, **kw):
 
 
 def test_history_record_is_slim_and_carries_only_trend_metrics():
-    rec = ch.history_record(_row("vivy", ci_pass_rate=0.8, test_count=42), "2026-06-02")
-    assert rec["date"] == "2026-06-02" and rec["repo"] == "vivy"
+    rec = ch.history_record(_row("alpha", ci_pass_rate=0.8, test_count=42), "2026-06-02")
+    assert rec["date"] == "2026-06-02" and rec["repo"] == "alpha"
     assert rec["ci_pass_rate"] == 0.8 and rec["test_count"] == 42
     assert set(rec) == {"date", "repo", *ch.TREND_METRICS}
     assert "ci_last" not in rec and "kind" not in rec   # non-trend fields dropped
 
 
 def test_merge_history_appends_new_day():
-    day1 = ch.merge_history([], [_row("vivy"), _row("constance")], "2026-06-01")
-    day2 = ch.merge_history(day1, [_row("vivy"), _row("constance")], "2026-06-02")
+    day1 = ch.merge_history([], [_row("alpha"), _row("beta")], "2026-06-01")
+    day2 = ch.merge_history(day1, [_row("alpha"), _row("beta")], "2026-06-02")
     assert len(day2) == 4
     assert sorted({r["date"] for r in day2}) == ["2026-06-01", "2026-06-02"]
 
 
 def test_merge_history_same_day_rerun_overwrites_not_duplicates():
-    first = ch.merge_history([], [_row("vivy", test_count=10)], "2026-06-02")
-    again = ch.merge_history(first, [_row("vivy", test_count=20)], "2026-06-02")
+    first = ch.merge_history([], [_row("alpha", test_count=10)], "2026-06-02")
+    again = ch.merge_history(first, [_row("alpha", test_count=20)], "2026-06-02")
     assert len(again) == 1                       # idempotent — last run of the day wins
     assert again[0]["test_count"] == 20
 
 
 def test_merge_history_sorted_by_date_then_repo():
     h = ch.merge_history(
-        ch.merge_history([], [_row("vivy"), _row("agent-platform")], "2026-06-02"),
-        [_row("constance")], "2026-06-01")
+        ch.merge_history([], [_row("alpha"), _row("agent-platform")], "2026-06-02"),
+        [_row("beta")], "2026-06-01")
     assert [(r["date"], r["repo"]) for r in h] == [
-        ("2026-06-01", "constance"),
-        ("2026-06-02", "agent-platform"), ("2026-06-02", "vivy")]
+        ("2026-06-01", "beta"),
+        ("2026-06-02", "agent-platform"), ("2026-06-02", "alpha")]
 
 
 # --- render ------------------------------------------------------------------
@@ -343,25 +429,25 @@ def test_live_html_scopes_rows_and_history_to_the_viewer(tmp_path, monkeypatch):
     repo `agent-platform` belongs to project `bosun`, as in the real
     registry, so a filter against the slug would drop it."""
     registry = tmp_path / "projects.json"
-    registry.write_text(json.dumps({"_meta": {}, "vivy": {"repos": ["vivy"]},
+    registry.write_text(json.dumps({"_meta": {}, "alpha": {"repos": ["alpha"]},
                                     "bosun": {"repos": ["agent-platform"]}}))
-    monkeypatch.setattr(crew_registry, "REGISTRY", registry)
-    rows = [_row("vivy", test_count=10), _row("agent-platform", test_count=20)]
-    history = [ch.history_record(_row("vivy", test_count=10), "2026-06-01"),
+    monkeypatch.setenv("PROJECTS_JSON", str(registry))
+    rows = [_row("alpha", test_count=10), _row("agent-platform", test_count=20)]
+    history = [ch.history_record(_row("alpha", test_count=10), "2026-06-01"),
               ch.history_record(_row("agent-platform", test_count=20), "2026-06-01")]
     monkeypatch.setattr(ch, "load_snapshot", lambda: ("2026-06-02T00:00:00Z", rows))
     monkeypatch.setattr(ch, "load_history", lambda: history)
 
-    scoped = ch.live_html(frozenset({"vivy"})).replace(" ", "")
-    assert '"repo":"vivy"' in scoped
+    scoped = ch.live_html(frozenset({"alpha"})).replace(" ", "")
+    assert '"repo":"alpha"' in scoped
     assert '"repo":"agent-platform"' not in scoped
 
     bosun = ch.live_html(frozenset({"bosun"})).replace(" ", "")
     assert '"repo":"agent-platform"' in bosun
-    assert '"repo":"vivy"' not in bosun
+    assert '"repo":"alpha"' not in bosun
 
-    both = ch.live_html(frozenset({"vivy", "bosun"})).replace(" ", "")
-    assert '"repo":"vivy"' in both
+    both = ch.live_html(frozenset({"alpha", "bosun"})).replace(" ", "")
+    assert '"repo":"alpha"' in both
     assert '"repo":"agent-platform"' in both
 
 

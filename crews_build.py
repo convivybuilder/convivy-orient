@@ -29,8 +29,8 @@ Four quarters shipped here, all buildable without a Library change:
   (`list_leases()`'s own envelope, alongside the rows) rather than a
   hardcoded grace/max-lease guess, since those are Library tunables that
   move.
-- **Cost**: reuses `chart_house_build`'s rollup and alias table directly
-  (`_cost_rollup`/`_cost_for`/`_COST_ALIASES`) rather than recomputing —
+- **Cost**: reuses `chart_house_build`'s rollup and alias lookup directly
+  (`_cost_rollup`/`_cost_for`/`_cost_aliases`) rather than recomputing —
   one source of truth for "what a project's runs cost", read through two
   lenses.
 - **Refusals**: `library_client.list_lease_refusals()` (new), the fourth
@@ -44,13 +44,14 @@ Four quarters shipped here, all buildable without a Library change:
 
 Crew identity is `roster_build.discover_projects()`'s own self-updating list
 — the same set that already answers "who has a dispatchable crew" for
-/engineering/roster — rather than `project_build.KNOWN_PROJECTS` (a
-narrower, hand-maintained area list Chart House uses for "which repos read
-as a project"). The two lists disagree at the edges (roster's discovery adds
-`CFO`, `library`, `selector-backend`, the `*-commercial` sandboxes;
-KNOWN_PROJECTS has `keel`, `platform`, `company`, none of which have their
-own `.claude/agents` crew) — deliberate, not a bug: this page is about who
-can be DISPATCHED, which is roster's question, not Chart House's.
+/engineering/roster — rather than `project_build.known_projects()` (a
+narrower area list Chart House uses for "which repos read as a project").
+The two lists disagree at the edges (roster's discovery adds a handful of
+crews with no project of their own, a product's own backend-only repo, the
+`*-commercial` sandboxes;
+`known_projects()` has `keel`, `platform`, `company`, none of which have
+their own `.claude/agents` crew) — deliberate, not a bug: this page is about
+who can be DISPATCHED, which is roster's question, not Chart House's.
 
 **Live Bosun state** (the operator reading /crews at their screen, 2026-09-02) is now
 built: `library_client.list_live_runs()` reads `GET /runs`, which the
@@ -74,15 +75,14 @@ Chart house page? I don't think we need it here"). It is — `/chart-house`
 renders one row per live Course with its steps classified done / approved /
 proposed / unspecified, a counts line, and a state chip separating "awaits
 your sign-off" from "underway" from "running uncharted". Checked before
-removing the panel: six products carry a live Course (`bosun`,
-`convivy-deck`, `convivy-orient`, `library`, `selector`, `vivy`) and the
-Chart House renders all six, so nothing would be added here that is not
-already answered there.
+removing the panel: six products carry a live Course and the Chart House
+renders all six, so nothing would be added here that is not already
+answered there.
 
 **A second reason, which is the one that would have bitten.** A Course's
 `product` key is not this page's crew slug. The Bosun's Course is keyed
 `bosun` while `/crews` keys the crew `agent-platform` — the same divergence
-`chart_house_build._BEAD_PROJECT_ALIASES` exists for. Joining Courses here
+`chart_house_build._BEAD_PROJECT_ALIAS_KEYS` exists for. Joining Courses here
 would silently drop the Bosun until someone copied that alias table, and a
 second copy of an alias table is how one goes stale.
 
@@ -154,8 +154,8 @@ _logger = logging.getLogger(__name__)
 #   `cost.json` and `outcome.json` are ABSENT (not empty) while a run is still
 #   in flight — `ended_at: null` on `meta.json` is the in-flight signal, and
 #   the other two files simply don't exist yet.
-# - A run's own `meta.repo` is the crew attribution (e.g. "selector",
-#   "convivy-orient") — authoritative, unlike a session's `product` field,
+# - A run's own `meta.repo` is the crew attribution (e.g. "convivy-orient")
+#   — authoritative, unlike a session's `product` field,
 #   which is only the basename of `cwd` (a worktree slug for a dispatched
 #   agent, not a clean product name).
 # - The join from a run to its dispatching session is `meta.co_session`,
@@ -193,14 +193,32 @@ RUNS_PAGE_LIMIT = 300
 # is the source: crew `bosun` = repo `agent-platform`, `library` = Library,
 # `convivy-orient` = Orient, `substrate` = Steward. `roster_build.load_roster()`'s
 # `label` is the REPO's display name — right for /engineering/roster, which is
-# a repo view — so this overrides it here rather than renaming
-# `roster_build.PROJECTS` itself, which would relabel the repo view too.
-_CREW_NAME_OVERRIDES = {
-    "agent-platform": "Bosun",
-    "library": "Library",
-    "convivy-orient": "Orient",
-    "substrate": "Steward",
-}
+# a repo view — so this overrides it here rather than changing
+# roster_build's labels, which would relabel the repo view too.
+# WHICH repos need an override is the same judgment call chart_house_build's
+# alias tables make for the same reason — the registry has no field for "this
+# repo's name diverges from its project's crew label" on its own. The keys
+# stay literal; only the display name each maps to is read fresh from the
+# registry (the owning project's own `display`) rather than retyped.
+_CREW_NAME_OVERRIDE_KEYS = ("agent-platform", "library", "convivy-orient", "substrate")
+
+
+def _crew_name_overrides() -> dict[str, str]:
+    """Each of `_CREW_NAME_OVERRIDE_KEYS`' owning project's own `display`,
+    found by reverse lookup through the registry's `repos` lists. An
+    unreadable registry, or a key the registry has lost, answers the empty
+    dict, so the caller falls back to `roster_build`'s own repo-view label
+    rather than a stale copy of this table."""
+    try:
+        unit_map = crew_registry.units()
+    except crew_registry.RegistryUnavailable:
+        return {}
+    repo_to_display = {
+        repo: unit["display"] for unit in unit_map.values()
+        for repo in unit.get("repos") or ()
+        if isinstance(unit.get("display"), str) and unit["display"].strip()}
+    return {key: repo_to_display[key] for key in _CREW_NAME_OVERRIDE_KEYS
+            if key in repo_to_display}
 
 
 def _read_json(path: Path) -> dict | None:
@@ -841,11 +859,11 @@ def _visible_repos(scope: frozenset[str], whole_fleet: bool) -> frozenset[str] |
     issue_01M35K5JQ7Z7MHYZGWRSB5F85M).
 
     This page's "crew" is a repo, not a registry project slug — the same gap
-    `crew_registry.repos_in_scope`'s own docstring names (`agent-platform`
-    belongs to project `bosun`; `convivy-app-kit`/`convivy-services` to `svc`)
-    — so that function, which already resolves a project slug the Library
-    returns to the repo names a project unit lists, is reused rather than a
-    second alias table grown here."""
+    `crew_registry.repos_in_scope`'s own docstring names (a repo's own name
+    is not always its owning project's registry slug) — so that function,
+    which already resolves a project slug the Library returns to the repo
+    names a project unit lists, is reused rather than a second alias table
+    grown here."""
     if whole_fleet:
         return None
     return crew_registry.repos_in_scope(scope)
@@ -866,7 +884,7 @@ def _roster_counts(scope: frozenset[str], whole_fleet: bool) -> dict[str, dict]:
         if visible is not None and proj["slug"] not in visible:
             continue
         agent_count = sum(len(lane["agents"]) for lane in proj["lanes"])
-        label = _CREW_NAME_OVERRIDES.get(proj["slug"], proj["label"])
+        label = _crew_name_overrides().get(proj["slug"], proj["label"])
         out[proj["slug"]] = {"label": label, "agents": agent_count}
     return out
 
@@ -915,7 +933,7 @@ def _row(slug: str, label: str, agents: int, work: dict | None,
     cost_usd = cost["cost_usd"] if cost else 0.0
     cost_cell = f"${cost['cost_usd']:,.2f} · {cost['runs']} run{'s' if cost['runs'] != 1 else ''}" \
         if cost else "—"
-    href = f"/projects/{slug}" if slug in project_build.KNOWN_PROJECTS else None
+    href = f"/projects/{slug}" if slug in project_build.known_projects() else None
     name_html = (f'<a href="{escape(href, quote=True)}">{escape(label)}</a>'
                 if href else escape(label))
     now = now or orient_time.now()
@@ -1266,7 +1284,8 @@ def live_html(scope: frozenset[str], whole_fleet: bool) -> str:
     per ADR-0042 where they differ from a repo's own label. Work and leases read
     live from the Library, joined by issue id; refusals carry their own product
     and need no join. Live Bosun state reads <code>GET /runs</code> directly.
-    Cost, sessions and runs from local files under <code>~/Convivy/agent-runs</code>
+    A crew's cost comes from the Library's finished-run records. Sessions and each
+    run's own row still come from local files under <code>~/Convivy/agent-runs</code>
     — Orient holds no copy of them; a run's own "repo" field is what attributes
     it to a crew. A crew name links to its project page when one exists.</div>
   </div>

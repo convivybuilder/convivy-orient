@@ -146,19 +146,19 @@ def _velocity_html(tmp_path, monkeypatch):
     p = tmp_path / "velocity.json"
     p.write_text(json.dumps({
         "generated_at": "2026-06-20T12:00:00",
-        "bucket_order": ["Vivy"],
+        "bucket_order": ["Alpha"],
         "notes": [],
         "windows": {"30": {"total": {"commits": 5, "prs_merged": 3, "features": 1,
                                       "loc_net": 100, "reverts": 0, "adrs": 0, "arch": 0,
                                       "change_failure_rate": 0.0, "ci_first_pass_pct": 100.0,
                                       "survival_pct": None},
-                            "buckets": {"Vivy": {"commits": 5, "prs_merged": 3, "features": 1,
+                            "buckets": {"Alpha": {"commits": 5, "prs_merged": 3, "features": 1,
                                                   "loc_net": 100, "reverts": 0, "adrs": 0, "arch": 0,
                                                   "change_failure_rate": 0.0, "ci_first_pass_pct": 100.0,
                                                   "survival_pct": None}}}},
     }))
     monkeypatch.setattr(vb, "DATA_PATH", p)
-    return vb.render(vb.load(), frozenset({"vivy"}), True)
+    return vb.render(vb.load(), frozenset({"alpha"}), True)
 
 
 def test_velocity_embeds_url_state_functions(tmp_path, monkeypatch):
@@ -190,7 +190,7 @@ def test_velocity_init_normalize_subscribe(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _health_row(repo="vivy"):
+def _health_row(repo="alpha"):
     return {"repo": repo, "kind": "product", "ci_pass_rate": 0.9, "ci_last": "success",
             "ci_last_date": "2026-06-20", "ci_pass_rate_main": 1.0, "ci_last_main": "success",
             "open_prs": 2, "oldest_open_days": 3, "merged_recent": 5,

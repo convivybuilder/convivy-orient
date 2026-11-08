@@ -10,7 +10,7 @@ umask or a create-then-chmod window: `ensure_owner_only_dir` chmods after
 every call, and `ensure_owner_only_file` opens with the mode baked into the
 `open(2)` call so there is no window where a new file is briefly readable.
 
-No sqlalchemy/alembic import here on purpose — `github_capture.py` is a
+No sqlalchemy/alembic import here on purpose — `deploy_watch.py` is a
 lightweight launchd-triggered script and should stay that way.
 """
 from __future__ import annotations

@@ -8,12 +8,21 @@ route + nav registration.
 from __future__ import annotations
 
 import datetime as dt
+import re
 
 import pytest
 
 import control_db
 import library_fake
 import release_notes_build as rn
+
+_STAMP_RE = re.compile(r'<footer class="render-stamp".*?</footer>', re.S)
+
+
+def _normalised(html: str) -> str:
+    """Strip the per-request render-stamp footer (design_system.render_stamp)
+    so two renders taken moments apart can be compared for equality."""
+    return _STAMP_RE.sub("", html)
 
 
 @pytest.fixture
@@ -32,7 +41,7 @@ def db(tmp_path, monkeypatch):
 def _mk(**kw):
     base = dict(id=control_db.new_signal_id(), source="release-notes", kind="release_note",
                 stream="v1.0.0", actor="operator@example.com", ingested_by="operator@example.com",
-                product="vivy", body="## What's new\n- A thing shipped",
+                product="alpha", body="## What's new\n- A thing shipped",
                 privacy_class="internal", produced_at=dt.datetime(2026, 7, 17))
     base.update(kw)
     return base
@@ -46,7 +55,7 @@ def _seed(*sigs):
 def test_only_release_note_kind_renders(db):
     _seed(_mk(body="KEEP-THIS release note"),
           dict(id=control_db.new_signal_id(), source="github", kind="changelog",
-              actor="x", ingested_by="cap", product="vivy", stream="vivy",
+              actor="x", ingested_by="cap", product="alpha", stream="alpha",
               body="NOT-A-RELEASE-NOTE", privacy_class="internal"))
     html = rn.live_html()
     assert "KEEP-THIS" in html
@@ -76,11 +85,11 @@ def test_body_is_xss_safe(db):
 
 
 def test_chip_filterable_by_product(db):
-    _seed(_mk(product="vivy", body="VIVY-NOTE"),
-          _mk(product="constance", body="CONSTANCE-NOTE"))
+    _seed(_mk(product="alpha", body="ALPHA-NOTE"),
+          _mk(product="beta", body="BETA-NOTE"))
     html = rn.live_html()
-    assert 'data-prod="vivy"' in html and 'data-prod="constance"' in html
-    assert "VIVY-NOTE" in html and "CONSTANCE-NOTE" in html
+    assert 'data-prod="alpha"' in html and 'data-prod="beta"' in html
+    assert "ALPHA-NOTE" in html and "BETA-NOTE" in html
 
 
 def test_authoring_form_and_capture_gate(db):
@@ -98,6 +107,57 @@ def test_form_strips_tier_suffix_from_actor(db):
     assert "'__WHOAMI__'.split(' · ')[0]" in html
     assert "actor:'__WHOAMI__'" not in html and 'actor:"__WHOAMI__"' not in html
     assert "dedup_key:'release_note:'" in html  # double-submit / duplicate-version guard
+
+
+# --- ?product= filtering (CQ·167, issue_01M5C9ZDJ14Y55B54XGM5RW5J6) --------
+
+
+def test_requested_product_filters_to_that_product_only(db):
+    _seed(_mk(product="alpha", body="ALPHA-NOTE"),
+          _mk(product="beta", body="BETA-NOTE"))
+    html = rn.live_html(requested_product="alpha")
+    assert "ALPHA-NOTE" in html
+    assert "BETA-NOTE" not in html
+
+
+def test_out_of_scope_product_renders_like_a_nonexistent_one(db):
+    """A viewer scoped to just `alpha` asking for `northwind` (a real product,
+    outside their scope) must get the identical page a typo'd, wholly
+    nonexistent product name gets — nothing that confirms `northwind` exists.
+
+    Not "beta" here: `_write_form` hardcodes that exact string as the
+    product field's unrelated placeholder example, which would make it
+    appear on every render and defeat this check regardless of filtering."""
+    _seed(_mk(product="alpha", body="ALPHA-NOTE"),
+          _mk(product="northwind", body="NORTHWIND-NOTE"))
+    scope, whole_fleet = frozenset({"alpha"}), False
+    out_of_scope = _normalised(rn.live_html(scope, whole_fleet, requested_product="northwind"))
+    nonexistent = _normalised(rn.live_html(scope, whole_fleet, requested_product="does-not-exist"))
+    assert out_of_scope == nonexistent
+    assert "northwind" not in out_of_scope
+    assert "NORTHWIND-NOTE" not in out_of_scope
+
+
+def test_filter_label_is_escaped_in_the_lede(db):
+    _seed(_mk(product="<b>alpha</b>", body="MATCHED-NOTE"))
+    html = rn.live_html(requested_product="<b>alpha</b>")
+    assert "MATCHED-NOTE" in html
+    assert "<b>alpha</b>" not in html
+    assert "&lt;b&gt;alpha&lt;/b&gt;" in html
+
+
+def test_absent_product_renders_the_fleet_wide_page(db):
+    _seed(_mk(product="alpha", body="ALPHA-NOTE"))
+    html = rn.live_html()
+    assert "Curated, user-facing notes — one per shipped version" in html
+    assert "ALPHA-NOTE" in html
+
+
+def test_empty_product_renders_the_fleet_wide_page(db):
+    _seed(_mk(product="alpha", body="ALPHA-NOTE"))
+    html = rn.live_html(requested_product="")
+    assert "Curated, user-facing notes — one per shipped version" in html
+    assert "ALPHA-NOTE" in html
 
 
 def test_empty_state(db):

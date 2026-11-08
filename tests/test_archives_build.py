@@ -8,12 +8,39 @@ own `kind` filter — the guarantee that makes "the rest is searchable" true.
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 import archives_build as a
 import control_db
 import library_client
 import library_fake
+
+
+# --- the GitHub org comes from the install's registry (ORG) ----------------
+
+
+def test_pr_url_uses_the_registrys_org():
+    assert a._pr_url("alpha", 42) == "https://github.com/convivy/alpha/pull/42"
+
+
+def test_pr_url_uses_the_repos_own_unit_github_owner(tmp_path, monkeypatch):
+    """No Convivy name: the org embedded in the link comes from `alpha`'s own
+    unit's `github_owner`, not from `_products`' business-ownership `owner`
+    field (which is never read for this)."""
+    path = tmp_path / "projects.json"
+    path.write_text(json.dumps({
+        "alpha-co": {"repos": ["alpha"], "github_owner": "acme"},
+        "_products": {"widget": {"display": "Widget", "owner": "omega"}},
+    }))
+    monkeypatch.setenv("PROJECTS_JSON", str(path))
+    assert a._pr_url("alpha", 7) == "https://github.com/acme/alpha/pull/7"
+
+
+def test_pr_url_falls_back_to_convivy_on_an_unreadable_registry(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROJECTS_JSON", str(tmp_path / "absent.json"))
+    assert a._pr_url("alpha", 7) == "https://github.com/convivy/alpha/pull/7"
 
 
 @pytest.fixture
@@ -28,8 +55,8 @@ def db(tmp_path, monkeypatch):
 
 def _comment(**kw):
     base = dict(id=control_db.new_signal_id(), source="github_review", kind="pr_comment",
-                actor="alice", ingested_by="agent", product="vivy",
-                body="a comment", refs={"pr": 42, "url": "https://github.com/convivy/vivy/pull/42#c1"},
+                actor="alice", ingested_by="agent", product="alpha",
+                body="a comment", refs={"pr": 42, "url": "https://github.com/convivy/alpha/pull/42#c1"},
                 privacy_class="internal", produced_at=None)
     base.update(kw)
     return base
@@ -37,9 +64,9 @@ def _comment(**kw):
 
 def _description(**kw):
     base = dict(id=control_db.new_signal_id(), source="github", kind="changelog",
-                actor="bob", ingested_by="agent", product="vivy",
+                actor="bob", ingested_by="agent", product="alpha",
                 body="Add feature X\n\nDescription of X.",
-                refs={"pr": 42, "url": "https://github.com/convivy/vivy/pull/42",
+                refs={"pr": 42, "url": "https://github.com/convivy/alpha/pull/42",
                       "merged_at": "2026-08-01T00:00:00Z"},
                 privacy_class="internal", produced_at=None)
     base.update(kw)
@@ -64,8 +91,8 @@ def test_multiple_comments_on_one_pr_render_as_one_group(db):
 
 
 def test_different_prs_render_as_separate_groups(db):
-    _seed(_comment(refs={"pr": 42, "url": "https://github.com/convivy/vivy/pull/42#c1"}),
-          _comment(refs={"pr": 43, "url": "https://github.com/convivy/vivy/pull/43#c1"}))
+    _seed(_comment(refs={"pr": 42, "url": "https://github.com/convivy/alpha/pull/42#c1"}),
+          _comment(refs={"pr": 43, "url": "https://github.com/convivy/alpha/pull/43#c1"}))
     html = a.prs_live_html(frozenset(), True)
     assert html.count("pr-group") >= 2
     assert "PR #42" in html and "PR #43" in html
@@ -148,38 +175,38 @@ def test_unlinked_comments_sit_inside_the_filterable_groups_container(db):
 
 
 def test_pr_groups_carry_their_product_for_client_side_filtering(db):
-    _seed(_comment(product="vivy", refs={"pr": 1, "url": "https://x/1"}),
-          _comment(product="constance", refs={"pr": 2, "url": "https://x/2"}))
+    _seed(_comment(product="alpha", refs={"pr": 1, "url": "https://x/1"}),
+          _comment(product="beta", refs={"pr": 2, "url": "https://x/2"}))
     html = a.prs_live_html(frozenset(), True)
-    assert 'data-prod="vivy"' in html
-    assert 'data-prod="constance"' in html
+    assert 'data-prod="alpha"' in html
+    assert 'data-prod="beta"' in html
 
 
 def test_pr_chip_counts_match_visible_groups_not_a_wider_total(db):
     """The chip's own count must match what selecting it shows — the
     decisions_build/signals_build rule: derive chip counts from the same set
     being rendered, not a separate broader query."""
-    _seed(_comment(product="vivy", refs={"pr": 1, "url": "https://x/1"}),
-          _comment(product="vivy", refs={"pr": 2, "url": "https://x/2"}),
-          _comment(product="constance", refs={"pr": 3, "url": "https://x/3"}))
+    _seed(_comment(product="alpha", refs={"pr": 1, "url": "https://x/1"}),
+          _comment(product="alpha", refs={"pr": 2, "url": "https://x/2"}),
+          _comment(product="beta", refs={"pr": 3, "url": "https://x/3"}))
     html = a.prs_live_html(frozenset(), True)
-    assert '<span class="n">2</span></button>' in html  # vivy: 2 PR groups
-    assert 'data-prod="vivy"' in html and 'data-prod="constance"' in html
+    assert '<span class="n">2</span></button>' in html  # alpha: 2 PR groups
+    assert 'data-prod="alpha"' in html and 'data-prod="beta"' in html
 
 
 def test_changelogs_chip_filterable_by_product(db):
-    _seed(_description(product="vivy", body="VIVY-CHANGELOG-ENTRY"),
-          _description(id=control_db.new_signal_id(), product="constance",
-                       body="CONSTANCE-CHANGELOG-ENTRY"))
+    _seed(_description(product="alpha", body="ALPHA-CHANGELOG-ENTRY"),
+          _description(id=control_db.new_signal_id(), product="beta",
+                       body="BETA-CHANGELOG-ENTRY"))
     html = a.changelogs_live_html(frozenset(), True)
-    assert 'data-prod="vivy"' in html and 'data-prod="constance"' in html
-    assert "VIVY-CHANGELOG-ENTRY" in html and "CONSTANCE-CHANGELOG-ENTRY" in html
+    assert 'data-prod="alpha"' in html and 'data-prod="beta"' in html
+    assert "ALPHA-CHANGELOG-ENTRY" in html and "BETA-CHANGELOG-ENTRY" in html
 
 
 def test_changelogs_only_changelog_kind_renders(db):
     _seed(_description(body="KEEP-THIS-CHANGELOG"),
           dict(id=control_db.new_signal_id(), source="slack", kind="notification",
-              actor="platform", ingested_by="agent", product="vivy",
+              actor="platform", ingested_by="agent", product="alpha",
               body="NOT-A-CHANGELOG", privacy_class="internal"))
     html = a.changelogs_live_html(frozenset(), True)
     assert "KEEP-THIS-CHANGELOG" in html
@@ -192,23 +219,23 @@ def test_changelogs_only_changelog_kind_renders(db):
 def test_prs_fan_out_is_restricted_to_the_viewers_scope(db):
     """A scoped viewer's fan-out never even fetches an out-of-scope
     product's PRs, let alone renders them."""
-    _seed(_comment(product="vivy", body="IN-SCOPE-COMMENT", refs={"pr": 1, "url": "https://x/1"}),
-          _comment(product="constance", body="OUT-OF-SCOPE-COMMENT",
+    _seed(_comment(product="alpha", body="IN-SCOPE-COMMENT", refs={"pr": 1, "url": "https://x/1"}),
+          _comment(product="beta", body="OUT-OF-SCOPE-COMMENT",
                   refs={"pr": 2, "url": "https://x/2"}))
-    html = a.prs_live_html(frozenset({"vivy"}), False)
+    html = a.prs_live_html(frozenset({"alpha"}), False)
     assert "IN-SCOPE-COMMENT" in html
     assert "OUT-OF-SCOPE-COMMENT" not in html
-    assert 'data-prod="constance"' not in html
+    assert 'data-prod="beta"' not in html
 
 
 def test_changelogs_fan_out_is_restricted_to_the_viewers_scope(db):
-    _seed(_description(product="vivy", body="VIVY-CHANGELOG-ENTRY"),
-          _description(id=control_db.new_signal_id(), product="constance",
-                       body="CONSTANCE-CHANGELOG-ENTRY"))
-    html = a.changelogs_live_html(frozenset({"vivy"}), False)
-    assert "VIVY-CHANGELOG-ENTRY" in html
-    assert "CONSTANCE-CHANGELOG-ENTRY" not in html
-    assert 'data-prod="constance"' not in html
+    _seed(_description(product="alpha", body="ALPHA-CHANGELOG-ENTRY"),
+          _description(id=control_db.new_signal_id(), product="beta",
+                       body="BETA-CHANGELOG-ENTRY"))
+    html = a.changelogs_live_html(frozenset({"alpha"}), False)
+    assert "ALPHA-CHANGELOG-ENTRY" in html
+    assert "BETA-CHANGELOG-ENTRY" not in html
+    assert 'data-prod="beta"' not in html
 
 
 # --- fan-out fairness across products --------------------------------------
@@ -244,7 +271,7 @@ def test_alert_kind_has_no_dedicated_section_but_stays_filterable(db):
     through `list_signals`'s own `kind` filter, which is the guarantee that
     makes "the rest is searchable" true rather than aspirational."""
     _seed(dict(id=control_db.new_signal_id(), source="ci", kind="alert",
-              actor="ci-bot", ingested_by="ci-bot", product="vivy",
+              actor="ci-bot", ingested_by="ci-bot", product="alpha",
               body="ALERT-BODY", privacy_class="internal"),
           _comment(body="A-PR-COMMENT"))
     rows = library_client.list_signals(kind=["alert"])
@@ -287,7 +314,7 @@ _REVIEW_STAMP = (
     "<!-- agentctl-review\n"
     "v: 1\n"
     "pr: 42\n"
-    "repo: vivy\n"
+    "repo: alpha\n"
     "reviewed-commit: 7842af3bf82cb74fa1522af\n"
     "verdict: APPROVE\n"
     "agent: reviewer\n"
@@ -370,7 +397,7 @@ def test_build_static_seeds_an_empty_fallback_not_real_data(tmp_path, monkeypatc
     a static fallback is served to ANY viewer's failed render, so real PR/
     changelog content there would leak to a scoped viewer. Seeded data must
     not appear in either written file."""
-    _seed(_comment(product="vivy", body="LEAKY-COMMENT", refs={"pr": 1, "url": "https://x/1"}))
+    _seed(_comment(product="alpha", body="LEAKY-COMMENT", refs={"pr": 1, "url": "https://x/1"}))
     monkeypatch.setattr(a, "SITE", tmp_path)
     a.build_static()
     prs_html = (tmp_path / "signals-prs.html").read_text(encoding="utf-8")

@@ -21,6 +21,7 @@ import json
 import re
 from pathlib import Path
 
+import crew_registry
 import design_system as ds
 import library_client
 from paths import STATE_ROOT
@@ -45,8 +46,22 @@ DOMPURIFY_JS = Path(__file__).resolve().parent / "vendor" / "dompurify.min.js"
 # ten lines below was updated in the same pass that missed these, and the break
 # only shows as a page laid out wrongly. `test_every_indexed_project_is_placed`
 # is what makes the next scope loud instead.
-COMPANY_PROJECTS = ["company", "commercial"]
-PRODUCT_ORDER = ["vivy", "constance", "hollis", "selector", "sous-chef"]
+# COMPANY_PROJECTS names the registry's two non-project "company altitude"
+# scopes (ARCH-426's `_scopes`), confirmed present rather than hand-typed
+# (CQ-171 ruling 4): an unreadable registry answers neither, same as every
+# other registry read in this module, rather than a stale pair surviving a
+# scope rename underneath it.
+_COMPANY_SCOPE_KEYS = ("company", "commercial")
+# PRODUCT_ORDER and STANDALONE_PRODUCTS (below) are keyed off the registry's
+# `_products` and `_kb_projects` maps (CQ-171 revise round 2, the steward's
+# registry-fields ruling): `_kb_projects` is a separate top-level map, keyed
+# by KB project name, each entry optionally marked `standalone: true`.
+# STANDALONE_PRODUCTS is exactly the `_kb_projects` keys so marked, in the
+# map's own written order — no fallback list, since `_kb_projects` is where
+# every one of today's standalone products (an engineering repo, a KB/repo-slug
+# spelling, or a product not yet commercial) now lives. PRODUCT_ORDER is the
+# `_products` map's own key order, skipping any key `_kb_projects` marks
+# standalone.
 # Engineering is a third top-level area (peer to Company | Products), rendering
 # the cross-cutting engineering/platform-practice docs (ARCH-190). It was driven
 # by the single `engineering` KB project; step 5 split that intent across the
@@ -59,9 +74,10 @@ PRODUCT_ORDER = ["vivy", "constance", "hollis", "selector", "sous-chef"]
 # `render`'s unknown-project fallback and rendered as a Products pill, which
 # `test_every_indexed_project_is_placed` exists to catch — and did, locally,
 # since that test is `needs_kb` and orient's CI has no knowledge checkout.
-ENGINEERING_PROJECTS = ["platform", "engineering-practice", "knowledge",
-                        "convivy-orient", "keel",
-                        "library", "write-better"]
+#
+# ENGINEERING_PROJECTS is keyed off the registry's `_kb_projects` map too
+# (CQ-171 slice 5, the steward's registry-fields ruling): the keys whose own
+# entry carries `"section": "engineering"`, in the map's own written order.
 # library is the Keel's implementation, alongside platform and knowledge above.
 # write-better is a practice standard, the same shape as engineering-practice.
 # Phase 0 step 5 (ARCH-426, ARCH-432) replaced the scope vocabulary. `shared`,
@@ -69,87 +85,223 @@ ENGINEERING_PROJECTS = ["platform", "engineering-practice", "knowledge",
 # them; every scope that now holds documents is labelled, because the browse UI
 # falls back to `L[p]||p` and renders a bare slug for anything missing — which is
 # how `company`, the scope leading every category page, would have shown up.
-PROJECT_LABEL = {
+# Labels for a KB scope, or a Course product key, that names nothing in the
+# install's project registry: a non-project scope (`company`, `commercial`,
+# `platform`, `engineering-practice`, `knowledge`), a KB/repo slug that spells
+# a registry project differently from its own registry key (`agent-platform`
+# is the project the registry calls `bosun`; `deck` is the KB scope spelling
+# of the registry's `convivy-deck`), or a project not yet registered
+# (`substrate`, `keel` — "The Keel" predates the registry's own,
+# differently-worded `keel` scope note and is kept rather than reconciled in
+# this pass).
+#
+# A repo under a unit's `repos` with no label of its own (a product's
+# marketing-site repo was the standing example — a repo under that
+# product's own unit, with no unit or `_kb_projects` key of its own) now
+# gets its label from that unit's own `repo_display` map, read through
+# `crew_registry.repo_display_names()` in `_project_label()` below, before
+# any other fallback (CQ-171 slice 6).
+#
+# A repo whose owning unit's `repos` list holds two separate repo names for
+# one project gets its label from `_repo_project_display()` below instead of
+# a literal here, since the registry key a KB scope or Course product uses
+# is not always that repo's own name.
+#
+# Everything else below is a project's own entry in the registry, read
+# through `crew_registry.display_names()` rather than retyped. The Library
+# Course `product`-key entries (`bosun`, `convivy-deck`) exist here for the
+# reason issue_01M15C4G6YJHH73KJCHGK7B0J9 (the Chart House redesign) found: a
+# crew rendered as "bosun" in one table and "Agent Platform" (this dict's own
+# `agent-platform` entry, the KB/repo slug) in another, so this dict carries
+# both real spellings of the same project.
+_PROJECT_LABEL_FALLBACK = {
     "company": "Convivy & Company", "commercial": "Commercial",
-    "vivy": "Vivy", "constance": "Constance",
-    "hollis": "Hollis", "selector": "Selector", "sous-chef": "Sous Chef",
     "agent-platform": "Agent Platform",
-    "convivy-app-kit": "App Kit", "convivy-services": "Services",
-    "nyh-studio": "NYH Studio", "deck": "Deck",
+    "convivy-services": "Services",
+    "deck": "Deck",
     "platform": "Platform", "engineering-practice": "Engineering Practice",
-    "knowledge": "Knowledge Base", "convivy-orient": "Orient",
+    "knowledge": "Knowledge Base",
     "substrate": "Substrate",
     "keel": "The Keel",
-    # The Library's Course `product` key, not a KB scope — added for the
-    # Chart House redesign (issue_01M15C4G6YJHH73KJCHGK7B0J9), which found
-    # this crew rendered as "bosun" in one table and "Agent Platform"
-    # (this dict's own `agent-platform` entry, the KB/repo slug) in
-    # another. "Bosun" is what the operator calls it; this key makes that the one
-    # spelling this dict serves for the Course's own product key.
-    "bosun": "Bosun",
-    # Same reason, same issue: the Course's product key is the GitHub repo
-    # name `convivy-deck`, distinct from this dict's existing `deck` (the
-    # KB scope slug) — both real spellings of the same project.
-    "convivy-deck": "Deck",
-    "library": "Library",
-    "write-better": "Write Better",
-    "constance-landing": "Constance Landing",
-    "placard": "Placard",
-    "signals": "Signals",
-    "archy": "Archy",
-    "shipwright": "Shipwright",
 }
+
+
+def _repo_project_display(repo: str) -> str | None:
+    """The `display` of the registry unit whose own `repos` lists `repo` —
+    the same reverse lookup `crew_registry.activation_lanes_for_repo` performs, for a
+    project-label key spelled as a repo name rather than a registry slug
+    (CQ-171 slice 2, the 0.7.0 name gate: this reads the live registry
+    instead of carrying that unit's own display as a literal here). `None`
+    on an unreadable registry or a repo no unit claims."""
+    try:
+        unit_map = crew_registry.units()
+    except crew_registry.RegistryUnavailable:
+        return None
+    for unit in unit_map.values():
+        if repo in (unit.get("repos") or ()):
+            display = unit.get("display")
+            return display if isinstance(display, str) and display.strip() else None
+    return None
+
+
+# Repo-spelled project-label keys resolved through `_repo_project_display()`
+# rather than carried as a literal in `_PROJECT_LABEL_FALLBACK` above.
+_REPO_LABEL_KEYS = ("convivy-app-kit",)
+
+
+def _registry_display_names() -> dict[str, str]:
+    try:
+        return crew_registry.display_names()
+    except crew_registry.RegistryUnavailable:
+        return {}
+
+
+def _registry_repo_display_names() -> dict[str, str]:
+    """A repo's own `repo_display` label (CQ-171 slice 6), which wins over
+    every other label source for that same key — the registry's most
+    specific statement about that one repo, as opposed to `display_names()`
+    naming the project or crew as a whole."""
+    try:
+        return crew_registry.repo_display_names()
+    except crew_registry.RegistryUnavailable:
+        return {}
+
+
+def _project_label() -> dict[str, str]:
+    labels = {**_PROJECT_LABEL_FALLBACK, **_registry_display_names()}
+    for repo in _REPO_LABEL_KEYS:
+        display = _repo_project_display(repo)
+        if display:
+            labels[repo] = display
+    labels.update(_registry_repo_display_names())
+    return labels
+
+
+def _registry_products() -> dict[str, dict]:
+    try:
+        return crew_registry.products()
+    except crew_registry.RegistryUnavailable:
+        return {}
+
+
+def _registry_kb_projects() -> dict[str, dict]:
+    try:
+        return crew_registry.kb_projects()
+    except crew_registry.RegistryUnavailable:
+        return {}
+
+
+def _product_order() -> list[str]:
+    """The registry's `_products` keys, in the map's own written order,
+    skipping any key `_kb_projects` marks `standalone: true` (CQ-171 revise
+    round 2). An unreadable registry answers no products, never a stale
+    literal order."""
+    kb = _registry_kb_projects()
+    return [slug for slug in _registry_products() if not kb.get(slug, {}).get("standalone")]
+
+
+def _standalone_products() -> list[str]:
+    """`_kb_projects` keys marked `standalone: true`, in the map's own
+    written order, and nothing else (CQ-171 revise round 2). An unreadable
+    registry answers no standalone products, never a stale literal list."""
+    return [slug for slug, info in _registry_kb_projects().items() if info.get("standalone")]
+
+
+def _registry_scopes() -> dict[str, dict]:
+    try:
+        return crew_registry.scopes()
+    except crew_registry.RegistryUnavailable:
+        return {}
+
+
+def _company_projects() -> list[str]:
+    """`_COMPANY_SCOPE_KEYS` filtered to the ones the registry's `_scopes`
+    map actually carries (CQ-171 ruling 4). An unreadable registry answers
+    neither."""
+    scopes = _registry_scopes()
+    return [s for s in _COMPANY_SCOPE_KEYS if s in scopes]
+
+
+def _engineering_projects() -> list[str]:
+    """`_kb_projects` keys whose own `section` field is `"engineering"`, in
+    the map's own written order (CQ-171 slice 5, the steward's
+    registry-fields ruling). An unreadable registry answers no engineering
+    projects, never a stale literal list."""
+    try:
+        return crew_registry.kb_projects_in_section("engineering")
+    except crew_registry.RegistryUnavailable:
+        return []
+
+
+def _product_groups() -> list[tuple[str, list[str]]]:
+    """`_products[<product>].group`'s own values, grouped: a group's
+    position is where its first member appears in `_products`, and a
+    group's own members stay in `_products` order (CQ-171 slice 5, the
+    steward's registry-fields ruling). An unreadable registry answers no
+    groups, never a stale literal list."""
+    try:
+        raw = crew_registry.product_groups()
+    except crew_registry.RegistryUnavailable:
+        return []
+    groups: dict[str, list[str]] = {}
+    for slug, group in raw.items():
+        groups.setdefault(group, []).append(slug)
+    return list(groups.items())
+
+
+def __getattr__(name: str):
+    """PEP 562: `PROJECT_LABEL`, `PRODUCT_ORDER`, `STANDALONE_PRODUCTS`,
+    `COMPANY_PROJECTS`, `ENGINEERING_PROJECTS` and `PRODUCT_GROUPS` resolve
+    fresh on every access rather than once at import. Several live,
+    per-request renderers (`chart_house_build`, `project_build`, `server`)
+    read these directly, so a plain module constant would freeze at
+    whatever the registry held the moment this module first got imported —
+    collection time in a test run, not render time — rather than being
+    picked up on the next request the way every other registry read in
+    this ticket is (platform decision 0098's "resolve per read, not once
+    at import")."""
+    if name == "PROJECT_LABEL":
+        return _project_label()
+    if name == "PRODUCT_ORDER":
+        return _product_order()
+    if name == "STANDALONE_PRODUCTS":
+        return _standalone_products()
+    if name == "COMPANY_PROJECTS":
+        return _company_projects()
+    if name == "ENGINEERING_PROJECTS":
+        return _engineering_projects()
+    if name == "PRODUCT_GROUPS":
+        return _product_groups()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 # Product super-groups on the Orientation "Products" tab (ARCH-308). The three
 # mobile apps share a "Mobile App Suite" heading; their pills always render — even
 # before an app has any KB docs — so the suite is visible as it fills in. Every
 # member must also appear in PRODUCT_ORDER.
-PRODUCT_GROUPS = [
-    ("Mobile App Suite", ["hollis", "selector", "sous-chef"]),
-]
-# Projects that render as their own product pill, outside PRODUCT_ORDER's curated
-# ordering and outside any suite. These reached the page through `render`'s
-# unknown-project fallback and were never declared anywhere; listing them changes
-# nothing about what renders (the order matches the fallback's `sorted()`) and
-# makes `test_every_indexed_project_is_placed` able to tell "this belongs here"
-# from "nobody has decided where this belongs" — which the fallback cannot.
 #
-# The fallback stays. A project appearing in the index between here and the next
-# deploy should still render rather than vanish; the test is where the omission
-# is meant to be loud, not the page.
-STANDALONE_PRODUCTS = ["agent-platform", "convivy-app-kit", "convivy-services",
-                       "deck", "nyh-studio",
-                       # placard: QR-code property pages for the Now You're Here
-                       # properties, not yet deployed. A product with no curated
-                       # position yet, so it is placed where the fallback put it.
-                       "placard", "substrate",
-                       # constance-landing: no other product-marketing-site scope
-                       # is indexed to set a precedent either way (issue_01KZ9DDRBNHHT4V61YR8NR7A2E).
-                       # Placed here for lack of one; move it next to `constance`
-                       # in PRODUCT_ORDER if a precedent shows up later.
-                       "constance-landing",
-                       # signals: the Signals product, which took over Orient's
-                       # gmail capture. After constance-landing, because the
-                       # fallback bucket in `render` follows this whole list, and
-                       # that is where signals rendered before it was declared. Inserting it
-                       # at its sorted position would move it ahead of substrate
-                       # and constance-landing (issue_01M2QY6YCFA4GVG3NRKRANJ9PT).
-                       "signals",
-                       # archy and shipwright: indexed without a placement, so
-                       # the fallback rendered them after signals in sorted
-                       # order. Placed in that same order, which keeps the
-                       # product order. Placing them also gives each its label
-                       # and makes its full-tier /projects/<name> page render,
-                       # since project_build.KNOWN_PROJECTS derives from these
-                       # lists (issue_01M41AWFTJAN95YTYJTFRF4VBB).
-                       "archy", "shipwright"]
+# PRODUCT_GROUPS is keyed off `_products[<product>].group` too (CQ-171 slice
+# 5, the steward's registry-fields ruling): a group's heading text is that
+# field's own string value, and a group's position is where its first
+# member appears in `_products`; a group's own members stay in `_products`
+# order. `_product_groups()` above does the grouping.
+# Projects that render as their own product pill, outside PRODUCT_ORDER's curated
+# ordering and outside any suite: an engineering repo, a KB/repo-slug spelling of
+# a registered project, or a product not yet commercial — every one of them now
+# an entry in the registry's `_kb_projects` map marked `standalone: true` (CQ-171
+# revise round 2), which is where `_standalone_products()` above reads this list
+# from. Before that map existed, these names lived in a literal fallback list
+# here; the registry is now their one declaration, which is what lets
+# `test_every_indexed_project_is_placed` tell "this belongs here" from "nobody
+# has decided where this belongs" for a project the index carries next.
 # KB docs whose canonical home is a curated section elsewhere on the site, so they
-# are kept OUT of the by-project browse to avoid a duplicate listing. The Selector
+# are kept OUT of the by-project browse to avoid a duplicate listing. One product's
 # taste-map lives in Reference Docs; without this it also renders under a lone
 # "Convivy" project group in the Products browse (the operator 2026-07-02, ARCH-308).
-# Per-doc browse exclusion. Empty since ARCH-366: the taste-map (Selector
-# Explainer) was excluded by ARCH-308 because its "canonical home is Reference
-# Docs", and ARCH-357 then retired Reference Docs — leaving the doc excluded
-# from browse AND unreachable at its old route. The mechanism is kept; an entry
+# Per-doc browse exclusion. Empty since ARCH-366: the taste-map doc (that
+# product's Explainer) was excluded by ARCH-308 because its "canonical home is
+# Reference Docs", and ARCH-357 then retired Reference Docs — leaving the doc
+# excluded from browse AND unreachable at its old route. The mechanism is kept; an entry
 # here now needs a home that actually resolves.
 BROWSE_EXCLUDE_IDS: set[str] = set()
 # `bead` sits next to `overview` because it is what ADR-0024 built to replace the
@@ -289,16 +441,21 @@ def render(docs: list[dict], tier: str = "full") -> str:
     selects the cross-page nav: full sees the dashboard links, a contractor sees
     none (they 404 on the dashboards, so the nav is suppressed for them)."""
     present = {d["project"] for d in docs}
-    known = (set(COMPANY_PROJECTS) | set(PRODUCT_ORDER) | set(ENGINEERING_PROJECTS)
-             | set(STANDALONE_PRODUCTS))
-    group_members = [m for _, members in PRODUCT_GROUPS for m in members]
+    product_order = _product_order()
+    standalone_products = _standalone_products()
+    company_projects = _company_projects()
+    engineering_projects = _engineering_projects()
+    product_group_table = _product_groups()
+    known = (set(company_projects) | set(product_order) | set(engineering_projects)
+             | set(standalone_products))
+    group_members = [m for _, members in product_group_table for m in members]
     # Standalone product pills: present products (in order) that aren't in a suite,
     # then the declared standalones, then any project still unplaced — the fallback,
     # kept so a scope minted since the last deploy renders rather than vanishing
     # (excluded ids already filtered in load_docs).
     standalone = (
-        [p for p in PRODUCT_ORDER if p in present and p not in group_members]
-        + [p for p in STANDALONE_PRODUCTS if p in present and p not in group_members]
+        [p for p in product_order if p in present and p not in group_members]
+        + [p for p in standalone_products if p in present and p not in group_members]
         + sorted(p for p in present if p not in known and p not in group_members))
     # Full tier shows every suite member as a pill even before it has docs (so the
     # suite is visible as it fills in). The contractor bundle must NOT — an empty
@@ -307,19 +464,20 @@ def render(docs: list[dict], tier: str = "full") -> str:
     # suite with no visible members drops out entirely.
     product_groups = [
         {"label": lbl, "members": [m for m in members if tier == "full" or m in present]}
-        for lbl, members in PRODUCT_GROUPS
+        for lbl, members in product_group_table
     ]
     product_groups = [g for g in product_groups if g["members"]]
     products = standalone + [m for g in product_groups for m in g["members"]]  # drives default selection
-    company = [p for p in COMPANY_PROJECTS if p in present]
-    engineering = [p for p in ENGINEERING_PROJECTS if p in present]
+    company = [p for p in company_projects if p in present]
+    engineering = [p for p in engineering_projects if p in present]
     # Strip the build-time-only `contractor` flag from the embedded payload.
     clean = [{k: v for k, v in d.items() if k != "contractor"} for d in docs]
     # Ship labels only for projects this bundle actually surfaces, so an unreferenced
     # (e.g. unreleased-product) name never rides along in a contractor payload.
     referenced = set(company) | set(standalone) | set(engineering) \
         | {m for g in product_groups for m in g["members"]}
-    project_label = {p: PROJECT_LABEL[p] for p in referenced if p in PROJECT_LABEL}
+    labels = _project_label()
+    project_label = {p: labels[p] for p in referenced if p in labels}
     payload = json.dumps({
         "docs": clean,
         "companyProjects": company,

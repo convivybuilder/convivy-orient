@@ -6,7 +6,7 @@ the Library, read through library_client, and this page renders the most
 recent ones. The changelog reads memory, never GitHub.
 
 TWO KINDS OF ROW SHARE THAT KIND, AND ONLY ONE OF THEM IS AN ENTRY.
-`github_capture.signal_from_merge` writes one per merge whose body is the PR
+The Keel's `github-activity-capture` writes one per merge whose body is the PR
 title plus the PR description — raw material, and the thing this page used to
 show. `post-changelog` writes the authored entry (source=co) that a co or the
 explainer composes on merge. This page renders only the authored ones; see
@@ -39,7 +39,7 @@ _SUMMARY_CLIP = 1400
 
 # Which sources count as a CHANGELOG ENTRY, as opposed to the raw merge record.
 #
-# `github_capture.signal_from_merge` writes a `changelog` signal per merge whose
+# The Keel's `github-activity-capture` writes a `changelog` signal per merge whose
 # body is the PR title plus the PR description. A PR body is written for a
 # reviewer — it opens with `## Summary`, carries code blocks, and explains
 # implementation — so read back as a changelog it is unusable. That was the whole
@@ -122,13 +122,19 @@ def _chips(streams: list[tuple[str, int]], total: int) -> str:
     return "".join(out)
 
 
-def _page(*, cards_html: str, chips_html: str, empty_msg: str) -> str:
+def _page(*, cards_html: str, chips_html: str, empty_msg: str,
+          filter_label: str | None = None) -> str:
     block = cards_html or f'<div class="allclear">{escape(empty_msg)}</div>'
+    lede = (f'The most recent entries for <strong>{escape(filter_label)}</strong>, newest '
+            f'first. Each is written on merge and kept as a memory object in our store.'
+            if filter_label else
+            f'The {_LIMIT} most recent entries across the org, newest first. Each is '
+            f'written on merge and kept as a memory object in our store.')
     body = f'''<div class="chglog">
   <header class="chglog-head">
     <div class="eyebrow-line"><span class="dot"></span>team.convivy.com / engineering / changelog</div>
     <h1>Changelog</h1>
-    <p class="lede">The {_LIMIT} most recent entries across the org, newest first. Each is written on merge and kept as a memory object in our store.</p>
+    <p class="lede">{lede}</p>
     <div class="chips" id="chips">{chips_html}</div>
   </header>
   <div class="wrap">
@@ -145,7 +151,8 @@ def _page(*, cards_html: str, chips_html: str, empty_msg: str) -> str:
                          body=body, extra_css=_CSS)
 
 
-def changelog_live_html(scope: frozenset[str] = frozenset(), whole_fleet: bool = True) -> str:
+def changelog_live_html(scope: frozenset[str] = frozenset(), whole_fleet: bool = True,
+                        requested_product: str | None = None) -> str:
     """/engineering/changelog — the most recent merges, read from memory
     signals, restricted to `scope` (E19·4, issue_01M35K5JQ7Z7MHYZGWRSB5F85M):
     a scoped viewer's fan-out (`archives_build.fan_out`, the same per-product
@@ -156,11 +163,21 @@ def changelog_live_html(scope: frozenset[str] = frozenset(), whole_fleet: bool =
     `source IN ("co")` is a Library filter now, not a Python one: unfiltered,
     `kind == "changelog"` alone is 4,590 rows on the live database, 23 pages to
     find the ~handful of authored entries within it
-    (issue_01KZW183XVJCKFGQT8HMXFJFTY)."""
+    (issue_01KZW183XVJCKFGQT8HMXFJFTY).
+
+    `requested_product` (CQ·167, issue_01M5C9ZDJ14Y55B54XGM5RW5J6) is the
+    project page's `?product=<repo-name>` link, matched against each row's
+    own `product` exactly — no repo-name/slug translation. Applied to the
+    already-scoped `rows`, after the fan-out above, so a product outside
+    `scope` has nothing left to match and renders identically to a product
+    that does not exist at all: zero rows, the plain empty state, and (via
+    `filter_label` below) no echo of the requested name."""
     products = None if whole_fleet else sorted(scope)
     rows = archives_build.fan_out(
         "changelog", cap_per_product=_LIMIT, source=sorted(CHANGELOG_AUTHORED_SOURCES),
         products=products)
+    if requested_product:
+        rows = [sig for sig in rows if sig.product == requested_product]
     rows.sort(key=lambda s: s.produced_at or s.ingested_at, reverse=True)
     rows = rows[:_LIMIT]
     counts: dict[str, int] = {}
@@ -169,9 +186,14 @@ def changelog_live_html(scope: frozenset[str] = frozenset(), whole_fleet: bool =
     streams = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
     cards = "".join(_card(sig) for sig in rows)
     chips = _chips(streams, len(rows))
+    # Only echoed when it matched at least one in-scope row — never for an
+    # out-of-scope or nonexistent product, which must not be distinguishable
+    # from each other by a name appearing (or not) on the rendered page.
+    filter_label = requested_product if (requested_product and rows) else None
     return _page(cards_html=cards, chips_html=chips,
                  empty_msg="No entries written yet. changelog-drain fills this in "
-                           "as merges land.")
+                           "as merges land.",
+                 filter_label=filter_label)
 
 
 def build_static() -> None:

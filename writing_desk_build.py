@@ -16,7 +16,7 @@ by tier.
 """
 from __future__ import annotations
 
-import blog_store
+import blog_common
 import design_system as ds
 from access_identity import tier_for
 
@@ -94,7 +94,7 @@ _PAGE_CSS = """
 #
 # No `.html` suffix. The journal serves each post at `/journal/<slug>/`, with the
 # trailing slash the site requires; the link builder below adds it.
-FIELD_NOTES_URL = blog_store.FIELDNOTES_URL
+FIELD_NOTES_URL = blog_common.FIELDNOTES_URL
 
 
 def _published_section() -> str:
@@ -151,8 +151,8 @@ def _published_section() -> str:
           left.appendChild(t); left.appendChild(m);
           row.appendChild(left);
           // **EDIT A LIVE POST.** The API has always allowed it — the load
-          // route returns a published post and `blog_store.save` writes to
-          // one on purpose, because correcting a live post is the normal
+          // route returns a published post and a save writes its next
+          // revision on purpose, because correcting a live post is the normal
           // path. But a published post is absent from the drafts list, so
           // until this button existed there was no way in from the UI at
           // all (issue_01M0R9XR0SFP9360C73P60RR5Q).
@@ -331,8 +331,9 @@ _BLOG_JS = r"""
         //
         // **THERE IS NO DRAFT COPY OF A LIVE POST, AND THE WARNING HAS TO SAY
         // SO** (security-reviewer, PR #199). An early cut said saving was safe
-        // and only Publish reached the public page. That is false:
-        // `blog_store.save` writes straight into the published row.
+        // and only Publish reached the public page. That is false: a save to
+        // a live post writes its next published revision to the Archives,
+        // which every Orient page then shows as the post (CQ·168).
         //
         // **THE CORRECTION THEN POINTED AT THE WRONG BUTTON**
         // (issue_01M0T979V44QGHSXD2TF5CP2G8). It said Publish "only asks the
@@ -347,8 +348,8 @@ _BLOG_JS = r"""
         // reached it regardless of which button sent it. Under push, nothing
         // reaches Swabby's Journal until something is Published:
         // `journal_push.push_corpus` runs only from `publish_draft`. A Save to
-        // a live post now changes what `blog_store.corpus()` holds but does NOT
-        // reach the journal on its own, so the warning has to say that plainly
+        // a live post changes the post Orient shows but does NOT reach the
+        // journal on its own, so the warning has to say that plainly
         // rather than repeat the old "either button, eventually" claim.
         const live = j.status === "published";
         editorStatus.textContent = live ? "published" : "draft";
@@ -357,7 +358,8 @@ _BLOG_JS = r"""
         if (live) {
           setNote(editNote, "warn",
             "This post is live and there is no draft copy. Either button "
-            + "writes what you see here to the published post, but only "
+            + "saves what you see here as the post's newest revision, which "
+            + "Orient shows at once, but only "
             + "Publish sends that change to Swabby's Journal (convivybuilder.org), "
             + "where it goes live a couple of minutes later. Save leaves the journal "
             + "as it was until something is next published.");
@@ -547,8 +549,8 @@ _BLOG_JS = r"""
   });
 
   // **THE PUBLISHED LIST RENDERS IN A DIFFERENT IIFE AND NEEDS THIS OPENER.**
-  // A post leaves the drafts list the moment it publishes (`blog_store.drafts()`
-  // is `status == DRAFT`), so without a way to open one from the published
+  // A post leaves the drafts list the moment it publishes (`GET /blog/drafts`
+  // lists only slugs whose latest entry is a draft), so without a way to open one from the published
   // panel a post becomes uneditable as soon as it goes out — which is the
   // defect this handle exists to fix (issue_01M0R9XR0SFP9360C73P60RR5Q).
   //

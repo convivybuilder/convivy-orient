@@ -39,7 +39,7 @@ initiative.)
   bundles + the dashboard, then runs `server.py`.
 - **`dashboard_build.py`** — the agent **cost & quality dashboard** (ARCH-109).
   Normalizes the scorecard ledgers (`~/Convivy/agent-runs/scorecard/`:
-  `scorecard.jsonl` + `hollis.jsonl` + `judge.jsonl`) into one fact
+  `scorecard.jsonl` + `judge.jsonl`) into one fact
   per PR/run and emits two self-contained, standalone pages (ARCH-191, split so
   either can be screenshotted whole, each with its own date picker incl. a custom
   range): `site/spending.html` (**`/spending`** — TOTAL spend, every session) and
@@ -49,9 +49,8 @@ initiative.)
   routes aren't revealed); the old **`/dashboard`** 302-redirects to `/spending`.
   Refreshed daily at 07:40 by `com.convivy.orient-dashboard`
   (regenerates the HTML in place; the server reads it per request, no restart).
-  Scope: dev-crew cost+quality. Hollis *runtime* LLM cost
-  (`hollis/data/llm-spend.jsonl`) is a separate data-local feed, not
-  folded in.
+  Scope: dev-crew cost+quality. That one crew's *runtime* LLM cost
+  is a separate data-local feed, not folded in.
 - **`code_health_build.py`** — the **code-health dashboard** (ARCH-111), sibling to
   the cost one. Harvests per-repo metrics live from `gh` + the local git checkouts
   (CI pass-rate, last CI status, open PRs + oldest age, merges/30d, reverts/30d,
@@ -62,20 +61,20 @@ initiative.)
   `com.convivy.code-health` (heavier gh harvest — kept off serve.sh so restarts
   stay fast; the server reads the file per request). `/cost-performance` ↔
   `/health` cross-link.
+- **`tech_debt_build.py`** — the **tech-debt dashboard** (CQ·164): each
+  project's open corrections-queue items in the Library, counted by severity
+  and by age band with the oldest named. Reads `library_client.list_issue_items`
+  live on every request, so a new or resolved item shows on the next load.
+  Served at **`/tech-debt`**, **full tier ONLY** (contractors 404), scoped to
+  the viewer's own projects; also a card on `/overview`.
 - **The signal-memory plane** (ARCH-349) — `signal_api.py` (POST/GET/search
   `/api/signals`: capture + scoped read + semantic search, with an
   internal/customer privacy wall), `embeddings.py` (local fastembed
   bge-small-en-v1.5 → sqlite-vec KNN, embedded at ingest, `embed_missing()`
-  sweeps stragglers), and `github_capture.py` (org-wide GitHub review capture:
-  review verdicts, review comments, PR/issue comments → signals, deduped by
-  `gh:<repo>:pr<n>:<type>:<id>`). Incremental capture runs every 15 minutes via
-  `com.convivy.orient-github-capture`; `--backfill` ignores the cursor and
-  re-walks everything (safe — dedup absorbs it, and it also seeds the cursor —
-  on a cold start with no cursor file, a repo's first incremental run is an
-  unfiltered full pull, correct but slow). A repo's cursor advances only on a
-  zero-error run; a failed gh fetch raises (never reads as an empty page), so
-  no window is ever skipped past. Store: the control DB
-  (`~/.orient-control/control.db`).
+  sweeps stragglers). Store: the control DB (`~/.orient-control/control.db`).
+  GitHub signals (merges as `changelog`, PR comments as `pr_comment`) are
+  written by the Keel's `github-activity-capture` under the `convivy-bosun`
+  App; Orient reads them and holds no GitHub credential (CQ·111).
 
 ## Access path
 

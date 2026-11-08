@@ -29,17 +29,16 @@ def _isolate_filesystem(tmp_path_factory, monkeypatch):
     """Make load_roster() hermetic by default. Two real-filesystem reads to isolate:
 
     1. CONVIVY_ROOT — discover_projects() walks it, so without this a test that
-       patches PROJECTS to one fake project still gets the machine's dozen real
-       repos appended.
+       sets up one fake project still gets the machine's dozen real repos
+       appended.
     2. load_repo_agents() — it reads <repo_path>/.claude/agents, and the existing
        tests deliberately pass REAL repo paths because they assert on the launch
        command those paths produce. Left alone, those tests would pick up the
        machine's actual crews and grow an unexpected repo-crew lane.
-    3. _load_knowledge_slug_map() — it reads agent-platform's projects.py
-       off the developer's real checkout. Left alone, a test asserting on a
-       project with no knowledge-slug remapping would still depend on whatever
-       that file happens to contain on this machine. Tests that exercise the
-       knowledge-slug mapping itself re-patch this.
+    3. _load_knowledge_slug_map() — it reads the project registry. Left
+       alone, a test asserting on a project with no knowledge-slug remapping
+       would still depend on whatever registry the run resolves. Tests that
+       exercise the knowledge-slug mapping itself call the real one.
 
     All three make assertions depend on the developer's checkout rather than the
     fixture. Tests that exercise discovery, repo crews, or knowledge-slug mapping
@@ -88,6 +87,20 @@ def _write_profile(tmp_path: Path, project: str, name: str, slugs: list[str]) ->
     for s in slugs:
         lines.append(f"      - {s}")
     (prof_dir / f"{name}.yaml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _set_projects(tmp_path: Path, monkeypatch, rows: list[tuple[str, str, str, list[str]]]) -> None:
+    """Install `rows` (the same (slug, label, repo_path, lanes) shape the old
+    `PROJECTS`/`PROJECT_PROFILE_LANES` literals held) as `_registry_rows()`'s
+    own return value (CQ-171 slice 6) — the seam `discover_projects()` adds
+    its own filesystem scan on top of. Bypassing the registry entirely here
+    (rather than building a fixture file) lets a `load_roster()`-focused
+    test give a row an empty lane list — a project with no activation
+    lanes, rendering only via its own repo-crew — without having to reason
+    about `_registry_rows()`'s own registry-reading mechanics; a test of
+    those mechanics builds its own fixture registry instead (see the
+    `crew_registry`/`_registry_rows` tests below)."""
+    monkeypatch.setattr(R, "_registry_rows", lambda: list(rows))
 
 
 # ---------------------------------------------------------------------------
@@ -210,55 +223,50 @@ def test_load_agents_desc_skips_heading_and_blockquote(tmp_path, monkeypatch):
 # _load_knowledge_slug_map (issue_01M0VMAZZMN4VCGJF197GASR6Y)
 # ---------------------------------------------------------------------------
 
-def test_load_knowledge_slug_map_parses_product_map(tmp_path, monkeypatch):
-    """Parses the `EXPLICIT_PROJECT_BY_NAME = {...}` literal rather than
-    restating the values here."""
-    fake_projects_py = tmp_path / "projects.py"
-    fake_projects_py.write_text(
-        'EXPLICIT_PROJECT_BY_NAME = {\n'
-        '    "constance": "constance",\n'
-        '    "vivy-commercial": "vivy",              # commercial workspace\n'
-        '    "convivy-commercial": "company",        # re-pointed ARCH-438\n'
-        '}\n'
-        '\n'
-        'NO_PROJECT_MAPPING = 42\n',
-        encoding="utf-8")
-    monkeypatch.setattr(R, "_PROJECTS_PY_PATH", fake_projects_py)
+def _slug_map_registry(tmp_path, monkeypatch, units):
+    path = tmp_path / "projects.json"
+    path.write_text(json.dumps({"_meta": {}, **units}))
+    monkeypatch.setenv("PROJECTS_JSON", str(path))
+
+
+def test_load_knowledge_slug_map_reads_the_registrys_kb_fields(tmp_path, monkeypatch):
+    """The two fields agent-platform's `_explicit_project_by_name` reads, in
+    its order, so an exception overrides a by-repo entry for the same name.
+    `kb_project` alone maps nothing: agentctl doesn't map it either."""
+    _slug_map_registry(tmp_path, monkeypatch, {
+        "alpha": {"kb_project": "alpha",
+                  "kb_project_by_repo": {"alpha-commercial": {"kb_project": "alpha"},
+                                         "alpha-tools": {"kb_project": "alpha"}},
+                  "kb_scope_exceptions": {"alpha-tools": {"kb_project": "platform",
+                                                          "reason": "narrowed"}}},
+        "example-commercial": {"kb_project_by_repo": {
+            "example-commercial": {"kb_project": "company"}}},
+        "beta": {"kb_project": "beta"},
+    })
     # _REAL_LOAD_KNOWLEDGE_SLUG_MAP, not R._load_knowledge_slug_map: the autouse
     # isolation fixture above has already stubbed the latter to `lambda: {}`.
     assert _REAL_LOAD_KNOWLEDGE_SLUG_MAP() == {
-        "constance": "constance",
-        "vivy-commercial": "vivy",
-        "convivy-commercial": "company",
+        "alpha-commercial": "alpha",
+        "alpha-tools": "platform",
+        "example-commercial": "company",
     }
 
 
-def test_load_knowledge_slug_map_missing_file_returns_empty(tmp_path, monkeypatch):
-    """A project_slug must fall back to mapping to itself rather than crashing the
-    roster page when agent-platform isn't checked out on this machine."""
-    monkeypatch.setattr(R, "_PROJECTS_PY_PATH", tmp_path / "no-such-file")
+def test_load_knowledge_slug_map_skips_malformed_entries(tmp_path, monkeypatch):
+    _slug_map_registry(tmp_path, monkeypatch, {
+        "alpha": {"kb_project_by_repo": {"good": {"kb_project": "alpha"},
+                                         "bad": "alpha", "worse": {"kb_project": 7}},
+                  "kb_scope_exceptions": None},
+    })
+    assert _REAL_LOAD_KNOWLEDGE_SLUG_MAP() == {"good": "alpha"}
+
+
+def test_load_knowledge_slug_map_unreadable_registry_returns_empty(tmp_path, monkeypatch, capsys):
+    """A project_slug falls back to mapping to itself rather than crashing the
+    roster page, and the fallback is announced."""
+    monkeypatch.setenv("PROJECTS_JSON", str(tmp_path / "absent.json"))
     assert _REAL_LOAD_KNOWLEDGE_SLUG_MAP() == {}
-
-
-def test_load_knowledge_slug_map_unparseable_file_returns_empty(tmp_path, monkeypatch):
-    monkeypatch.setattr(R, "_PROJECTS_PY_PATH", tmp_path / "projects.py")
-    (tmp_path / "projects.py").write_text("no product map literal here\n", encoding="utf-8")
-    assert _REAL_LOAD_KNOWLEDGE_SLUG_MAP() == {}
-
-
-def test_load_knowledge_slug_map_matches_the_real_projects_py():
-    """Reads the REAL agent-platform/lib/agent-platform/projects.py on this machine (not a
-    fixture) and confirms convivy-commercial resolves to 'company', not the
-    retired 'convivy' scope Orient's old hand-copy was stuck on. This is the
-    live check that a copy of the map, however carefully tested, cannot give:
-    since roster_build reads the source directly, there is nothing here that
-    can drift out of sync with it. Skipped when agent-platform isn't checked
-    out on the machine running the tests.
-    """
-    if not R._PROJECTS_PY_PATH.exists():
-        pytest.skip("agent-platform not checked out on this machine")
-    mapping = _REAL_LOAD_KNOWLEDGE_SLUG_MAP()
-    assert mapping.get("convivy-commercial") == "company"
+    assert "registry could not be read" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------
@@ -276,16 +284,15 @@ def _mock_catalog():
 def test_load_roster_groups_agents_by_project_and_lane(tmp_path, monkeypatch):
     monkeypatch.setattr(R, "KNOWLEDGE_ROOT", tmp_path)
     monkeypatch.setattr(R, "load_agents", _mock_catalog)
-    _write_profile(tmp_path, "vivy", "daytime", ["coder", "reviewer"])
+    _write_profile(tmp_path, "alpha", "daytime", ["coder", "reviewer"])
 
-    # Override PROJECTS to point at our tmp_path fixture.
-    monkeypatch.setattr(R, "PROJECTS", [
-        ("vivy", "Vivy", "/fake/vivy", ["daytime"]),
+    _set_projects(tmp_path, monkeypatch, [
+        ("alpha", "Alpha", "/fake/alpha", ["daytime"]),
     ])
     roster = R.load_roster()
     assert len(roster["projects"]) == 1
     proj = roster["projects"][0]
-    assert proj["slug"] == "vivy"
+    assert proj["slug"] == "alpha"
     assert len(proj["lanes"]) == 1
     lane = proj["lanes"][0]
     assert lane["name"] == "daytime"
@@ -296,10 +303,10 @@ def test_load_roster_groups_agents_by_project_and_lane(tmp_path, monkeypatch):
 def test_load_roster_autonomous_agents_not_in_daytime_profiles(tmp_path, monkeypatch):
     monkeypatch.setattr(R, "KNOWLEDGE_ROOT", tmp_path)
     monkeypatch.setattr(R, "load_agents", _mock_catalog)
-    _write_profile(tmp_path, "vivy", "daytime", ["coder"])
+    _write_profile(tmp_path, "alpha", "daytime", ["coder"])
 
-    monkeypatch.setattr(R, "PROJECTS", [
-        ("vivy", "Vivy", "/fake/vivy", ["daytime"]),
+    _set_projects(tmp_path, monkeypatch, [
+        ("alpha", "Alpha", "/fake/alpha", ["daytime"]),
     ])
     roster = R.load_roster()
     auto_slugs = [a["slug"] for a in roster["autonomous"]]
@@ -313,8 +320,8 @@ def test_load_roster_missing_profile_silently_skipped(tmp_path, monkeypatch):
     monkeypatch.setattr(R, "KNOWLEDGE_ROOT", tmp_path)
     monkeypatch.setattr(R, "load_agents", _mock_catalog)
 
-    monkeypatch.setattr(R, "PROJECTS", [
-        ("vivy", "Vivy", "/fake/vivy", ["daytime"]),  # no daytime.yaml created
+    _set_projects(tmp_path, monkeypatch, [
+        ("alpha", "Alpha", "/fake/alpha", ["daytime"]),  # no daytime.yaml created
     ])
     roster = R.load_roster()
     assert roster["projects"][0]["lanes"] == []
@@ -323,15 +330,15 @@ def test_load_roster_missing_profile_silently_skipped(tmp_path, monkeypatch):
 def test_load_roster_launch_command_has_repo_path(tmp_path, monkeypatch):
     monkeypatch.setattr(R, "KNOWLEDGE_ROOT", tmp_path)
     monkeypatch.setattr(R, "load_agents", _mock_catalog)
-    _write_profile(tmp_path, "vivy", "daytime", ["coder"])
+    _write_profile(tmp_path, "alpha", "daytime", ["coder"])
 
-    monkeypatch.setattr(R, "PROJECTS", [
-        ("vivy", "Vivy", "/srv/convivy/vivy", ["daytime"]),
+    _set_projects(tmp_path, monkeypatch, [
+        ("alpha", "Alpha", "/srv/convivy/alpha", ["daytime"]),
     ])
     roster = R.load_roster()
     lane = roster["projects"][0]["lanes"][0]
     coder = next(a for a in lane["agents"] if a["slug"] == "coder")
-    assert "/srv/convivy/vivy" in coder["launch"]
+    assert "/srv/convivy/alpha" in coder["launch"]
     assert "co c" in coder["launch"]
 
 
@@ -347,10 +354,10 @@ def test_overnight_lane_uses_agentctl_spawn(tmp_path, monkeypatch):
         },
     }
     monkeypatch.setattr(R, "load_agents", lambda: catalog)
-    _write_profile(tmp_path, "vivy", "overnight", ["overnight-orchestrator"])
+    _write_profile(tmp_path, "alpha", "overnight", ["overnight-orchestrator"])
 
-    monkeypatch.setattr(R, "PROJECTS", [
-        ("vivy", "Vivy", "/srv/convivy/vivy", ["overnight"]),
+    _set_projects(tmp_path, monkeypatch, [
+        ("alpha", "Alpha", "/srv/convivy/alpha", ["overnight"]),
     ])
     roster = R.load_roster()
     lane = roster["projects"][0]["lanes"][0]
@@ -373,10 +380,10 @@ def test_daytime_lane_uses_co_command(tmp_path, monkeypatch):
         },
     }
     monkeypatch.setattr(R, "load_agents", lambda: catalog)
-    _write_profile(tmp_path, "vivy", "daytime", ["coder"])
+    _write_profile(tmp_path, "alpha", "daytime", ["coder"])
 
-    monkeypatch.setattr(R, "PROJECTS", [
-        ("vivy", "Vivy", "/srv/convivy/vivy", ["daytime"]),
+    _set_projects(tmp_path, monkeypatch, [
+        ("alpha", "Alpha", "/srv/convivy/alpha", ["daytime"]),
     ])
     roster = R.load_roster()
     lane = roster["projects"][0]["lanes"][0]
@@ -385,7 +392,7 @@ def test_daytime_lane_uses_co_command(tmp_path, monkeypatch):
     # coder has the alias "co c" — any co-form counts.
     assert "co" in agent["launch"]
     assert "agentctl" not in agent["launch"]
-    assert "/srv/convivy/vivy" in agent["launch"]
+    assert "/srv/convivy/alpha" in agent["launch"]
 
 
 def test_commercial_lane_uses_co_command(tmp_path, monkeypatch):
@@ -400,10 +407,10 @@ def test_commercial_lane_uses_co_command(tmp_path, monkeypatch):
         },
     }
     monkeypatch.setattr(R, "load_agents", lambda: catalog)
-    _write_profile(tmp_path, "vivy", "commercial", ["product-manager"])
+    _write_profile(tmp_path, "alpha", "commercial", ["product-manager"])
 
-    monkeypatch.setattr(R, "PROJECTS", [
-        ("vivy", "Vivy", "/srv/convivy/vivy", ["commercial"]),
+    _set_projects(tmp_path, monkeypatch, [
+        ("alpha", "Alpha", "/srv/convivy/alpha", ["commercial"]),
     ])
     roster = R.load_roster()
     lane = roster["projects"][0]["lanes"][0]
@@ -411,7 +418,7 @@ def test_commercial_lane_uses_co_command(tmp_path, monkeypatch):
     agent = next(a for a in lane["agents"] if a["slug"] == "product-manager")
     assert "co" in agent["launch"]
     assert "agentctl" not in agent["launch"]
-    assert "/srv/convivy/vivy" in agent["launch"]
+    assert "/srv/convivy/alpha" in agent["launch"]
 
 
 def test_overnight_agentctl_command_uses_project_slug(tmp_path, monkeypatch):
@@ -426,38 +433,38 @@ def test_overnight_agentctl_command_uses_project_slug(tmp_path, monkeypatch):
         },
     }
     monkeypatch.setattr(R, "load_agents", lambda: catalog)
-    _write_profile(tmp_path, "constance", "overnight", ["refactorer"])
+    _write_profile(tmp_path, "beta", "overnight", ["refactorer"])
 
-    monkeypatch.setattr(R, "PROJECTS", [
-        ("constance", "Constance", "/srv/convivy/constance", ["overnight"]),
+    _set_projects(tmp_path, monkeypatch, [
+        ("beta", "Beta", "/srv/convivy/beta", ["overnight"]),
     ])
     roster = R.load_roster()
     lane = roster["projects"][0]["lanes"][0]
     agent = next(a for a in lane["agents"] if a["slug"] == "refactorer")
-    assert "agentctl spawn refactorer --on constance" in agent["launch"]
+    assert "agentctl spawn refactorer --on beta" in agent["launch"]
 
 
 def test_load_roster_autonomous_launch_uses_agentctl(tmp_path, monkeypatch):
     monkeypatch.setattr(R, "KNOWLEDGE_ROOT", tmp_path)
     monkeypatch.setattr(R, "load_agents", _mock_catalog)
     # No daytime profile — curator stays autonomous.
-    monkeypatch.setattr(R, "PROJECTS", [])
+    _set_projects(tmp_path, monkeypatch, [])
     roster = R.load_roster()
     auto = {a["slug"]: a for a in roster["autonomous"]}
     assert "agentctl spawn" in auto["curator"]["launch"]
 
 
 def test_load_roster_commercial_profile_aliases(tmp_path, monkeypatch):
-    """convivy-commercial uses the positioning-strategist default alias.
+    """example-commercial uses the positioning-strategist default alias.
 
     The profile lives under the 'company' knowledge dir (via
-    _load_knowledge_slug_map), not under a 'convivy-commercial' dir that
+    _load_knowledge_slug_map), not under a 'example-commercial' dir that
     doesn't exist in knowledge, and not under the retired 'convivy' scope
     (issue_01M0VMAZZMN4VCGJF197GASR6Y).
     """
     monkeypatch.setattr(R, "KNOWLEDGE_ROOT", tmp_path)
     monkeypatch.setattr(R, "_load_knowledge_slug_map",
-                        lambda: {"convivy-commercial": "company"})
+                        lambda: {"example-commercial": "company"})
     catalog = {
         "positioning-strategist": {
             "slug": "positioning-strategist",
@@ -467,34 +474,34 @@ def test_load_roster_commercial_profile_aliases(tmp_path, monkeypatch):
         },
     }
     monkeypatch.setattr(R, "load_agents", lambda: catalog)
-    # Profile must live under the mapped knowledge slug ("company"), not "convivy-commercial".
+    # Profile must live under the mapped knowledge slug ("company"), not "example-commercial".
     _write_profile(tmp_path, "company", "commercial", ["positioning-strategist"])
 
-    monkeypatch.setattr(R, "PROJECTS", [
-        ("convivy-commercial", "Convivy Commercial",
-         "/srv/convivy/convivy-commercial", ["commercial"]),
+    _set_projects(tmp_path, monkeypatch, [
+        ("example-commercial", "Example General",
+         "/srv/convivy/example-commercial", ["commercial"]),
     ])
     roster = R.load_roster()
     lane = roster["projects"][0]["lanes"][0]
     agent = lane["agents"][0]
-    # In convivy-commercial the default alias for positioning-strategist is bare `co`.
+    # In example-commercial the default alias for positioning-strategist is bare `co`.
     assert "co" in agent["launch"]
-    assert "/srv/convivy/convivy-commercial" in agent["launch"]
+    assert "/srv/convivy/example-commercial" in agent["launch"]
 
 
-def test_load_roster_convivy_commercial_resolves_via_knowledge_slug(tmp_path, monkeypatch):
-    """convivy-commercial resolves to the 'company' knowledge dir
-    (_load_knowledge_slug_map mapping) — the value agent-platform's
-    EXPLICIT_PROJECT_BY_NAME holds since ARCH-438 re-pointed it, not the retired 'convivy' scope Orient's
+def test_load_roster_example_commercial_resolves_via_knowledge_slug(tmp_path, monkeypatch):
+    """example-commercial resolves to the 'company' knowledge dir
+    (_load_knowledge_slug_map mapping) — the value the registry's
+    kb_project_by_repo holds since ARCH-438 re-pointed it, not the retired 'convivy' scope Orient's
     old hand-copy stuck on (issue_01M0VMAZZMN4VCGJF197GASR6Y).
 
-    A profile at knowledge/convivy-commercial/profiles/commercial.yaml must NOT be
+    A profile at knowledge/example-commercial/profiles/commercial.yaml must NOT be
     found (that path doesn't exist in production). The profile at
     knowledge/company/profiles/commercial.yaml MUST be found.
     """
     monkeypatch.setattr(R, "KNOWLEDGE_ROOT", tmp_path)
     monkeypatch.setattr(R, "_load_knowledge_slug_map",
-                        lambda: {"convivy-commercial": "company"})
+                        lambda: {"example-commercial": "company"})
     catalog = {
         "positioning-strategist": {
             "slug": "positioning-strategist",
@@ -516,13 +523,13 @@ def test_load_roster_convivy_commercial_resolves_via_knowledge_slug(tmp_path, mo
         },
     }
     monkeypatch.setattr(R, "load_agents", lambda: catalog)
-    # Write only under "company" — no "convivy-commercial" dir in knowledge.
+    # Write only under "company" — no "example-commercial" dir in knowledge.
     _write_profile(tmp_path, "company", "commercial",
                    ["positioning-strategist", "commercial-writer", "product-analyst"])
 
-    monkeypatch.setattr(R, "PROJECTS", [
-        ("convivy-commercial", "Convivy Commercial",
-         "/srv/convivy/convivy-commercial", ["commercial"]),
+    _set_projects(tmp_path, monkeypatch, [
+        ("example-commercial", "Example General",
+         "/srv/convivy/example-commercial", ["commercial"]),
     ])
     roster = R.load_roster()
     assert len(roster["projects"]) == 1
@@ -537,8 +544,8 @@ def test_load_roster_convivy_commercial_resolves_via_knowledge_slug(tmp_path, mo
     assert "product-analyst" in slugs
 
 
-def test_load_roster_commercial_lane_renders_for_vivy(tmp_path, monkeypatch):
-    """The commercial lane renders for a standard product (vivy/commercial.yaml)."""
+def test_load_roster_commercial_lane_renders_for_alpha(tmp_path, monkeypatch):
+    """The commercial lane renders for a standard product (alpha/commercial.yaml)."""
     monkeypatch.setattr(R, "KNOWLEDGE_ROOT", tmp_path)
     catalog = {
         "product-manager": {
@@ -555,10 +562,10 @@ def test_load_roster_commercial_lane_renders_for_vivy(tmp_path, monkeypatch):
         },
     }
     monkeypatch.setattr(R, "load_agents", lambda: catalog)
-    _write_profile(tmp_path, "vivy", "commercial", ["product-manager", "product-analyst"])
+    _write_profile(tmp_path, "alpha", "commercial", ["product-manager", "product-analyst"])
 
-    monkeypatch.setattr(R, "PROJECTS", [
-        ("vivy", "Vivy", "/srv/convivy/vivy", ["commercial"]),
+    _set_projects(tmp_path, monkeypatch, [
+        ("alpha", "Alpha", "/srv/convivy/alpha", ["commercial"]),
     ])
     roster = R.load_roster()
     proj = roster["projects"][0]
@@ -574,7 +581,7 @@ def test_load_roster_commercial_only_agent_not_autonomous(tmp_path, monkeypatch)
     """An agent appearing only in a commercial profile is NOT classified as autonomous.
 
     This locks the fix for the bug where agents in non-daytime interactive profiles
-    (e.g. convivy-commercial's commercial lane) fell through into the autonomous
+    (e.g. example-commercial's commercial lane) fell through into the autonomous
     bucket, producing a contradiction: the page showed them with a `co` launch
     command in the commercial lane AND in the autonomous "not launched via co" section.
     """
@@ -601,15 +608,15 @@ def test_load_roster_commercial_only_agent_not_autonomous(tmp_path, monkeypatch)
     }
     monkeypatch.setattr(R, "load_agents", lambda: catalog)
     monkeypatch.setattr(R, "_load_knowledge_slug_map",
-                        lambda: {"convivy-commercial": "company"})
+                        lambda: {"example-commercial": "company"})
     # positioning-strategist and commercial-writer appear only in a commercial profile.
     # curator appears in no profile at all.
     _write_profile(tmp_path, "company", "commercial",
                    ["positioning-strategist", "commercial-writer"])
 
-    monkeypatch.setattr(R, "PROJECTS", [
-        ("convivy-commercial", "Convivy Commercial",
-         "/srv/convivy/convivy-commercial", ["commercial"]),
+    _set_projects(tmp_path, monkeypatch, [
+        ("example-commercial", "Example General",
+         "/srv/convivy/example-commercial", ["commercial"]),
     ])
     roster = R.load_roster()
 
@@ -638,9 +645,9 @@ def _mock_roster():
     return {
         "projects": [
             {
-                "slug": "vivy",
-                "label": "Vivy",
-                "repo": "/srv/convivy/vivy",
+                "slug": "alpha",
+                "label": "Alpha",
+                "repo": "/srv/convivy/alpha",
                 "lanes": [
                     {
                         "name": "daytime",
@@ -651,7 +658,7 @@ def _mock_roster():
                                 "title": "Coder",
                                 "model": "sonnet",
                                 "desc": "You implement features per a spec.",
-                                "launch": "cd /srv/convivy/vivy && co c",
+                                "launch": "cd /srv/convivy/alpha && co c",
                             },
                         ],
                     }
@@ -675,13 +682,13 @@ def test_live_html_embeds_agent_names(monkeypatch):
     html = R.live_html(frozenset(), True)
     assert "Coder" in html
     assert "Curator" in html
-    assert "Vivy" in html
+    assert "Alpha" in html
 
 
 def test_live_html_embeds_launch_commands(monkeypatch):
     monkeypatch.setattr(R, "load_roster", _mock_roster)
     html = R.live_html(frozenset(), True)
-    assert "/srv/convivy/vivy" in html
+    assert "/srv/convivy/alpha" in html
     assert "agentctl spawn curator" in html
 
 
@@ -723,22 +730,22 @@ def test_live_html_empty_projects_shows_empty_state(monkeypatch):
 def test_live_html_drops_a_project_whose_repo_is_out_of_scope(tmp_path, monkeypatch):
     roster = _mock_roster()
     roster["projects"].append({
-        "slug": "selector", "label": "Selector", "repo": "/x",
+        "slug": "delta", "label": "Delta", "repo": "/x",
         "lanes": [{"name": "daytime", "label": "Daytime (interactive)", "agents": [
-            {"slug": "sel-coder", "title": "Sel Coder", "model": "sonnet",
-             "desc": "d", "launch": "co sel-coder"}]}],
+            {"slug": "del-coder", "title": "Del Coder", "model": "sonnet",
+             "desc": "d", "launch": "co del-coder"}]}],
     })
     monkeypatch.setattr(R, "load_roster", lambda: roster)
     registry = tmp_path / "projects.json"
     registry.write_text(json.dumps({
-        "vivy": {"crew": "vivy", "lifecycle": "active", "repos": ["vivy"]},
-        "selector": {"crew": "selector", "lifecycle": "active", "repos": ["selector"]},
+        "alpha": {"crew": "alpha", "lifecycle": "active", "repos": ["alpha"]},
+        "delta": {"crew": "delta", "lifecycle": "active", "repos": ["delta"]},
     }))
-    monkeypatch.setattr(R.crew_registry, "REGISTRY", registry)
-    html = R.live_html(frozenset({"vivy"}), False)
-    assert '"label": "Vivy"' in html
-    assert '"label": "Selector"' not in html
-    assert "sel-coder" not in html
+    monkeypatch.setenv("PROJECTS_JSON", str(registry))
+    html = R.live_html(frozenset({"alpha"}), False)
+    assert '"label": "Alpha"' in html
+    assert '"label": "Delta"' not in html
+    assert "del-coder" not in html
 
 
 def test_build_static_seeds_an_empty_fallback_not_real_data(tmp_path, monkeypatch):
@@ -760,10 +767,10 @@ def test_live_html_keeps_autonomous_agents_unfiltered(tmp_path, monkeypatch):
     monkeypatch.setattr(R, "load_roster", _mock_roster)
     registry = tmp_path / "projects.json"
     registry.write_text(json.dumps({}))
-    monkeypatch.setattr(R.crew_registry, "REGISTRY", registry)
+    monkeypatch.setenv("PROJECTS_JSON", str(registry))
     html = R.live_html(frozenset(), False)
     assert "Curator" in html
-    assert "Vivy" not in html
+    assert "Alpha" not in html
 
 
 # ---------------------------------------------------------------------------
@@ -773,21 +780,21 @@ def test_live_html_keeps_autonomous_agents_unfiltered(tmp_path, monkeypatch):
 def test_load_repo_agents_parses_native_claude_code_schema(tmp_path):
     """Repo-local files use `name:`/`description:`, NOT the catalog's
     `kind:`/`audience:`. Reading them with the catalog parser yields nothing."""
-    repo = tmp_path / "selector"
-    _write_repo_agent(repo, "sel-coder", model="sonnet",
-                      description="Implements features for Selector.")
+    repo = tmp_path / "delta"
+    _write_repo_agent(repo, "del-coder", model="sonnet",
+                      description="Implements features for Delta.")
     agents = _REAL_LOAD_REPO_AGENTS(str(repo))
-    assert "sel-coder" in agents
-    a = agents["sel-coder"]
+    assert "del-coder" in agents
+    a = agents["del-coder"]
     assert a["model"] == "sonnet"
     assert "Implements features" in a["desc"]
     # No `title:` in the native schema — derived from the slug.
-    assert a["title"] == "Sel Coder"
+    assert a["title"] == "Del Coder"
 
 
 def test_load_repo_agents_skips_file_without_name(tmp_path):
     """The slug is what agentctl dispatches on; a record without one is unusable."""
-    repo = tmp_path / "selector"
+    repo = tmp_path / "delta"
     agents_dir = repo / ".claude" / "agents"
     agents_dir.mkdir(parents=True)
     (agents_dir / "broken.md").write_text(
@@ -800,20 +807,20 @@ def test_load_repo_agents_missing_dir_is_empty_not_error(tmp_path):
 
 
 def test_project_with_no_profiles_renders_its_repo_crew(tmp_path, monkeypatch):
-    """The bug the operator hit: selector/hollis/convivy-app-kit have NO profiles YAML, so
+    """The bug the operator hit: delta/gamma/convivy-app-kit have NO profiles YAML, so
     the profile path can never surface them and their whole crew was invisible."""
     monkeypatch.setattr(R, "KNOWLEDGE_ROOT", tmp_path / "kb")
     monkeypatch.setattr(R, "load_agents", lambda: {})
-    repo = tmp_path / "selector"
-    _write_repo_agent(repo, "sel-coder")
-    _write_repo_agent(repo, "sel-reviewer")
+    repo = tmp_path / "delta"
+    _write_repo_agent(repo, "del-coder")
+    _write_repo_agent(repo, "del-reviewer")
     monkeypatch.setattr(R, "load_repo_agents", _REAL_LOAD_REPO_AGENTS)
-    monkeypatch.setattr(R, "PROJECTS", [("selector", "Selector", str(repo), [])])
+    _set_projects(tmp_path, monkeypatch, [("delta", "Delta", str(repo), [])])
 
     roster = R.load_roster()
     proj = roster["projects"][0]
     assert [ln["name"] for ln in proj["lanes"]] == ["repo-crew"]
-    assert {a["slug"] for a in proj["lanes"][0]["agents"]} == {"sel-coder", "sel-reviewer"}
+    assert {a["slug"] for a in proj["lanes"][0]["agents"]} == {"del-coder", "del-reviewer"}
 
 
 def test_individuated_generic_agent_is_not_duplicated(tmp_path, monkeypatch):
@@ -822,18 +829,18 @@ def test_individuated_generic_agent_is_not_duplicated(tmp_path, monkeypatch):
     monkeypatch.setattr(R, "KNOWLEDGE_ROOT", tmp_path)
     monkeypatch.setattr(R, "load_agents", lambda: {
         "coder": {"slug": "coder", "title": "Coder", "model": "sonnet", "desc": "d"}})
-    _write_profile(tmp_path, "vivy", "daytime", ["coder"])
-    repo = tmp_path / "vivy"
+    _write_profile(tmp_path, "alpha", "daytime", ["coder"])
+    repo = tmp_path / "alpha"
     _write_repo_agent(repo, "coder")          # individuated generic — dedup
-    _write_repo_agent(repo, "vivy-special")   # product-specific — must show
+    _write_repo_agent(repo, "alpha-special")   # product-specific — must show
     monkeypatch.setattr(R, "load_repo_agents", _REAL_LOAD_REPO_AGENTS)
-    monkeypatch.setattr(R, "PROJECTS", [("vivy", "Vivy", str(repo), ["daytime"])])
+    _set_projects(tmp_path, monkeypatch, [("alpha", "Alpha", str(repo), ["daytime"])])
 
     roster = R.load_roster()
     lanes = {ln["name"]: [a["slug"] for a in ln["agents"]]
              for ln in roster["projects"][0]["lanes"]}
     assert lanes["daytime"] == ["coder"]
-    assert lanes["repo-crew"] == ["vivy-special"]
+    assert lanes["repo-crew"] == ["alpha-special"]
     # coder appears exactly once across the whole project
     everywhere = [s for slugs in lanes.values() for s in slugs]
     assert everywhere.count("coder") == 1
@@ -844,8 +851,8 @@ def test_profile_slug_missing_everywhere_renders_unresolved_not_dropped(tmp_path
     stale reference and a deliberately-empty lane looked identical on the page."""
     monkeypatch.setattr(R, "KNOWLEDGE_ROOT", tmp_path)
     monkeypatch.setattr(R, "load_agents", lambda: {})
-    _write_profile(tmp_path, "vivy", "daytime", ["ghost-agent"])
-    monkeypatch.setattr(R, "PROJECTS", [("vivy", "Vivy", str(tmp_path / "vivy"), ["daytime"])])
+    _write_profile(tmp_path, "alpha", "daytime", ["ghost-agent"])
+    _set_projects(tmp_path, monkeypatch, [("alpha", "Alpha", str(tmp_path / "alpha"), ["daytime"])])
 
     roster = R.load_roster()
     agents = roster["projects"][0]["lanes"][0]["agents"]
@@ -854,15 +861,16 @@ def test_profile_slug_missing_everywhere_renders_unresolved_not_dropped(tmp_path
 
 
 def test_discovery_finds_a_repo_not_listed_in_projects(tmp_path, monkeypatch):
-    """The page's failure mode was going stale: PROJECTS was hand-maintained, so a
-    new project's crew stayed invisible until someone noticed. Discovery fixes that."""
+    """The page's failure mode was going stale: the explicit row list was
+    hand-maintained, so a new project's crew stayed invisible until someone
+    noticed. Discovery fixes that."""
     monkeypatch.setattr(R, "KNOWLEDGE_ROOT", tmp_path / "kb")
     monkeypatch.setattr(R, "load_agents", lambda: {})
     root = tmp_path / "Convivy"
     _write_repo_agent(root / "brand-new-product", "bnp-coder")
     monkeypatch.setattr(R, "CONVIVY_ROOT", root)
     monkeypatch.setattr(R, "load_repo_agents", _REAL_LOAD_REPO_AGENTS)
-    monkeypatch.setattr(R, "PROJECTS", [])
+    _set_projects(tmp_path, monkeypatch, [])
 
     roster = R.load_roster()
     slugs = {p["slug"] for p in roster["projects"]}
@@ -878,7 +886,7 @@ def test_discovery_skips_infrastructure_repos(tmp_path, monkeypatch):
     root = tmp_path / "Convivy"
     _write_repo_agent(root / "knowledge", "kb-agent")
     monkeypatch.setattr(R, "CONVIVY_ROOT", root)
-    monkeypatch.setattr(R, "PROJECTS", [])
+    _set_projects(tmp_path, monkeypatch, [])
     assert R.discover_projects() == []
 
 
@@ -887,8 +895,8 @@ def test_page_renders_filter_controls(tmp_path, monkeypatch):
     monkeypatch.setattr(R, "KNOWLEDGE_ROOT", tmp_path)
     monkeypatch.setattr(R, "load_agents", lambda: {
         "coder": {"slug": "coder", "title": "Coder", "model": "sonnet", "desc": "d"}})
-    _write_profile(tmp_path, "vivy", "daytime", ["coder"])
-    monkeypatch.setattr(R, "PROJECTS", [("vivy", "Vivy", str(tmp_path / "vivy"), ["daytime"])])
+    _write_profile(tmp_path, "alpha", "daytime", ["coder"])
+    _set_projects(tmp_path, monkeypatch, [("alpha", "Alpha", str(tmp_path / "alpha"), ["daytime"])])
     html = R.live_html(frozenset(), True)
     assert 'id="projectChips"' in html
     assert 'id="agentSearch"' in html
@@ -905,10 +913,10 @@ def test_parse_profile_stops_at_sibling_include_entry(tmp_path):
     non-blank line — so `- kind: skill` became a phantom agent named
     "kind: skill" on every profile-based project.
     """
-    prof = tmp_path / "vivy" / "profiles"
+    prof = tmp_path / "alpha" / "profiles"
     prof.mkdir(parents=True)
     (prof / "daytime.yaml").write_text(
-        "profile: vivy/daytime\n"
+        "profile: alpha/daytime\n"
         "\n"
         "include:\n"
         "  - kind: agent\n"
@@ -917,11 +925,11 @@ def test_parse_profile_stops_at_sibling_include_entry(tmp_path):
         "      - coder\n"
         "\n"                      # the blank line that broke it
         "  - kind: skill\n"
-        "    project: [vivy, shared]\n"
+        "    project: [alpha, shared]\n"
         "    status: current\n"
         "\n"
         "  - kind: architecture\n"
-        "    project: [vivy, shared]\n",
+        "    project: [alpha, shared]\n",
         encoding="utf-8")
     slugs = R._parse_profile(prof / "daytime.yaml")
     assert slugs == ["planner", "coder"]
@@ -931,7 +939,7 @@ def test_parse_profile_stops_at_sibling_include_entry(tmp_path):
 def test_parse_profile_keeps_slugs_across_internal_blank_lines(tmp_path):
     """Blank lines are legal inside a YAML sequence — they must be skipped, not
     treated as terminators, or grouped profiles would lose their later agents."""
-    prof = tmp_path / "vivy" / "profiles"
+    prof = tmp_path / "alpha" / "profiles"
     prof.mkdir(parents=True)
     (prof / "daytime.yaml").write_text(
         "include:\n"
@@ -955,7 +963,7 @@ def test_repo_crew_launch_uses_agentctl_not_co(tmp_path, monkeypatch):
     repo = tmp_path / "substrate"
     _write_repo_agent(repo, "scout")
     monkeypatch.setattr(R, "load_repo_agents", _REAL_LOAD_REPO_AGENTS)
-    monkeypatch.setattr(R, "PROJECTS", [("substrate", "Substrate", str(repo), [])])
+    _set_projects(tmp_path, monkeypatch, [("substrate", "Substrate", str(repo), [])])
 
     launch = R.load_roster()["projects"][0]["lanes"][0]["agents"][0]["launch"]
     assert launch.startswith("agentctl spawn scout --on substrate")
@@ -1014,19 +1022,19 @@ def test_discovery_skip_repos_have_no_kb_crew():
         f"_DISCOVERY_SKIP claims nobody dispatches a crew against these repos, "
         f"but the knowledge repo has agent definitions for them: {violators}. "
         f"Either the crew is stale (remove it) or the skip entry is stale (drop "
-        f"it and give the repo a PROJECTS entry).")
+        f"it).")
 
 
 def test_discovery_skips_worktree_pools_and_symlinks(tmp_path, monkeypatch):
     """A worktree is a FULL checkout, so it has its own .claude/agents. A pool dir
-    (hollis-worktrees, convivy-app-kit-worktrees) would otherwise become a phantom
+    (gamma-worktrees, convivy-app-kit-worktrees) would otherwise become a phantom
     project the first time a worktree is created in it — and worktrees are created
     constantly. Matched by suffix so a NEW pool is covered without a code change.
     """
     monkeypatch.setattr(R, "KNOWLEDGE_ROOT", tmp_path / "kb")
     monkeypatch.setattr(R, "load_agents", lambda: {})
     root = tmp_path / "Convivy"
-    _write_repo_agent(root / "hollis-worktrees" / "wt1", "hollis-coder")
+    _write_repo_agent(root / "gamma-worktrees" / "wt1", "gamma-coder")
     _write_repo_agent(root / "real-product", "rp-coder")
     # a symlink pointing outside the tree must not be followed
     outside = tmp_path / "outside"
@@ -1035,7 +1043,167 @@ def test_discovery_skips_worktree_pools_and_symlinks(tmp_path, monkeypatch):
 
     monkeypatch.setattr(R, "CONVIVY_ROOT", root)
     monkeypatch.setattr(R, "load_repo_agents", _REAL_LOAD_REPO_AGENTS)
-    monkeypatch.setattr(R, "PROJECTS", [])
+    _set_projects(tmp_path, monkeypatch, [])
 
     slugs = {p[0] for p in R.discover_projects()}
     assert slugs == {"real-product"}, f"unexpected projects discovered: {slugs}"
+
+
+# ---------------------------------------------------------------------------
+# _registry_rows (CQ-171 slice 6, replacing PROJECT_PROFILE_LANES)
+# ---------------------------------------------------------------------------
+
+def _write_registry(tmp_path: Path, monkeypatch, units: dict) -> None:
+    path = tmp_path / "roster-units.json"
+    path.write_text(json.dumps(units), encoding="utf-8")
+    monkeypatch.setenv("PROJECTS_JSON", str(path))
+
+
+def test_registry_rows_renders_in_the_registrys_own_top_level_order(tmp_path, monkeypatch):
+    """Replaces PROJECT_PROFILE_LANES's hand-maintained order (CQ-171 slice
+    6, the steward-approved reorder) — the page now follows whatever order
+    the registry's units are written in."""
+    _write_registry(tmp_path, monkeypatch, {
+        "gamma": {"display": "Gamma", "home_dir": "/srv/convivy/gamma",
+                  "repos": ["gamma"], "activation_lanes": ["daytime"]},
+        "alpha": {"display": "Alpha", "home_dir": "/srv/convivy/alpha",
+                  "repos": ["alpha"], "activation_lanes": ["daytime"]},
+        "beta": {"display": "Beta", "home_dir": "/srv/convivy/beta",
+                 "repos": ["beta"], "activation_lanes": ["daytime"]},
+    })
+    assert [row[0] for row in R._registry_rows()] == ["gamma", "alpha", "beta"]
+
+
+def test_registry_rows_lanes_come_from_the_repos_owning_unit(tmp_path, monkeypatch):
+    """A row's lanes come from whichever unit's `repos` claims it — the row
+    key is not always the unit's own registry key (CQ-171 slice 6, real
+    shapes: a product-kit repo's lanes live on a differently-keyed unit,
+    and so does agent-platform's)."""
+    _write_registry(tmp_path, monkeypatch, {
+        "lambda-kit": {"display": "Lambda Kit", "home_dir": "/srv/convivy/convivy-app-kit",
+                       "repos": ["convivy-app-kit", "convivy-services"],
+                       "activation_lanes": ["daytime"]},
+        "bosun": {"display": "Agent Platform", "home_dir": "/srv/convivy/agent-platform",
+                  "repos": ["agent-platform"], "activation_lanes": ["daytime"]},
+    })
+    rows = {row[0]: row for row in R._registry_rows()}
+    assert rows["convivy-app-kit"][3] == ["daytime"]
+    assert rows["agent-platform"][3] == ["daytime"]
+    # Only the unit's FIRST repos entry becomes a row — convivy-services was
+    # never a roster row under PROJECT_PROFILE_LANES either.
+    assert "convivy-services" not in rows
+
+
+def test_registry_rows_skips_a_unit_with_no_activation_lanes(tmp_path, monkeypatch):
+    """A unit with no declared lanes contributes no explicit row — it may
+    still appear through discover_projects()'s own filesystem scan (see the
+    PR body for which of today's rows that affects)."""
+    _write_registry(tmp_path, monkeypatch, {
+        "alpha": {"display": "Alpha", "home_dir": "/srv/convivy/alpha",
+                  "repos": ["alpha"], "activation_lanes": ["daytime"]},
+        "steward": {"display": "Steward", "home_dir": "/srv/convivy/substrate",
+                    "repos": ["substrate"]},
+    })
+    assert [row[0] for row in R._registry_rows()] == ["alpha"]
+
+
+def test_registry_rows_skips_a_unit_with_no_repos(tmp_path, monkeypatch):
+    _write_registry(tmp_path, monkeypatch, {
+        "alpha": {"display": "Alpha", "activation_lanes": ["daytime"]},
+    })
+    assert R._registry_rows() == []
+
+
+def test_registry_rows_is_empty_on_an_unreadable_registry(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROJECTS_JSON", str(tmp_path / "absent.json"))
+    assert R._registry_rows() == []
+
+
+def test_registry_rows_pins_todays_lane_bearing_rows_apart_from_order(tmp_path, monkeypatch):
+    """A fixture in the shape the Bosun's registry PR will carry,
+    reproducing the five lane-bearing rows `PROJECT_PROFILE_LANES` held on
+    main (two product crews -> alpha/beta, a third crew -> epsilon,
+    agent-platform -> bosun, the company commercial workspace ->
+    example-commercial): each
+    row's label, repo path and lanes must match exactly; only the ORDER is
+    allowed to differ (CQ-171 slice 6's steward-approved reorder)."""
+    _write_registry(tmp_path, monkeypatch, {
+        "alpha": {"display": "Alpha", "home_dir": "/srv/convivy/alpha",
+                  "repos": ["alpha"],
+                  "activation_lanes": ["daytime", "commercial", "overnight"]},
+        "beta": {"display": "Beta", "home_dir": "/srv/convivy/beta",
+                 "repos": ["beta"],
+                 "activation_lanes": ["daytime", "commercial", "overnight"]},
+        "epsilon": {"display": "Epsilon", "home_dir": "/srv/convivy/epsilon",
+                    "repos": ["epsilon"], "activation_lanes": ["daytime", "overnight"]},
+        "bosun": {"display": "Bosun", "home_dir": "/srv/convivy/agent-platform",
+                  "repos": ["agent-platform"], "activation_lanes": ["daytime"]},
+        "example-commercial": {"display": "Example General",
+                               "home_dir": "/srv/convivy/example-commercial",
+                               "repos": ["example-commercial"],
+                               "activation_lanes": ["commercial"],
+                               "company_workspace": True},
+    })
+    rows = {row[0]: row for row in R._registry_rows()}
+    assert rows["alpha"] == ("alpha", "Alpha", "/srv/convivy/alpha",
+                             ["daytime", "commercial", "overnight"])
+    assert rows["beta"] == ("beta", "Beta", "/srv/convivy/beta",
+                            ["daytime", "commercial", "overnight"])
+    assert rows["epsilon"] == ("epsilon", "Epsilon", "/srv/convivy/epsilon",
+                               ["daytime", "overnight"])
+    assert rows["agent-platform"] == ("agent-platform", "Bosun",
+                                      "/srv/convivy/agent-platform", ["daytime"])
+    assert rows["example-commercial"] == ("example-commercial", "Example General",
+                                          "/srv/convivy/example-commercial", ["commercial"])
+
+
+# ---------------------------------------------------------------------------
+# The company-level commercial workspace's launch alias (CQ-171 slice 6,
+# replacing _COMMERCIAL_SLUG)
+# ---------------------------------------------------------------------------
+
+def test_launch_command_applies_commercial_aliases_to_the_company_workspace(tmp_path, monkeypatch):
+    _write_registry(tmp_path, monkeypatch, {
+        "example-commercial": {"repos": ["example-commercial"], "company_workspace": True},
+    })
+    launch = R._launch_command("positioning-strategist", "/srv/convivy/example-commercial",
+                               "example-commercial")
+    assert launch == "cd /srv/convivy/example-commercial && co"
+
+
+def test_launch_command_does_not_apply_commercial_aliases_to_a_per_product_workspace(tmp_path, monkeypatch):
+    """A per-product `<product>-commercial` workspace carries no
+    `company_workspace` field, so it uses the ordinary product aliases
+    (none of which name `positioning-strategist`), not the company-wide
+    commercial alias set."""
+    _write_registry(tmp_path, monkeypatch, {
+        "example-commercial": {"repos": ["example-commercial"], "company_workspace": True},
+        "alpha": {"repos": ["alpha", "alpha-commercial"]},
+    })
+    launch = R._launch_command("positioning-strategist", "/srv/convivy/alpha-commercial",
+                               "alpha-commercial")
+    assert launch == "cd /srv/convivy/alpha-commercial && co positioning-strategist"
+
+
+def test_launch_command_applies_no_commercial_alias_with_no_company_workspace_marked(tmp_path, monkeypatch):
+    """Fails closed: with no unit marked `company_workspace`, nothing gets
+    the company-wide alias set, even a repo spelled like the historical
+    literal."""
+    _write_registry(tmp_path, monkeypatch, {
+        "example-commercial": {"repos": ["example-commercial"]},
+    })
+    launch = R._launch_command("positioning-strategist", "/srv/convivy/example-commercial",
+                               "example-commercial")
+    assert launch == "cd /srv/convivy/example-commercial && co positioning-strategist"
+
+
+def test_launch_command_applies_no_commercial_alias_with_more_than_one_company_workspace_marked(tmp_path, monkeypatch):
+    """Fails closed: two units marked `company_workspace` is ambiguous, so
+    neither gets the company-wide alias set."""
+    _write_registry(tmp_path, monkeypatch, {
+        "example-commercial": {"repos": ["example-commercial"], "company_workspace": True},
+        "alpha": {"repos": ["alpha"], "company_workspace": True},
+    })
+    launch = R._launch_command("positioning-strategist", "/srv/convivy/example-commercial",
+                               "example-commercial")
+    assert launch == "cd /srv/convivy/example-commercial && co positioning-strategist"

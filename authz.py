@@ -498,9 +498,10 @@ def system_identity(name: str, products: frozenset[str]) -> Identity:
     grants rather than as something that happens.** It was granted for the
     Gmail capture, which set privacy_class="customer" on every row it wrote;
     that job retired on 2026-09-16 when the operator moved capture to the Signals
-    product. `github_capture` is the only system-kind job left, and it sets no
-    privacy_class at all (its rows default to internal, signal_capture_api.py)
-    and reads no signals — it only POSTs. The grant is left in place because
+    product. `deploy_watch.py` is the only system-kind job left, posting
+    `deploy_failure` signals on the capture token now that the GitHub capture
+    has retired to the Keel (CQ·111). It sets no privacy_class (its rows
+    default to internal, signal_capture_api.py) and reads no signals. The grant is left in place because
     removing a capability is a separate decision from retiring its one
     consumer; whoever takes that decision should start here.
 

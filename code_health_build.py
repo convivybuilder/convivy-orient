@@ -52,18 +52,41 @@ HISTORY = CONVIVY / "agent-runs" / "scorecard" / "health-history.jsonl"
 TREND_METRICS = ("ci_pass_rate", "test_count", "coverage", "open_prs",
                  "oldest_open_days", "merged_recent", "reverts_recent")
 
-# (repo, kind). kind drives the product/internal filter.
-REPOS = [
-    ("vivy", "product"),
-    ("constance", "product"),
-    ("sous-chef", "product"),
-    ("selector", "product"),
-    ("agent-platform", "internal"),
-    ("knowledge", "internal"),
-    ("convivy-orient", "internal"),
-    ("hollis", "internal"),
-    ("convivy-app-kit", "internal"),
-]
+# REPOS is (repo, kind): kind drives the product/internal filter. Derived
+# from the registry (CQ-171 slice 5, the steward's registry-fields ruling):
+# WHICH repos get a health row is a unit's own `code_health` array of its
+# own repo names; the product/internal split is "product" when that unit
+# links a product in `_products`, "internal" otherwise. That flips at least
+# one repo from "internal" to "product" relative to the old literal — its
+# registry unit carries its own `_products` entry, same as several other
+# product repos above; the old literal's "internal" tag was a pre-registry
+# classification quirk this list carried since the repo was added (commit
+# aa41c1b), not a distinction the registry itself draws. `_registry_repos()`
+# below does the derivation; an unreadable registry answers no repos, never
+# a stale literal list.
+def _registry_repos() -> list[tuple[str, str]]:
+    try:
+        unit_map = crew_registry.units()
+        product_keys = set(crew_registry.products())
+        harvested = crew_registry.code_health_repos()
+    except crew_registry.RegistryUnavailable:
+        return []
+    out: list[tuple[str, str]] = []
+    for repo, slug in harvested:
+        unit = unit_map.get(slug, {})
+        kind = "product" if set(unit.get("products") or ()) & product_keys else "internal"
+        out.append((repo, kind))
+    return out
+
+
+def __getattr__(name: str):
+    """PEP 562: `REPOS` resolves fresh on every access rather than once at
+    import (platform decision 0098's "resolve per read, not once at
+    import"), matching `build.PRODUCT_ORDER`'s own pattern."""
+    if name == "REPOS":
+        return _registry_repos()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 CI_WINDOW = 20      # recent main runs to compute the pass-rate over
 WINDOW_DAYS = 30    # reverts + merged-throughput window
@@ -305,7 +328,7 @@ def coverage_pct(repo_full: str) -> float | None:
 
 def harvest(now: datetime) -> list[dict]:
     rows = []
-    for repo, kind in REPOS:
+    for repo, kind in _registry_repos():
         full = f"convivy/{repo}"
         # by workflow, NOT --branch main: the products run CI on PR branches
         # (pull_request), so a main-only filter would show them as having no CI.

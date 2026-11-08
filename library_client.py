@@ -53,7 +53,7 @@ import machine_sample
 
 # TWO CREDENTIALS, AND KEEPING THEM APART IS THIS FILE'S JOB (ADR-0038).
 #
-# Same convention `github_capture` uses for its own bearer token: a
+# Same convention as Orient's capture token: a
 # plain-text file under ~/.orient-control/, 0600, never committed.
 #
 # `TOKEN_FILE` is Orient's AGENT credential and carries every ordinary read. It
@@ -117,6 +117,12 @@ TIMEOUT = 5.0
 # Matches the Library's own MAX_PAGE, so every request asks for as much as the
 # Library will ever hand back in one page.
 MAX_PAGE = 200
+
+# The Library's MAX_OFFSET: a list request past it is refused with 400 rather
+# than clamped. The ledger crossed it on 2026-10-25 and the Spending page
+# stopped rendering, so `list_ledger_entries` splits a larger ledger into date
+# windows that each page within it.
+MAX_OFFSET = 10_000
 
 
 def _token() -> str:
@@ -289,7 +295,7 @@ def _iso(raw: str | None) -> dt.datetime | None:
 
 def _request(path: str, params: dict | None = None, *,
              human_reserved: bool = False, json_body: dict | None = None,
-             method: str | None = None) -> dict:
+             method: str | None = None, text: bool = False) -> dict | str:
     """One request against the Library. Raises on any failure rather than
     returning a default — see the module docstring.
 
@@ -311,6 +317,10 @@ def _request(path: str, params: dict | None = None, *,
     the one shape neither covers: a DELETE that carries a JSON body (the ack
     withdrawal route).
 
+    `text` returns the body decoded as UTF-8 rather than parsed as JSON, for
+    the one route that answers plain text (`GET /signals/{id}/blob`, a
+    `PlainTextResponse` in the Library).
+
     **The credential check happens HERE rather than at an entry point somebody
     calls first**, for the reason the Library puts protocol negotiation in a
     middleware rather than on each route: the check a new read path can silently
@@ -331,7 +341,8 @@ def _request(path: str, params: dict | None = None, *,
         method=method or None)
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-            return json.loads(resp.read())
+            body = resp.read()
+            return body.decode("utf-8") if text else json.loads(body)
     except TimeoutError:
         _log_timeout(path, method=method, json_body=json_body)
         raise
@@ -456,12 +467,13 @@ def probe_route(path: str, *, params: dict | None = None) -> int | None:
     return status
 
 
-def _page_all(path: str, key: str, params: dict | None = None) -> list[dict]:
+def _page_all(path: str, key: str, params: dict | None = None, *,
+              start: int = 0) -> list[dict]:
     """Every row behind a paginated list route — see the module docstring on
     why a single request is not enough. `params` are filters carried on every
-    page."""
+    page; `start` skips rows a caller already read."""
     rows: list[dict] = []
-    offset = 0
+    offset = start
     while True:
         page = _request(path, {**(params or {}), "limit": MAX_PAGE, "offset": offset})
         page_rows = page[key]
@@ -471,9 +483,10 @@ def _page_all(path: str, key: str, params: dict | None = None) -> list[dict]:
         offset += len(page_rows)
 
 
-def _not_found(path: str) -> dict | None:
+def _not_found(path: str, *, human_reserved: bool = False,
+               text: bool = False) -> dict | str | None:
     try:
-        return _request(path)
+        return _request(path, human_reserved=human_reserved, text=text)
     except urllib.error.HTTPError as e:
         if e.code == 404:
             return None
@@ -1028,8 +1041,15 @@ def _signal_record(raw: dict) -> SignalRecord:
         stamp_only=bool(raw_body.strip()) and not body.strip())
 
 
-def _page_signals(params: dict, *, cap: int | None) -> list[dict]:
+def _page_signals(params: dict, *, cap: int | None, human_reserved: bool = False) -> list[dict]:
     """Signal rows matching `params`, in the order the caller asked for.
+
+    `human_reserved` carries the APPROVED-CLIENT credential instead of the
+    agent one, for the one wall that is per-credential rather than per-row:
+    a `kind: post_draft` row is invisible to the agent credential outright
+    (ADR-0038's `signal.post_draft`), so a caller that needs to read one back
+    — `bin/copy_posts_to_archives.py --verify` — has to ask under the
+    credential that can see it.
 
     `cap`, unlike `_page_all`'s unconditional page-to-completion, stops once
     `cap` rows are in hand. Every signal-reading builder wants a bounded top-N
@@ -1086,7 +1106,7 @@ def _page_signals(params: dict, *, cap: int | None) -> list[dict]:
             page_params["offset"] = len(rows)
         else:
             page_params["cursor"] = cursor
-        page = _request("/signals", page_params)
+        page = _request("/signals", page_params, human_reserved=human_reserved)
         page_rows = page["signals"]
         rows.extend(page_rows)
         if not page["truncated"]:
@@ -1113,7 +1133,7 @@ def _page_signals(params: dict, *, cap: int | None) -> list[dict]:
 def list_signals(*, source: list[str] | None = None, kind: list[str] | None = None,
                   stream: list[str] | None = None,
                   product: str | None = None, order: str | None = None,
-                  cap: int | None = None) -> list[SignalRecord]:
+                  cap: int | None = None, human_reserved: bool = False) -> list[SignalRecord]:
     """Signal rows matching an optional `source`/`kind`/`stream`/`product`
     filter (`source`/`kind`/`stream` each repeatable and ORed within itself,
     `product` a single value — `GET /signals`'s own params), in `order`
@@ -1132,7 +1152,14 @@ def list_signals(*, source: list[str] | None = None, kind: list[str] | None = No
     No privacy filter: privacy is the Library's wall — Orient's credential
     holds no `signal.customer` capability, so a customer-class row never
     reaches here, the same way it never reached the old `internal`-filtered ORM
-    query."""
+    query.
+
+    `human_reserved` defaults False, matching every existing caller, which
+    stays on the agent credential. Pass it True to read a `kind: post_draft`
+    row, which the agent credential never sees at all (ADR-0038) — the one
+    caller that needs this today is `bin/copy_posts_to_archives.py --verify`,
+    reading back a draft revision it wrote under the approved-client
+    credential."""
     params: dict = {}
     if source:
         params["source"] = source
@@ -1144,7 +1171,7 @@ def list_signals(*, source: list[str] | None = None, kind: list[str] | None = No
         params["product"] = product
     if order:
         params["order"] = order
-    return [_signal_record(r) for r in _page_signals(params, cap=cap)]
+    return [_signal_record(r) for r in _page_signals(params, cap=cap, human_reserved=human_reserved)]
 
 
 def get_signal(signal_id: str) -> SignalRecord | None:
@@ -1156,6 +1183,22 @@ def get_signal(signal_id: str) -> SignalRecord | None:
     if raw is None:
         return None
     return _signal_record(raw)
+
+
+def get_signal_blob(signal_id: str, *, human_reserved: bool = False) -> str | None:
+    """The full text behind one signal's `content` blob — `GET
+    /signals/{id}/blob` — for a caller that already has the signal and needs
+    its full length, not the short preview `body` carries.
+
+    None collapses the same cases `get_signal` does (missing, out of scope)
+    plus a signal that was never given a `content` blob at write time.
+
+    `human_reserved` carries the APPROVED-CLIENT credential, needed to read a
+    `kind: post_draft` row's blob behind the same `signal.post_draft` wall
+    (ADR-0038) that already gates the row itself — pass the same value the
+    signal was written or read under."""
+    return _not_found(f"/signals/{urllib.parse.quote(signal_id, safe='')}/blob",
+                      human_reserved=human_reserved, text=True)
 
 
 @dataclass
@@ -1186,7 +1229,20 @@ class FinishedRun:
     directories for those, waiting on the Bosun's record to carry `crew`,
     `purpose` and `duration`. They're read here because the signal already
     carries them and a partial record would be a second thing to remember to
-    widen later."""
+    widen later.
+
+    `model_resolved` and `exit_status` were added for CQ·156 (the model
+    comparison page, issue_01M57NH489EASKMATJ8QFED5EC): `model` is the
+    setting in force when the run was dispatched, `model_resolved` is what it
+    actually ran on, and a run whose model differs from the current setting
+    is counted under `model_resolved`. `exit_status` is pulled out of
+    `outcome` the same way `cost.usd` is pulled out of `cost`: `outcome` is
+    the signal's own raw `{"exit_status": ..., "terminal_reason": ...}`
+    dict, carried through unvalidated the way `cost.tokens`/`cost.by_model`
+    are, because `exit_status` is the one field of it this repo actually
+    reads. Both `outcome` and `exit_status` default to `None` so a
+    `FinishedRun` built before this change (every existing direct
+    construction in this repo's own tests) keeps working unchanged."""
 
     signal_id: str
     product: str
@@ -1196,9 +1252,11 @@ class FinishedRun:
     work_item: str | None
     model: str | None
     cost: FinishedRunCost | None
-    outcome: str | None
+    outcome: dict | None
     produced_at: dt.datetime | None
     ingested_at: dt.datetime
+    model_resolved: str | None = None
+    exit_status: str | None = None
 
 
 def _finished_run(sig: SignalRecord) -> FinishedRun:
@@ -1209,12 +1267,15 @@ def _finished_run(sig: SignalRecord) -> FinishedRun:
         cost = FinishedRunCost(
             usd=usd if isinstance(usd, (int, float)) else None,
             tokens=raw_cost.get("tokens"), by_model=raw_cost.get("by_model"))
+    raw_outcome = sig.meta.get("outcome")
+    exit_status = raw_outcome.get("exit_status") if isinstance(raw_outcome, dict) else None
     return FinishedRun(
         signal_id=sig.id, product=sig.product, run=sig.meta.get("run"),
         persona=sig.meta.get("persona"), repo=sig.meta.get("repo"),
         work_item=sig.meta.get("work_item"), model=sig.meta.get("model"),
-        cost=cost, outcome=sig.meta.get("outcome"),
-        produced_at=sig.produced_at, ingested_at=sig.ingested_at)
+        cost=cost, outcome=raw_outcome,
+        produced_at=sig.produced_at, ingested_at=sig.ingested_at,
+        model_resolved=sig.meta.get("model_resolved"), exit_status=exit_status)
 
 
 def list_finished_runs(since: dt.datetime, until: dt.datetime | None = None) -> list[FinishedRun]:
@@ -1391,8 +1452,10 @@ def signal_acks(signal_ids: list[str], *, acting_human: str) -> set[str]:
 def create_signal(*, source: str, kind: str, actor: str, product: str,
                   body: str = "", stream: str | None = None, refs: dict | None = None,
                   meta: dict | None = None, privacy_class: str | None = None,
-                  dedup_key: str | None = None,
-                  acting_human: str | None = None) -> tuple[str, bool, SignalRecord | None]:
+                  content: str | None = None,
+                  dedup_key: str | None = None, produced_at: str | None = None,
+                  acting_human: str | None = None,
+                  human_reserved: bool = False) -> tuple[str, bool, SignalRecord | None]:
     """Capture one Archives record — `POST /signals` — and return `(id,
     idempotent, existing)`.
 
@@ -1430,8 +1493,8 @@ def create_signal(*, source: str, kind: str, actor: str, product: str,
     when `idempotent` is True, always `None` when it is False.
 
     A caller that only wants the id can ignore both. A caller distinguishing
-    "created" from "duplicate" — `github_capture.py`'s overlap-window poller,
-    the manual capture form's own double-submit guard — needs `idempotent`:
+    "created" from "duplicate" — the manual capture form's own double-submit
+    guard — needs `idempotent`:
     collapsing both outcomes to a bare id would make a legitimate retry
     indistinguishable from a fresh row, which is exactly the regression a
     round of review caught in `signal_capture_api.py` (a hard error on every
@@ -1448,6 +1511,31 @@ def create_signal(*, source: str, kind: str, actor: str, product: str,
     review, PR #179 round 5): a caller could distinguish "collision I can't
     see" from "no collision at all" by how long the 409 took, even with the
     response body byte-identical either way.
+
+    `produced_at` is an RFC-3339 string, absent by default
+    so an ordinary capture keeps the Library's own "now" rather than claiming
+    a past moment it was not written for.
+
+    `content` is a separate blob the Library stores with no length bound,
+    distinct from `body` and from `meta` — sent only when given, so a
+    caller with nothing full-length to carry (every existing one before this
+    parameter existed) sends the same payload as before. `meta` travels with
+    every row a listing returns; `content` does not, and is read back one
+    signal at a time through `get_signal_blob`. A caller with a whole
+    document to attach (`bin/copy_posts_to_archives.py`'s Markdown) belongs
+    here, not folded into `meta`, where it would ride along on every listing
+    that returns the row.
+
+    **`human_reserved` carries the APPROVED-CLIENT credential independently of
+    `acting_human`.** The two are orthogonal: `acting_human` attests a
+    specific verified person performed this act, while `human_reserved`
+    alone just says which bearer token goes out. A caller writing a `kind:
+    post_draft` row needs the approved-client credential (ADR-0038's
+    `signal.post_draft`) with no verified person to attest — an automated
+    one-time migration, not a session a human drove — so it passes
+    `human_reserved=True` and leaves `acting_human` absent. `acting_human`
+    still forces the client credential on its own, matching every caller
+    before this parameter existed.
     """
     body_json = {"source": source, "kind": kind, "actor": actor, "product": product,
                 "body": body}
@@ -1457,10 +1545,14 @@ def create_signal(*, source: str, kind: str, actor: str, product: str,
         body_json["refs"] = refs
     if meta is not None:
         body_json["meta"] = meta
+    if content is not None:
+        body_json["content"] = content
     if privacy_class is not None:
         body_json["privacy_class"] = privacy_class
     if dedup_key is not None:
         body_json["dedup_key"] = dedup_key
+    if produced_at is not None:
+        body_json["produced_at"] = produced_at
     if acting_human is not None:
         if not acting_human.strip():
             raise ValueError(
@@ -1470,7 +1562,7 @@ def create_signal(*, source: str, kind: str, actor: str, product: str,
                 "capturing as the agent")
         body_json["acting_human"] = acting_human
     raw = _request("/signals", json_body=body_json,
-                   human_reserved=acting_human is not None)
+                   human_reserved=acting_human is not None or human_reserved)
     idempotent = bool(raw.get("idempotent"))
     return raw["id"], idempotent, (_signal_record(raw) if idempotent else None)
 
@@ -1578,6 +1670,96 @@ def approve_epic(issue_id: str, *, acting_human: str,
         acting_human=approval.get("acting_human"),
         course_id=approval.get("course_id"),
         position=approval.get("position"))
+
+
+@dataclass
+class EpicDecline:
+    """What `POST /items/{id}/decline` records: the client that declined, the
+    human it acted for, the reason, and the cascade it ran."""
+
+    declined_by: str | None
+    acting_human: str | None
+    reason: str | None
+    children_resolved: list[str]
+    epics_declined: list[str]
+
+
+def decline_epic(issue_id: str, *, acting_human: str,
+                 reason: str | None = None) -> EpicDecline:
+    """Decline a proposed epic: the work it describes will not happen —
+    `POST /items/{id}/decline`, under the APPROVED-CLIENT credential, gated
+    exactly like `approve_epic` (`epic.approve` and `course.write`, plus the
+    attested `acting_human`).
+
+    **ONLY A `proposed` EPIC IS DECLINED.** An approved epic, or one already
+    declined or unassessed, is refused with 409 and the Library's own wording
+    — `_refusal_message` carries it, the same way `approve_epic` does.
+
+    The Library cascades the decline over the whole subtree in one
+    transaction: every open, claimed or pr-open work item beneath it resolves
+    `wontfix` with `reason` as its outcome note, and every sub-epic still
+    `proposed` or unassessed is declined with it. An approved epic anywhere in
+    the subtree refuses the whole decline before writing anything.
+
+    `acting_human` must be the email Orient verified through Cloudflare
+    Access, never a value off the request body, the same rule `approve_epic`
+    states. Raises `EpicApprovalRefused` on a 4xx and lets anything else
+    propagate as the transport error it is."""
+    body: dict = {"acting_human": acting_human}
+    if reason:
+        body["reason"] = reason
+    try:
+        raw = _request(f"/items/{urllib.parse.quote(issue_id, safe='')}/decline",
+                       json_body=body, human_reserved=True)
+    except urllib.error.HTTPError as e:
+        if 400 <= e.code < 500:
+            raise EpicApprovalRefused(e.code, _refusal_message(e, "the decline")) from e
+        raise
+    decline = (raw or {}).get("decline") or {}
+    return EpicDecline(
+        declined_by=decline.get("declined_by"),
+        acting_human=decline.get("acting_human"),
+        reason=decline.get("reason"),
+        children_resolved=decline.get("children_resolved") or [],
+        epics_declined=decline.get("epics_declined") or [])
+
+
+@dataclass
+class EpicRepropose:
+    """What `POST /items/{id}/repropose` records: the client that
+    reproposed, the human it acted for, and the maturity the epic left."""
+
+    reproposed_by: str | None
+    acting_human: str | None
+    from_maturity: str | None
+
+
+def repropose_epic(issue_id: str, *, acting_human: str) -> EpicRepropose:
+    """Send an approved or declined epic back to `proposed` for another look
+    — `POST /items/{id}/repropose`, under the APPROVED-CLIENT credential,
+    gated exactly like `approve_epic`.
+
+    From `approved`, the epic leaves any live Course it sits on. From
+    `declined`, it returns to `proposed` and reopens nothing — the children
+    the decline resolved `wontfix` stay exactly as they are. Anything else
+    (`proposed` already, or unassessed) is refused with 409.
+
+    `acting_human` must be the email Orient verified through Cloudflare
+    Access, the same rule `approve_epic` states. Raises `EpicApprovalRefused`
+    on a 4xx and lets anything else propagate as the transport error it is."""
+    body: dict = {"acting_human": acting_human}
+    try:
+        raw = _request(f"/items/{urllib.parse.quote(issue_id, safe='')}/repropose",
+                       json_body=body, human_reserved=True)
+    except urllib.error.HTTPError as e:
+        if 400 <= e.code < 500:
+            raise EpicApprovalRefused(e.code, _refusal_message(e, "the repropose")) from e
+        raise
+    repropose = (raw or {}).get("repropose") or {}
+    return EpicRepropose(
+        reproposed_by=repropose.get("reproposed_by"),
+        acting_human=repropose.get("acting_human"),
+        from_maturity=repropose.get("from_maturity"))
 
 
 def _refusal_message(e: "urllib.error.HTTPError", act: str = "the approval") -> str:
@@ -2119,6 +2301,82 @@ def list_reference_topics() -> list[ReferenceTopic]:
     return [_reference_topic(r) for r in raw["topics"]]
 
 
+# --- Knowledge-commit history (CQ·165, issue_01M57NS8PJRTWJ9H6ZHHYB3BFN) ---
+#
+# `GET /reference/history?project=<p>&limit=&offset=` — one row per document
+# changed in one commit, newest first. `limit`/`offset` count COMMITS, not
+# rows: one commit touching several documents returns several rows, so a
+# caller renders by grouping rows on `commit` rather than treating `limit` as
+# a row count.
+#
+# **Orient's Library token is unbound by design (library#296, review-passed,
+# merge pending): this route returns every project's history with no
+# viewer-scope filter of its own.** Orient's own viewer scope is the only
+# fence, so a caller must check it — same as `project_build.detail_html`
+# already does before `_fetch` runs — before ever calling this for a given
+# project; this module cannot and does not re-check it.
+
+
+@dataclass
+class KnowledgeHistoryRow:
+    """One `/reference/history` row: one document changed in one commit.
+
+    **`doc_id` is `None` when the changed path has no index row** — a
+    deleted document, the old half of a rename, or a file the index never
+    holds at all (`projects/*/profiles/*.yaml` measured on the live route,
+    2026-10-18) — and `source_ref` carries the path instead. Render that case
+    from `source_ref` and `status`, with no document link, and never call it
+    a deletion unless `status` itself says `deleted`: a modified profile file
+    hits this same null-`doc_id` shape (the live route returned exactly that
+    for `projects/convivy-orient/profiles/daytime.yaml`, `status: modified`,
+    on 2026-10-18)."""
+
+    commit: str
+    committed_at: dt.datetime | None
+    doc_id: str | None
+    title: str | None
+    status: str
+    subject: str
+    source_ref: str | None = None
+
+
+def _knowledge_history_row(raw: dict) -> KnowledgeHistoryRow:
+    return KnowledgeHistoryRow(
+        commit=raw["commit"], committed_at=_iso(raw.get("committed_at")),
+        doc_id=raw.get("doc_id"), title=raw.get("title"), status=raw["status"],
+        subject=raw["subject"], source_ref=raw.get("source_ref"))
+
+
+def list_knowledge_history(project: str, *, limit: int) -> list[KnowledgeHistoryRow]:
+    """A project's recent knowledge-document commits, newest first — `GET
+    /reference/history?project=<project>&limit=<limit>`. The caller must
+    already have checked that the viewer's own scope covers `project` (see
+    the section comment above); this function does not re-check it.
+
+    **A 400 is collapsed into an empty list here**, never raised. The route
+    answers 400 both for a project it has never heard of and (per this
+    module's unbound credential) for one this call should not have been made
+    for in the first place — the same not-found/out-of-scope collapse
+    `get_issue_item` documents, made for the same reason: a caller able to
+    tell the two apart could use it to confirm a project exists. The caller
+    renders an empty list as "no knowledge history for this project", which
+    is the right rendering for a genuinely quiet project too.
+
+    **Everything else raises, a 503 included** — the route's documented
+    answer for a git failure on the Library's side, which must read as
+    "unavailable" rather than "empty" (this module's own "failure is not
+    caught" rule, module docstring). The caller is expected to catch it and
+    render the section degraded, the same shape `_bead_doc`'s raise and
+    `project_build._fetch`'s catch already give the bead block."""
+    try:
+        raw = _request("/reference/history", {"project": project, "limit": limit})
+    except urllib.error.HTTPError as e:
+        if e.code == 400:
+            return []
+        raise
+    return [_knowledge_history_row(r) for r in raw["history"]]
+
+
 # --- Reference-document coordination (issue_01M0TKX6DW2E1TXGN9QT6K61J5 §4,
 # the option-C KB editor) ----------------------------------------------------
 #
@@ -2534,8 +2792,54 @@ def list_ledger_entries(*, product: str | None = None) -> list[LedgerEntry]:
     """Every spend entry, voided ones included, paged to completion. The route
     does no grouping, so a caller that totals a page set short of complete
     under-reports without any sign it did."""
-    params = {"product": product} if product else None
-    return [_ledger_entry(r) for r in _page_all("/ledger-entries", "entries", params)]
+    params = {"product": product} if product else {}
+    rows = _ledger_rows(params)
+    if rows is None:
+        # The unfiltered read already showed the whole ledger is past the cap,
+        # so split straight away rather than re-asking for the same rows as
+        # an all-days window.
+        rows = _split_window(params, dt.date(2000, 1, 1), dt.date(9999, 12, 31))
+    return [_ledger_entry(r) for r in rows]
+
+
+def _ledger_rows(params: dict) -> list[dict] | None:
+    """Every ledger row matching `params`, or None when there are more than
+    `MAX_OFFSET` lets a request reach. The first page is read either way, so
+    a ledger under the cap costs no extra request."""
+    first = _request("/ledger-entries", {**params, "limit": MAX_PAGE, "offset": 0})
+    if first["total"] > MAX_OFFSET:
+        return None
+    rows = list(first["entries"])
+    if first["truncated"]:
+        rows += _page_all("/ledger-entries", "entries", params, start=len(rows))
+    return rows
+
+
+def _ledger_window(params: dict, lo: dt.date, hi: dt.date) -> list[dict]:
+    """Every ledger row whose `day` is in [lo, hi], newer days first. A
+    window holding more rows than `MAX_OFFSET` lets a request reach is split
+    at its midpoint, newer half first. Within a window the route orders by
+    `at`, which can disagree with the Library's local `day` across midnight,
+    so the order is by day and not strictly by `at`; the one caller,
+    `dashboard_build._ledger_section`, groups the rows and is order-blind.
+    `day` is NOT NULL in the Library's schema, so every row falls in one
+    window."""
+    rows = _ledger_rows({**params, "from": lo.isoformat(), "to": hi.isoformat()})
+    if rows is not None:
+        return rows
+    return _split_window(params, lo, hi)
+
+
+def _split_window(params: dict, lo: dt.date, hi: dt.date) -> list[dict]:
+    """[lo, hi] read as its two halves, newer half first, for a window
+    already known to be past the cap."""
+    if lo == hi:
+        # One day cannot be split further, and recursing on it would not end.
+        raise RuntimeError(f"ledger day {lo} holds more entries than the Library's "
+                           f"offset cap of {MAX_OFFSET} lets a reader page")
+    mid = lo + (hi - lo) // 2
+    return (_ledger_window(params, mid + dt.timedelta(days=1), hi)
+            + _ledger_window(params, lo, mid))
 
 
 @dataclass
@@ -2546,7 +2850,14 @@ class Ledger:
     `per_run_cap_usd` bounds one admitted run's own spend rather than the
     project's running total (library #225, 2026-10-07); it takes no part in
     `state` or the warn/soft/hard ordering. Read with `.get` because a
-    Library predating #225 serves `caps` without that key."""
+    Library predating #225 serves `caps` without that key.
+
+    `total_usd` is the gateway lane alone, the spend the caps enforce.
+    `lanes` is every lane's total for `day`, gateway included, keyed by lane
+    name (`subscription` among them). The lanes are kept apart on purpose,
+    since only the gateway lane counts against a cap, so a caller shows them
+    side by side and never sums them. Read with `.get` because a Library that
+    serves no `lanes` still answers."""
 
     scope_kind: str
     scope_id: str
@@ -2557,6 +2868,7 @@ class Ledger:
     hard_cap_usd: float | None
     per_run_cap_usd: float | None
     state: str
+    lanes: dict[str, float] | None = None
 
 
 def list_ledgers() -> list[Ledger]:
@@ -2565,7 +2877,8 @@ def list_ledgers() -> list[Ledger]:
                    total_usd=r["total_usd"], warn_usd=r["caps"]["warn_usd"],
                    soft_cap_usd=r["caps"]["soft_cap_usd"],
                    hard_cap_usd=r["caps"]["hard_cap_usd"],
-                   per_run_cap_usd=r["caps"].get("per_run_cap_usd"), state=r["state"])
+                   per_run_cap_usd=r["caps"].get("per_run_cap_usd"), state=r["state"],
+                   lanes=r.get("lanes"))
             for r in _page_all("/ledgers", "ledgers")]
 
 

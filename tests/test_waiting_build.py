@@ -324,7 +324,7 @@ def test_hot_state_is_not_conveyed_by_colour_alone(monkeypatch):
 
 
 def _seed_issue(**kw):
-    base = dict(id=control_db.new_issue_id(), product="vivy", title="t", body="b",
+    base = dict(id=control_db.new_issue_id(), product="alpha", title="t", body="b",
                 type="bug", state="open", created_by="agent")
     base.update(kw)
     library_fake.seed_issue(**base)
@@ -381,7 +381,7 @@ def test_the_strip_carries_no_unplanned_epics_tile(no_library):
 
 def _seed_alert(body, age, **kw):
     base = dict(id=control_db.new_signal_id(), source="healthcheck", kind="alert",
-                actor="cron", ingested_by="cron", product="vivy", body=body,
+                actor="cron", ingested_by="cron", product="alpha", body=body,
                 ingested_at=control_db.utcnow() - age)
     base.update(kw)
     library_fake.seed_signal(**base)

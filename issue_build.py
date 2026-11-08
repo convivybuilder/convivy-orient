@@ -286,8 +286,8 @@ def _project_section(product: str, inner_html: str, count: int) -> str:
             f'</section>')
 
 
-# The label for items the backfill has not reached. Only vivy's queue carries
-# topics today, so on every other project this is the whole group — it says
+# The label for items the backfill has not reached. Only one project's queue
+# carries topics today, so on every other project this is the whole group — it says
 # "not recorded" rather than "other" because the difference between "this item
 # belongs to no area" and "nobody has said which area yet" is the whole
 # question a reader of a grouped queue is asking.
@@ -305,8 +305,9 @@ def _topic_groups(items: list) -> list[tuple[str, list]]:
 
     Groups are ordered largest first, then by label, matching how this page
     already orders its project sections. The untopiced group sorts last
-    whatever its size: on every project but vivy it holds everything, and
-    leading with it would bury the areas that are the point of the view.
+    whatever its size: on every project but the one whose queue carries
+    topics it holds everything, and leading with it would bury the areas
+    that are the point of the view.
 
     An item carrying several topics appears under each of them, so a card is
     never hidden from an area it belongs to. No item carries more than one
@@ -668,15 +669,22 @@ def _actions(item: library_client.IssueRecord) -> str:
     "Redirected" describe work that has been done or moved; a proposal has had
     neither, so offering them invited an outcome that could not be true.
 
-    - **Decline is the resolve route's `wontfix`**, relabelled for what the
-      act means on a proposal. The Library has no separate decline route, and
-      closing a proposal nobody will build is exactly what `wontfix` records.
-      It opens the same outcome-note panel, so the reason travels with it.
+    - **Decline is the Library's own decline route** (`POST /items/{id}/
+      decline`, `approve_api.decline_epic`, library#300, merged 2026-10-20).
+      It used to be the resolve route's `wontfix`, relabelled for what the
+      act means on a proposal — the Library has since grown a route of its
+      own, and resolve now refuses any epic that is not approved, so the old
+      path is a 409 wherever it is still called. Decline opens the same
+      outcome-note panel, so the reason travels with it, and like Approve it
+      is gated on `__CAN_APPROVE_EPIC__`: the Library's decline route needs
+      `epic.approve`, so a role without it can no longer close a proposal the
+      way the old resolve-based Decline let it.
     - **Approve is the operator's act**, on `approve_api`'s route — the same
       one the Chart House control calls, so there is one approval path rather
       than two. It is gated on `__CAN_APPROVE_EPIC__`, which the server fills
-      from the viewer's role; a role without `epic_approve` sees Decline alone.
-      Cosmetic, like every such token: `approve_api` refuses them regardless.
+      from the viewer's role; a role without `epic_approve` sees neither
+      Decline nor Approve. Cosmetic, like every such token: `approve_api`
+      refuses them regardless.
 
     - **Edit opens the epic's own editor** (the operator: "if it's possible to send it
       to the edit pane we should do that too"). It is a link to the epic's page
@@ -685,9 +693,15 @@ def _actions(item: library_client.IssueRecord) -> str:
       catches the click and opens the editor in place. Gated with Approve,
       since `epic.revise` is the same capability.
 
-    Which epics qualify is `put_forward`, the rule the Chart House reads too.
-    Every other item — a bug, a correction, an approved epic that is now real
-    work — keeps the four outcomes it had."""
+    **A DECLINED EPIC GETS REPROPOSE, AND NOTHING ELSE.** `put_forward` is
+    false once an epic is declined, so it falls out of the branch above; the
+    Library refuses both approve and resolve on a declined epic, so this
+    branch offers only `POST /items/{id}/repropose`
+    (`approve_api.repropose_epic`), gated the same way.
+
+    Which epics qualify as put forward is `put_forward`, the rule the Chart
+    House reads too. Every other item — a bug, a correction, an approved
+    epic that is now real work — keeps the four outcomes it had."""
     if item.type == ISSUE_TYPE_EPIC and put_forward(item):
         edit_href = escape(f"{_DETAIL_PREFIX}{quote(item.id, safe='')}#edit", quote=True)
         return ('<div class="actions" data-can-approve="__CAN_APPROVE_EPIC__">'
@@ -695,6 +709,11 @@ def _actions(item: library_client.IssueRecord) -> str:
                 ' data-kind="decline">Decline</button>'
                 f'<a class="btn edit" href="{edit_href}">Edit</a>'
                 '<button class="btn approve" data-act="approve">Approve</button>'
+                '<p class="approve-note" hidden></p>'
+                '</div>')
+    if item.type == ISSUE_TYPE_EPIC and (item.maturity or "").strip() == "declined":
+        return ('<div class="actions" data-can-approve="__CAN_APPROVE_EPIC__">'
+                '<button class="btn approve" data-act="repropose">Repropose</button>'
                 '<p class="approve-note" hidden></p>'
                 '</div>')
     return ('<div class="actions">'
@@ -856,7 +875,7 @@ def _log_issue_form(known_products: list[str]) -> str:
     <form class="capture-form card" id="logForm" hidden>
       <div class="cf-row">
         <label>Product
-          <input name="product" list="prodList" required maxlength="64" placeholder="constance">
+          <input name="product" list="prodList" required maxlength="64" placeholder="acme">
           <datalist id="prodList">{prods}</datalist>
         </label>
         <label>Severity
@@ -1406,7 +1425,7 @@ def _finding_html(finding) -> str:
 def _reviews_section(item: library_client.IssueRecord) -> str:
     """The linked pull request's reviews, read live from the Library's review
     record (issue_01M38316270TMDKT5MQSAANEM3), rather than from the GitHub
-    comments `github_capture.py` records as signals.
+    comments the Keel records as signals.
 
     One entry per role per reviewed commit, newest first; the route serves
     newest first, so the first record seen for a (role, commit) pair is the one
@@ -2003,10 +2022,12 @@ transition:transform .08s,background .15s,border-color .15s;}
    exists for, and Decline beside it keeps the outline Won't do already has. */
 .ops .btn.approve{background:var(--good);color:#fff;border-color:transparent;font-weight:600;}
 .ops .btn.approve:disabled{opacity:.6;cursor:default;}
-/* **The role gate hides Approve and leaves Decline**, rather than hiding the row:
-   a full-tier member without epic_approve can still close a proposal, which is
-   what the resolve route already lets them do. Cosmetic — approve_api refuses
-   a role without the capability whatever the page renders. */
+/* **The role gate hides Decline, Approve and Edit together.** The Library's
+   decline and repropose routes need `epic.approve`, same as approve and
+   revise, so a role without it has no act left to offer on a put-forward or
+   declined epic. Cosmetic — approve_api refuses a role without the
+   capability whatever the page renders. */
+.ops .actions[data-can-approve="false"] .btn.wontfix,
 .ops .actions[data-can-approve="false"] .btn.approve,
 .ops .actions[data-can-approve="false"] .btn.edit{display:none;}
 /* Edit is a link (it navigates from the queue), styled as the row's buttons. */
@@ -2228,13 +2249,65 @@ _JS = r"""
         row.querySelectorAll('button').forEach(function(b){b.disabled=false;});
         note.className='approve-note err';note.textContent='Couldn\'t reach the server.';
         note.hidden=false;});}
+  // **DECLINE IS THE LIBRARY'S OWN ROUTE** (`approve_api.decline_epic`,
+  // library#300), reached through the same outcome-note directive the
+  // generic resolve buttons open. The Library leaves the epic's own `state`
+  // open and sets only `maturity`, so this follows doApprove's pattern
+  // rather than doResolve's: the card stays, its buttons are replaced by a
+  // record of the act, and a reload would show Repropose in their place.
+  function doDeclineEpic(card,dir,reason){
+    var id=card.dataset.id,row=card.querySelector('.actions'),note=row.querySelector('.approve-note');
+    card.querySelectorAll('button').forEach(function(b){b.disabled=true;});
+    note.hidden=true;
+    fetch('/api/epics/'+encodeURIComponent(id)+'/decline',{
+      method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(reason?{reason:reason}:{})
+    }).then(function(r){return r.json().catch(function(){return {};})
+        .then(function(j){return {ok:r.ok,body:j};});})
+      .then(function(res){
+        if(res.ok){
+          dir.classList.remove('open');
+          row.querySelectorAll('button').forEach(function(b){b.remove();});
+          note.className='approve-note ok';note.textContent='Declined.';note.hidden=false;
+          showToast('✕ declined');return;}
+        card.querySelectorAll('button').forEach(function(b){b.disabled=false;});
+        note.className='approve-note err';
+        note.textContent=(res.body&&res.body.error)||'Couldn\'t decline this epic.';
+        note.hidden=false;})
+      .catch(function(){
+        card.querySelectorAll('button').forEach(function(b){b.disabled=false;});
+        note.className='approve-note err';note.textContent='Couldn\'t reach the server.';
+        note.hidden=false;});}
+  // Reproposing sends a declined (or approved) epic back to `proposed`; a
+  // reload would then show it with Decline and Approve again, the same
+  // record-of-the-act pattern doApprove uses in the meantime.
+  function doRepropose(card,btn){
+    var id=card.dataset.id,row=btn.closest('.actions'),note=row.querySelector('.approve-note');
+    row.querySelectorAll('button').forEach(function(b){b.disabled=true;});
+    note.hidden=true;
+    fetch('/api/epics/'+encodeURIComponent(id)+'/repropose',{method:'POST',credentials:'same-origin'})
+      .then(function(r){return r.json().catch(function(){return {};})
+        .then(function(j){return {ok:r.ok,body:j};});})
+      .then(function(res){
+        if(res.ok){
+          row.querySelectorAll('button').forEach(function(b){b.remove();});
+          note.className='approve-note ok';note.textContent='Reproposed.';note.hidden=false;
+          showToast('↺ reproposed');return;}
+        row.querySelectorAll('button').forEach(function(b){b.disabled=false;});
+        note.className='approve-note err';
+        note.textContent=(res.body&&res.body.error)||'Couldn\'t repropose this epic.';
+        note.hidden=false;})
+      .catch(function(){
+        row.querySelectorAll('button').forEach(function(b){b.disabled=false;});
+        note.className='approve-note err';note.textContent='Couldn\'t reach the server.';
+        note.hidden=false;});}
   // Update note-label text and make textarea required when resolution is 'redirected'.
   function syncDirective(dir,resolution,kind){
     var label=dir.querySelector('.note-label');
     var ta=dir.querySelector('textarea');
-    // A declined PROPOSAL is closed as wontfix, but "what fixed it" cannot be
-    // true of work that was never started, so the prompt says what the note
-    // is for: the crew that proposed it reads this reason.
+    // A declined proposal is not resolved at all — it is the Library's own
+    // decline route, carrying this text as `reason` — so the prompt says
+    // what the note is for: the crew that proposed it reads this reason.
     if(label){label.textContent=resolution==='redirected'?
       'Directive — what should happen next (required)':
       kind==='decline'?'Why it is declined — the crew that proposed it reads this (optional)':
@@ -2244,6 +2317,7 @@ _JS = r"""
     var card=btn.closest('.card');if(!card)return;var act=btn.dataset.act;
     var dir=card.querySelector('.directive');
     if(act==='approve'){doApprove(card,btn);return;}
+    if(act==='repropose'){doRepropose(card,btn);return;}
     if(act==='resolve'){var res=btn.dataset.resolution;dir.dataset.resolution=res;
       dir.dataset.kind=btn.dataset.kind||'';
       syncDirective(dir,res,btn.dataset.kind);dir.classList.add('open');
@@ -2263,6 +2337,7 @@ _JS = r"""
         showToast('A directive is required for redirected',true);
         dir.querySelector('textarea').focus();
         return;}
+      if(dir.dataset.kind==='decline'){doDeclineEpic(card,dir,t||null);return;}
       doResolve(card,res,t||null,dupeOf,dir.dataset.kind);}});
   recount();
 })();

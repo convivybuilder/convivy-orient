@@ -44,7 +44,7 @@ def test_safe_http_url_rejects_anything_not_http(bad):
     assert safe_http_url(bad) is None
 
 
-@pytest.mark.parametrize("good", ["https://github.com/convivy/vivy/pull/1",
+@pytest.mark.parametrize("good", ["https://github.com/convivy/alpha/pull/1",
                                   "http://example.test/x"])
 def test_safe_http_url_allows_http_and_https(good):
     assert safe_http_url(good) == good

@@ -1,11 +1,12 @@
 #!/usr/bin/env python3.11
 """The /engineering/e2e page — CI test results on the team site (ARCH-353 Phase A).
 
-The first Slack-retirement re-homing: the vivy e2e stage-smoke result used to
-post to #vivy-e2e; now a poller on the mini (bin/ci_result_fetch.py, in the
-Library repo) fetches CI conclusions with `gh api` and writes them to the
-Library's POST /signals under the ci-fetch-vivy identity, on a 15-minute timer
-(ADR-0045). This page reads those signals through library_client and renders
+The first Slack-retirement re-homing: one product's e2e stage-smoke result
+used to post to its own Slack channel; now a poller on the mini
+(bin/ci_result_fetch.py, in the Library repo) fetches CI conclusions with
+`gh api` and writes them to the Library's POST /signals under its own poller
+identity, on a 15-minute timer (ADR-0045). This page reads those signals
+through library_client and renders
 the latest run per (product, suite) as a pass/fail tile, with recent history
 below.
 
@@ -193,7 +194,7 @@ def _page(tiles_html: str, history_html: str, empty: bool, stalled_banner_html: 
     <div class="eyebrow-line"><span class="dot"></span>team.convivy.com / engineering / e2e</div>
     <h1>CI &amp; test results</h1>
     <p class="lede">The latest run per product and suite, live from the signal store. Green passed, red failed — the surface that replaced the Slack e2e post.</p>
-    <p class="scope-note">Only vivy runs below: it is the only end-to-end suite on the fleet. Every other repo runs per-PR CI instead, reported by the merge gate and <code>gh pr checks</code>, not by this page.</p>
+    <p class="scope-note">Only one product's runs show below: it is the only end-to-end suite on the fleet. Every other repo runs per-PR CI instead, reported by the merge gate and <code>gh pr checks</code>, not by this page.</p>
   </header>
   <div class="wrap">
     {stalled_banner_html}
